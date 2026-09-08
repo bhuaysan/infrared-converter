@@ -15,3 +15,8 @@ DerivedData/
 
 # macOS
 .DS_Store
+
+# Local RAW test fixtures. RAW files are large and usually not redistributable,
+# so they are provided per-machine. See RAW/README.md.
+RAW/*
+!RAW/README.md
