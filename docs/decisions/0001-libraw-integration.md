@@ -210,3 +210,33 @@ Decision 3 lists what LibRaw still performs. Two refinements:
   taken before that, so `RAWMetadata.Levels` describes the file, not the
   post-process state. This matters for the mosaic milestone, which will want
   the pre-process values.
+
+
+### A5 — Mosaic access, and what `unpack()` alone guarantees
+
+Decision 3 says the remaining obstacle to fully custom infrared processing is
+decoder-side demosaicing, and that removing it means consuming
+`imgdata.rawdata` instead of `dcraw_process` — "which the shim can grow without
+changing the Swift API". The shim has now grown exactly that, and the
+prediction held: the Swift API gained a *new* operation
+(`decodeMosaic(at:)` → `RAWMosaic`) rather than changing the existing one. The
+processed-RGB path is unchanged and remains as the preview and reference path.
+This is an implementation correction to that paragraph, not a change of
+decision.
+
+Two factual points this ADR did not previously state, both verified against
+the vendored 0.22.2 source rather than assumed:
+
+- **`unpack()` cannot be influenced by our output options.** `unpack()` and
+  every file in `src/decoders/` read no `imgdata.params` fields at all — only
+  `libraw_internal_data.internal_output_params`. So the parameter table in
+  Decision 3 (`user_mul`, `use_camera_wb`, `output_color`, `gamm`, `half_size`,
+  `user_flip`, …) governs `dcraw_process` exclusively and provably cannot
+  affect the mosaic.
+- **`unpack()` is not a pure bit-unpacker.** Several LibRaw decoders apply a
+  per-format linearisation curve inside `unpack()` (`RAW(row,col) = curve[...]`).
+  The mosaic is therefore documented as a *LibRaw-unpacked sensor sample*, and
+  deliberately never as a raw ADC value. This is the most upstream
+  representation LibRaw can give us, which is not the same as an untouched one.
+
+The concrete RAW-stage contract now lives in `docs/raw-pipeline.md`.

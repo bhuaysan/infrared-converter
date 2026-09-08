@@ -36,7 +36,8 @@ committed, so the fixture-backed suites skip themselves there.
 
 ## Current status
 
-Implemented: the RAW decoding boundary.
+Implemented: the RAW decoding boundary, and direct access to LibRaw's
+unpacked sensor mosaic.
 
 - Open a RAW file, decode it with LibRaw, and inspect metadata and pixel data
   through a Swift API that never exposes LibRaw.
@@ -44,8 +45,24 @@ Implemented: the RAW decoding boundary.
   white-balance multipliers, and exactly what the decoder did — plus a
   display-only preview.
 
-Not implemented yet: everything infrared. No white balance, channel mixing,
-false colour, curves, exposure, profiles, recipes, Metal rendering, or export.
+There are two decode paths, and they are not interchangeable:
+
+- **`decodeMosaic(at:)`** — `open → metadata snapshot → unpack → RAWMosaic`.
+  `dcraw_process` is never called. One LibRaw-unpacked sample per sensor mosaic
+  location, active area only. This is the foundation for the
+  application-owned pipeline.
+- **`decode(at:options:)`** — the existing processed-RGB path, kept as the
+  workspace preview and as a diagnostic reference. LibRaw does the demosaicing
+  and the black/white handling here, which is exactly why it is not the
+  foundation.
+
+Not implemented yet: everything infrared, and every RAW stage after unpack. No
+black subtraction, normalisation, white balance, channel mixing, false colour,
+curves, exposure, profiles, recipes, Metal rendering, or export.
+
+The RAW-stage contract — what a sample is at each stage, what has and has not
+been applied, and the geometry and coordinate rules — is
+[docs/raw-pipeline.md](docs/raw-pipeline.md).
 
 ### Tested formats
 
@@ -81,6 +98,33 @@ implementation, and the only Swift type that imports the LibRaw shim.
 ```text
 SwiftUI  →  DocumentState  →  RAWDecoder  →  LibRawDecoder  →  C shim  →  LibRaw (C++)
 ```
+
+### The mosaic
+
+`RAWMosaic` is the application-facing unpacked mosaic: active area only,
+tightly packed `UInt16`, in the same active-image coordinates as the CFA and
+black-level lookups. Values are **not** rescaled — a 12-bit E-PL3 sample stays
+in `0...4095` inside a 16-bit cell.
+
+A sample is a **LibRaw-unpacked sensor sample**, not an ADC value: LibRaw's
+unpackers apply per-format linearisation curves inside `unpack()` itself.
+Everything after that — black subtraction, normalisation, white balance,
+demosaicing, colour matrix, gamma, orientation — is recorded on
+`RAWMosaicProcessing` as explicitly not applied, and those facts are `let`
+constants rather than parameters a caller could set wrongly.
+
+Black levels stay metadata-only at this stage. The mosaic deliberately still
+contains the per-plane black offset; subtracting it is the next milestone.
+
+Only LibRaw's single-channel `raw_image` storage is supported. Three/four-channel,
+float, Foveon and the `filters == 1` layout fail explicitly with
+`unsupportedRawStorage` / `unsupportedSensorLayout` — there is **no silent
+fallback to `dcraw_process`**, so an unsupported camera cannot quietly get a
+different pipeline.
+
+Extraction honours LibRaw's `raw_pitch` (in bytes) rather than assuming
+`rawWidth × 2`; for the E-PL3 those genuinely differ, 8160 source versus an
+8112-byte copied stride.
 
 Failures cross that boundary as `RAWDecodingError`. LibRaw's integer codes are
 diagnostic detail, not user-facing text: every string surface a user can see —
@@ -228,8 +272,13 @@ See [RAW/README.md](RAW/README.md).
 
 ## Known limitations
 
-- Demosaicing is still done by LibRaw. Owning it (by consuming the mosaic
-  directly) is the main remaining step towards a fully custom pipeline.
+- Only the mosaic is owned so far. Black subtraction, normalisation and
+  demosaicing are still LibRaw's on the reference path, and unimplemented on
+  the mosaic path.
+- The mosaic path supports only single-channel `raw_image` storage; no
+  three/four-channel, float, Foveon or `filters == 1` file has a mosaic path.
+- The mosaic excludes the optical-black border, so the black level cannot yet
+  be measured from masked pixels — only read from metadata.
 - Only Olympus ORF has been verified against a real file.
 - The preview is display-only: the camera-native linear samples are interpreted
   as linear sRGB with no white balance, so a visible-light frame shows the
@@ -243,7 +292,6 @@ See [RAW/README.md](RAW/README.md).
 - Aperture, focal length and capture date come back `nil` for the E-PL3
   fixture. Not investigated yet; it is a metadata-extraction gap, not a
   pipeline one.
-- The black-level model is carried across the boundary but nothing consumes it
-  yet — LibRaw still performs the subtraction. It exists for the mosaic
-  milestone.
+- The black-level model is carried across the boundary and used by the mosaic
+  diagnostics, but nothing subtracts it yet. That is the next milestone.
 - `filters == 1` (LibRaw's 16×16 layout) is reported as an unknown pattern.
