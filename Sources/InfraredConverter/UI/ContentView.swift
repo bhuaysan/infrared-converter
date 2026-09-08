@@ -143,7 +143,7 @@ private struct RAWInspectorView: View {
                 section("Sensor") {
                     row("Layout", layoutDescription)
                     row("Colour planes", loaded.metadata.sensor.colorDescription)
-                    row("Raw bit depth", loaded.metadata.sensor.bitsPerRawSample.map { "\($0) bit" })
+                    row("Source RAW bit depth", loaded.metadata.sensor.sourceRawBitDepth.map { "\($0) bit" })
                     row("Black level", "\(loaded.metadata.levels.black)")
                     row("Saturation", "\(loaded.metadata.levels.maximum)")
                 }

@@ -71,16 +71,36 @@ public struct RAWMosaic: Equatable, Sendable {
     /// column:)` decodes explicitly rather than relying on that.
     public let samples: Data
     public let sampleFormat: SampleFormat
-    /// Useful precision of each sample, e.g. `12` for the Olympus E-PL3, or
-    /// `nil` when the decoder did not report it.
+    /// The bit depth of the samples **as stored in the source file**, as the
+    /// decoder reported it — `12` for the Olympus E-PL3 — or `nil` when it
+    /// reported none.
     ///
-    /// This is `RAWMetadata.SensorColorLayout.bitsPerRawSample` carried
-    /// alongside the data it describes, not re-derived from it. It is
-    /// deliberately optional rather than defaulted: the samples are stored in
-    /// 16-bit cells regardless, and substituting `16` for an unknown
-    /// precision would silently mis-scale the white-level normalisation that
-    /// a later stage derives from it.
-    public let bitsPerSample: Int?
+    /// This is `RAWMetadata.SensorColorLayout.sourceRawBitDepth` carried
+    /// alongside the data it describes, not re-derived from it.
+    ///
+    /// ## What it is not
+    ///
+    /// It is **not** a normalisation white level, and
+    /// `2 ^ sourceRawBitDepth - 1` must never be used as one. Three separate
+    /// things are easy to conflate here and are deliberately kept apart:
+    ///
+    /// - *source RAW bit depth* — this property: how wide a sample was in the
+    ///   file, before LibRaw touched it;
+    /// - *the unpacked sample's numeric domain* — what `unpack()` actually
+    ///   produced. Several formats pass samples through a per-format
+    ///   linearisation curve inside `unpack()`, which can move values outside
+    ///   the source depth's range;
+    /// - *white / saturation level* — `RAWMetadata.Levels.maximum` and
+    ///   `linearMaximum`, which LibRaw updates to match what it produced.
+    ///
+    /// A later normalisation stage must take its white level from
+    /// `RAWMetadata.Levels`, or from an explicitly chosen white-level model —
+    /// never from this property.
+    ///
+    /// It is optional rather than defaulted: samples are stored in 16-bit
+    /// cells regardless, and substituting `16` for an unreported depth would
+    /// invent a fact the decoder did not state.
+    public let sourceRawBitDepth: Int?
     /// The sensor's colour-filter layout, needed to interpret each sample's
     /// colour plane. Its `colorPlaneIndex(row:column:)` already uses the same
     /// active-image coordinate convention as this type.
@@ -93,13 +113,23 @@ public struct RAWMosaic: Equatable, Sendable {
         }
     }
 
+    /// The widest source bit depth `sampleFormat`'s storage can represent
+    /// without loss. A reported depth above this is a claim the storage
+    /// cannot hold, and makes the mosaic inconsistent rather than being
+    /// accepted — samples are never rescaled to reconcile the two.
+    private var maximumRepresentableBitDepth: Int {
+        switch sampleFormat {
+        case .uint16: return 16
+        }
+    }
+
     public init(
         width: Int,
         height: Int,
         bytesPerRow: Int,
         samples: Data,
         sampleFormat: SampleFormat,
-        bitsPerSample: Int?,
+        sourceRawBitDepth: Int?,
         sensorColorLayout: RAWMetadata.SensorColorLayout
     ) {
         self.width = width
@@ -107,7 +137,7 @@ public struct RAWMosaic: Equatable, Sendable {
         self.bytesPerRow = bytesPerRow
         self.samples = samples
         self.sampleFormat = sampleFormat
-        self.bitsPerSample = bitsPerSample
+        self.sourceRawBitDepth = sourceRawBitDepth
         self.sensorColorLayout = sensorColorLayout
     }
 
@@ -131,9 +161,15 @@ public struct RAWMosaic: Equatable, Sendable {
     /// Non-positive dimensions, or geometry whose implied byte count would
     /// overflow, make this `false` rather than trap.
     public var isGeometryConsistent: Bool {
-        // An unreported precision is acceptable; a reported nonsensical one
-        // is not.
-        if let bitsPerSample, bitsPerSample <= 0 { return false }
+        // An unreported source depth is acceptable. A reported one must be
+        // both meaningful (>= 1) and representable in this mosaic's storage:
+        // a claim of, say, 24 bits alongside `.uint16` samples cannot be
+        // true, and accepting it would leave a later stage to discover the
+        // contradiction.
+        if let sourceRawBitDepth,
+           sourceRawBitDepth < 1 || sourceRawBitDepth > maximumRepresentableBitDepth {
+            return false
+        }
         guard width > 0, height > 0 else { return false }
         guard let minimumRowBytes = minimumRowByteCount, let expected = expectedByteCount else {
             return false
@@ -145,13 +181,33 @@ public struct RAWMosaic: Equatable, Sendable {
     ///
     /// `row`/`column` are active-image coordinates: `(0, 0)` is the top-left
     /// of the active mosaic area, matching `sensorColorLayout.colorPlaneIndex
-    /// (row:column:)`. Bounds-checked; never traps.
+    /// (row:column:)`.
+    ///
+    /// Never traps, for **any** value the public initialiser accepts. Passing
+    /// the row/column bounds check is not sufficient on its own: the
+    /// initialiser can build a pathological mosaic — a huge `bytesPerRow`, a
+    /// `width` near `Int.max` — for which the offset arithmetic itself
+    /// overflows while the coordinate still looks in range. Every multiply
+    /// and add below is therefore checked, and any overflow returns `nil`.
+    /// Callers are **not** required to consult `isGeometryConsistent` first.
     public func sample(row: Int, column: Int) -> UInt16? {
         guard row >= 0, row < height, column >= 0, column < width else { return nil }
-        let byteOffset = row * bytesPerRow + column * bytesPerSampleValue
-        guard byteOffset >= 0, byteOffset + bytesPerSampleValue <= samples.count else { return nil }
 
-        let base = samples.startIndex + byteOffset
+        let (rowOffset, rowOverflow) = row.multipliedReportingOverflow(by: bytesPerRow)
+        guard !rowOverflow else { return nil }
+        let (columnOffset, columnOverflow) = column.multipliedReportingOverflow(by: bytesPerSampleValue)
+        guard !columnOverflow else { return nil }
+        let (byteOffset, offsetOverflow) = rowOffset.addingReportingOverflow(columnOffset)
+        guard !offsetOverflow, byteOffset >= 0 else { return nil }
+
+        // `samples.startIndex` is 0 for every Data this type is constructed
+        // with, but a Data slice can carry a non-zero one, so fold it in with
+        // the same checked arithmetic rather than assuming.
+        let (base, baseOverflow) = samples.startIndex.addingReportingOverflow(byteOffset)
+        guard !baseOverflow else { return nil }
+        let (end, endOverflow) = base.addingReportingOverflow(bytesPerSampleValue)
+        guard !endOverflow, end <= samples.endIndex else { return nil }
+
         switch sampleFormat {
         case .uint16:
             let low = UInt16(samples[base])

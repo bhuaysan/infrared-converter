@@ -10,7 +10,7 @@ enum RAWTestData {
             filters: filters,
             colorDescription: "RGBG",
             colorCount: 3,
-            bitsPerRawSample: 12
+            sourceRawBitDepth: 12
         )
     }
 

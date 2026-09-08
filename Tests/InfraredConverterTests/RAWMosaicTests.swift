@@ -29,7 +29,7 @@ struct RAWMosaicTests {
             bytesPerRow: bytesPerRow ?? width * 2,
             samples: Self.makeSamples(width: width, height: height),
             sampleFormat: .uint16,
-            bitsPerSample: 12,
+            sourceRawBitDepth: 12,
             sensorColorLayout: layout
         )
     }
@@ -55,7 +55,7 @@ struct RAWMosaicTests {
         let data = values.withUnsafeBufferPointer { Data(buffer: $0) }
         let m = RAWMosaic(
             width: 4, height: 3, bytesPerRow: 10, samples: data,
-            sampleFormat: .uint16, bitsPerSample: 12, sensorColorLayout: RAWTestData.bayerLayout()
+            sampleFormat: .uint16, sourceRawBitDepth: 12, sensorColorLayout: RAWTestData.bayerLayout()
         )
         #expect(m.isGeometryConsistent)
         // Row 1 must be read at its declared stride, not the tight width.
@@ -69,7 +69,7 @@ struct RAWMosaicTests {
         let short = Data(repeating: 0, count: 4) // needs 24 bytes for 4x3x2
         let m = RAWMosaic(
             width: 4, height: 3, bytesPerRow: 8, samples: short,
-            sampleFormat: .uint16, bitsPerSample: 12, sensorColorLayout: RAWTestData.bayerLayout()
+            sampleFormat: .uint16, sourceRawBitDepth: 12, sensorColorLayout: RAWTestData.bayerLayout()
         )
         #expect(!m.isGeometryConsistent)
     }
@@ -78,7 +78,7 @@ struct RAWMosaicTests {
     func tooNarrowStrideIsInconsistent() {
         let m = RAWMosaic(
             width: 4, height: 3, bytesPerRow: 6, samples: Self.makeSamples(width: 4, height: 3),
-            sampleFormat: .uint16, bitsPerSample: 12, sensorColorLayout: RAWTestData.bayerLayout()
+            sampleFormat: .uint16, sourceRawBitDepth: 12, sensorColorLayout: RAWTestData.bayerLayout()
         )
         #expect(!m.isGeometryConsistent)
     }
@@ -87,13 +87,13 @@ struct RAWMosaicTests {
     func zeroDimensionsAreInconsistent() {
         let zeroWidth = RAWMosaic(
             width: 0, height: 3, bytesPerRow: 0, samples: Data(),
-            sampleFormat: .uint16, bitsPerSample: 12, sensorColorLayout: RAWTestData.bayerLayout()
+            sampleFormat: .uint16, sourceRawBitDepth: 12, sensorColorLayout: RAWTestData.bayerLayout()
         )
         #expect(!zeroWidth.isGeometryConsistent)
 
         let zeroHeight = RAWMosaic(
             width: 4, height: 0, bytesPerRow: 8, samples: Data(),
-            sampleFormat: .uint16, bitsPerSample: 12, sensorColorLayout: RAWTestData.bayerLayout()
+            sampleFormat: .uint16, sourceRawBitDepth: 12, sensorColorLayout: RAWTestData.bayerLayout()
         )
         #expect(!zeroHeight.isGeometryConsistent)
     }
@@ -102,32 +102,73 @@ struct RAWMosaicTests {
     func overflowIsRejected() {
         let m = RAWMosaic(
             width: Int.max, height: 2, bytesPerRow: Int.max, samples: Data(),
-            sampleFormat: .uint16, bitsPerSample: 12, sensorColorLayout: RAWTestData.bayerLayout()
+            sampleFormat: .uint16, sourceRawBitDepth: 12, sensorColorLayout: RAWTestData.bayerLayout()
         )
         #expect(m.expectedByteCount == nil)
         #expect(!m.isGeometryConsistent)
     }
 
-    @Test("A nonsensical reported bitsPerSample is treated as invalid, not trapped on")
-    func invalidBitsPerSampleIsInconsistent() {
+    // MARK: - Source RAW bit depth
+
+    @Test("A reported source RAW bit depth of 0 is invalid, not trapped on")
+    func zeroSourceRawBitDepthIsInconsistent() {
         let m = RAWMosaic(
             width: 4, height: 3, bytesPerRow: 8, samples: Self.makeSamples(width: 4, height: 3),
-            sampleFormat: .uint16, bitsPerSample: 0, sensorColorLayout: RAWTestData.bayerLayout()
+            sampleFormat: .uint16, sourceRawBitDepth: 0, sensorColorLayout: RAWTestData.bayerLayout()
         )
         #expect(!m.isGeometryConsistent)
     }
 
-    @Test("An unreported bitsPerSample is valid: the samples are still usable")
+    @Test("Every source RAW bit depth 1...16 is representable in .uint16 storage")
+    func representableSourceRawBitDepths() {
+        for depth in 1...16 {
+            let m = RAWMosaic(
+                width: 4, height: 3, bytesPerRow: 8, samples: Self.makeSamples(width: 4, height: 3),
+                sampleFormat: .uint16, sourceRawBitDepth: depth,
+                sensorColorLayout: RAWTestData.bayerLayout()
+            )
+            #expect(m.isGeometryConsistent, "depth \(depth) should be representable")
+        }
+    }
+
+    @Test("A source RAW bit depth above the storage width is inconsistent, and never rescales samples")
+    func oversizedSourceRawBitDepthIsInconsistent() {
+        // A claim of more than 16 bits cannot be true of `.uint16` storage.
+        // It is reported as inconsistent rather than accepted, and — the
+        // point of the test — the samples are left exactly as they are; the
+        // value is never used to rescale them.
+        for depth in [17, 24, 32, Int.max] {
+            let m = RAWMosaic(
+                width: 4, height: 3, bytesPerRow: 8, samples: Self.makeSamples(width: 4, height: 3),
+                sampleFormat: .uint16, sourceRawBitDepth: depth,
+                sensorColorLayout: RAWTestData.bayerLayout()
+            )
+            #expect(!m.isGeometryConsistent, "depth \(depth) should not be accepted")
+            #expect(m.sourceRawBitDepth == depth)
+            #expect(m.sample(row: 1, column: 2) == 102)
+        }
+    }
+
+    @Test("A negative reported source RAW bit depth is invalid")
+    func negativeSourceRawBitDepthIsInconsistent() {
+        let m = RAWMosaic(
+            width: 4, height: 3, bytesPerRow: 8, samples: Self.makeSamples(width: 4, height: 3),
+            sampleFormat: .uint16, sourceRawBitDepth: -1, sensorColorLayout: RAWTestData.bayerLayout()
+        )
+        #expect(!m.isGeometryConsistent)
+    }
+
+    @Test("An unreported source RAW bit depth is valid: the samples are still usable")
     func unreportedBitsPerSampleIsConsistent() {
         // Precision the decoder did not report is nil, never a substituted
         // default — the geometry is still sound, so the mosaic is usable and
         // a later stage decides what to do about the unknown precision.
         let m = RAWMosaic(
             width: 4, height: 3, bytesPerRow: 8, samples: Self.makeSamples(width: 4, height: 3),
-            sampleFormat: .uint16, bitsPerSample: nil, sensorColorLayout: RAWTestData.bayerLayout()
+            sampleFormat: .uint16, sourceRawBitDepth: nil, sensorColorLayout: RAWTestData.bayerLayout()
         )
         #expect(m.isGeometryConsistent)
-        #expect(m.bitsPerSample == nil)
+        #expect(m.sourceRawBitDepth == nil)
         #expect(m.sample(row: 0, column: 0) != nil)
     }
 
@@ -160,7 +201,7 @@ struct RAWMosaicTests {
         let data = values.withUnsafeBufferPointer { Data(buffer: $0) }
         let m = RAWMosaic(
             width: 2, height: 2, bytesPerRow: 6, samples: data,
-            sampleFormat: .uint16, bitsPerSample: 12, sensorColorLayout: RAWTestData.bayerLayout()
+            sampleFormat: .uint16, sourceRawBitDepth: 12, sensorColorLayout: RAWTestData.bayerLayout()
         )
         #expect(m.sample(row: 0, column: 0) == 0)
         #expect(m.sample(row: 0, column: 1) == 1)
@@ -231,13 +272,111 @@ struct RAWMosaicTests {
         #expect(m.colorPlaneIndex(row: 0, column: 4) == nil)
     }
 
+    // MARK: - sample() must never trap, for any publicly constructible value
+
+    /// The public initialiser performs no validation, so `sample()` can be
+    /// handed geometry whose offset arithmetic overflows even though the
+    /// coordinate passes the row/column bounds check. Each case below would
+    /// trap on unchecked `row * bytesPerRow + column * bytesPerSample`.
+    ///
+    /// These call `sample()` directly, without consulting
+    /// `isGeometryConsistent` first — that is the guarantee being tested.
+
+    @Test("Row-stride multiplication overflow returns nil instead of trapping")
+    func rowStrideMultiplicationOverflow() {
+        // row 1 is in bounds (height 2), but 1 * Int.max is fine while
+        // 1 * bytesPerRow + column offset is not; use a row that overflows
+        // the multiply itself.
+        let m = RAWMosaic(
+            width: 4, height: 4, bytesPerRow: Int.max, samples: Data(repeating: 0, count: 64),
+            sampleFormat: .uint16, sourceRawBitDepth: 12, sensorColorLayout: RAWTestData.bayerLayout()
+        )
+        #expect(m.sample(row: 2, column: 0) == nil)   // 2 * Int.max overflows
+        #expect(m.sample(row: 3, column: 3) == nil)
+        // Row 0 does not overflow but still runs out of buffer.
+        #expect(m.sample(row: 0, column: 0) == 0)
+        #expect(m.sample(row: 1, column: 0) == nil)   // 1 * Int.max is in range, +2 is past the buffer
+    }
+
+    @Test("Column offset multiplication overflow returns nil instead of trapping")
+    func columnOffsetMultiplicationOverflow() {
+        // width is Int.max, so a column near it passes the bounds check while
+        // column * 2 overflows.
+        let m = RAWMosaic(
+            width: Int.max, height: 1, bytesPerRow: 8, samples: Data(repeating: 0, count: 8),
+            sampleFormat: .uint16, sourceRawBitDepth: 12, sensorColorLayout: RAWTestData.bayerLayout()
+        )
+        #expect(m.sample(row: 0, column: Int.max - 1) == nil)
+        #expect(m.sample(row: 0, column: Int.max / 2 + 1) == nil)
+    }
+
+    @Test("Final offset addition overflow returns nil instead of trapping")
+    func finalOffsetAdditionOverflow() {
+        // Neither multiply overflows on its own: 1 * (Int.max - 4) is fine,
+        // and 3 * 2 is fine, but their sum plus the sample size is not.
+        let m = RAWMosaic(
+            width: 8, height: 4, bytesPerRow: Int.max - 4, samples: Data(repeating: 0, count: 32),
+            sampleFormat: .uint16, sourceRawBitDepth: 12, sensorColorLayout: RAWTestData.bayerLayout()
+        )
+        #expect(m.sample(row: 1, column: 3) == nil)
+        #expect(m.sample(row: 1, column: 7) == nil)
+    }
+
+    @Test("Malformed data length returns nil instead of reading past the buffer")
+    func malformedDataLength() {
+        // Declared geometry needs 32 bytes; only 5 are present, and 5 is odd
+        // so the last sample would also straddle the end.
+        let m = RAWMosaic(
+            width: 4, height: 4, bytesPerRow: 8, samples: Data(repeating: 0xAB, count: 5),
+            sampleFormat: .uint16, sourceRawBitDepth: 12, sensorColorLayout: RAWTestData.bayerLayout()
+        )
+        #expect(!m.isGeometryConsistent)
+        #expect(m.sample(row: 0, column: 0) == 0xABAB)
+        #expect(m.sample(row: 0, column: 2) == nil)   // bytes 4...5, only byte 4 exists
+        #expect(m.sample(row: 1, column: 0) == nil)
+        #expect(m.sample(row: 3, column: 3) == nil)
+    }
+
+    @Test("A Data slice with a non-zero startIndex is indexed relative to that slice")
+    func sliceBackedSamplesAreOffsetCorrectly() {
+        // Data slices keep their parent's indices; sample() must fold
+        // startIndex in rather than assuming 0.
+        let backing = Self.makeSamples(width: 4, height: 3)
+        let slice = backing.dropFirst(8)   // drop row 0
+        let m = RAWMosaic(
+            width: 4, height: 2, bytesPerRow: 8, samples: slice,
+            sampleFormat: .uint16, sourceRawBitDepth: 12, sensorColorLayout: RAWTestData.bayerLayout()
+        )
+        #expect(m.isGeometryConsistent)
+        #expect(m.sample(row: 0, column: 0) == 100)
+        #expect(m.sample(row: 1, column: 3) == 203)
+        #expect(m.sample(row: 2, column: 0) == nil)
+    }
+
+    @Test("Extreme geometry combined with extreme coordinates still returns nil")
+    func extremeGeometryNeverTraps() {
+        let m = RAWMosaic(
+            width: Int.max, height: Int.max, bytesPerRow: Int.max, samples: Data(repeating: 0, count: 4),
+            sampleFormat: .uint16, sourceRawBitDepth: 12, sensorColorLayout: RAWTestData.bayerLayout()
+        )
+        #expect(!m.isGeometryConsistent)
+        #expect(m.expectedByteCount == nil)
+        #expect(m.sample(row: Int.max - 1, column: Int.max - 1) == nil)
+        #expect(m.sample(row: 1, column: 1) == nil)
+        // Row 0 is the one case whose arithmetic does not overflow, and its
+        // first two samples genuinely fit the 4-byte buffer.
+        #expect(m.sample(row: 0, column: 1) == 0)
+        #expect(m.sample(row: 0, column: 2) == nil)
+        #expect(m.colorPlaneIndex(row: Int.max - 1, column: Int.max - 1) != nil)
+    }
+
     // MARK: - Invalid / unsupported data
 
     @Test("Empty samples with declared non-zero geometry is inconsistent")
     func emptyBufferWithNonZeroGeometryIsInconsistent() {
         let m = RAWMosaic(
             width: 4, height: 3, bytesPerRow: 8, samples: Data(),
-            sampleFormat: .uint16, bitsPerSample: 12, sensorColorLayout: RAWTestData.bayerLayout()
+            sampleFormat: .uint16, sourceRawBitDepth: 12, sensorColorLayout: RAWTestData.bayerLayout()
         )
         #expect(!m.isGeometryConsistent)
         #expect(m.sample(row: 0, column: 0) == nil)
