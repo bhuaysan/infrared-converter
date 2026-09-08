@@ -158,17 +158,43 @@ extension RAWMetadata {
             self.xTransPattern = xTransPattern
         }
 
-        /// The colour-plane index sampled at a raw sensor coordinate, or `nil`
-        /// when the layout has no per-pixel mosaic.
+        /// The colour-plane index sampled at an **active-image** coordinate
+        /// (row/column `0` is the top-left of `RAWMetadata.Geometry`'s
+        /// visible area, i.e. `topMargin`/`leftMargin` into the raw
+        /// readout), or `nil` when the layout has no per-pixel mosaic.
         ///
-        /// Coordinates are relative to the full raw readout, matching the
-        /// convention the decoder uses for `filters`.
+        /// This matches LibRaw 0.22.2's own convention: its `COLOR`/`fcol`
+        /// accessor adds `top_margin`/`left_margin` to the row/column it is
+        /// given before indexing `filters`, and the X-Trans table it exposes
+        /// (`xtrans`) is built from the sensor-absolute table
+        /// (`xtrans_abs`) by folding those same margins in once, at parse
+        /// time (`identify.cpp`). In both cases the margin is already
+        /// accounted for by the time this type sees `filters`/
+        /// `xTransPattern` — so this method deliberately does **not** add
+        /// the margins again. Callers holding raw-readout coordinates must
+        /// subtract `Geometry.topMargin`/`leftMargin` first, or use
+        /// `colorPlaneIndex(rawReadoutRow:rawReadoutColumn:geometry:)`.
+        ///
+        /// `filters == 1` denotes LibRaw's non-standard 16×16 layout, which
+        /// would be the one case where LibRaw itself still needs the
+        /// margins at lookup time — this type does not carry that 16×16
+        /// table, so `.bayer` layouts with `filters == 1` are unsupported
+        /// here and should be represented as `.unknown` (returning `nil`),
+        /// not modelled as an ordinary 2×2 pattern.
+        ///
+        /// Both the Bayer and X-Trans paths wrap out-of-range coordinates
+        /// (including negative ones) onto the repeating pattern rather than
+        /// producing an undefined result.
         public func colorPlaneIndex(row: Int, column: Int) -> Int? {
             switch pattern {
             case .bayer:
-                // Same packing dcraw/LibRaw use: two bits per position in a
-                // 2-row × 2-column cell.
-                let shift = ((row << 1 & 14) | (column & 1)) << 1
+                guard filters != 1 else { return nil }
+                // Same packing dcraw/LibRaw use: two bits per position in an
+                // 8-row × 2-column cell. Wrap explicitly first so the result
+                // is correct regardless of how row/column relate to zero.
+                let r = ((row % 8) + 8) % 8
+                let c = ((column % 2) + 2) % 2
+                let shift = ((r << 1) | c) << 1
                 return Int((filters >> UInt32(shift)) & 3)
             case .xTrans:
                 guard let xTransPattern, xTransPattern.count == 6 else { return nil }
@@ -180,7 +206,24 @@ extension RAWMetadata {
             }
         }
 
-        /// The letter of the colour plane sampled at a raw sensor coordinate.
+        /// Convenience for callers that hold raw-readout coordinates (i.e.
+        /// including the optical-black border): converts to active-image
+        /// coordinates by subtracting `geometry`'s margins, then looks up
+        /// the colour plane as `colorPlaneIndex(row:column:)`.
+        public func colorPlaneIndex(
+            rawReadoutRow: Int,
+            rawReadoutColumn: Int,
+            geometry: RAWMetadata.Geometry
+        ) -> Int? {
+            colorPlaneIndex(
+                row: rawReadoutRow - geometry.topMargin,
+                column: rawReadoutColumn - geometry.leftMargin
+            )
+        }
+
+        /// The letter of the colour plane sampled at an active-image
+        /// coordinate. See `colorPlaneIndex(row:column:)` for the
+        /// coordinate convention.
         public func colorPlaneLetter(row: Int, column: Int) -> Character? {
             guard let index = colorPlaneIndex(row: row, column: column) else { return nil }
             let letters = Array(colorDescription)

@@ -171,7 +171,7 @@ public struct LibRawDecoder: RAWDecoder {
         Log.raw.error(
             """
             LibRaw failure for \(url.lastPathComponent, privacy: .public): \
-            \(diagnostic.description, privacy: .public)
+            \(diagnostic.logDescription, privacy: .public)
             """
         )
 

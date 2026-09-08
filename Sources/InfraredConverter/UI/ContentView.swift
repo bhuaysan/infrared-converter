@@ -59,7 +59,10 @@ struct ContentView: View {
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                 if let diagnostic = error.diagnostic {
-                    Text(diagnostic.description)
+                    // `userFacingSummary` is guaranteed free of LibRaw's
+                    // internal integer code; the code stays available only
+                    // via `diagnostic.logDescription`, for logging.
+                    Text(diagnostic.userFacingSummary)
                         .font(.caption)
                         .foregroundStyle(.tertiary)
                 }

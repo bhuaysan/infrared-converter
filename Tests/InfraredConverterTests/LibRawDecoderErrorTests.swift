@@ -60,11 +60,21 @@ struct LibRawDecoderErrorTests {
             let diagnostic = try #require(error.diagnostic)
             #expect(diagnostic.message.isEmpty == false)
             #expect(diagnostic.code != 0)
-            // The user-facing message stays free of decoder internals; the
-            // code is only reachable through `diagnostic`.
+
+            // Every user-facing surface must be free of the integer code...
             let description = try #require(error.errorDescription)
-            #expect(description.contains(diagnostic.description) == false)
-            #expect(description.contains(diagnostic.message) == false)
+            let codeText = "\(diagnostic.code)"
+            #expect(description.contains(codeText) == false)
+            let reason = error.failureReason
+            #expect((reason?.contains(codeText) ?? false) == false)
+            #expect(diagnostic.userFacingSummary.contains(codeText) == false)
+            #expect(diagnostic.description.contains(codeText) == false)
+            #expect("\(diagnostic)".contains(codeText) == false)
+
+            // ...while the logging surface still carries both the code and
+            // the message, so debugging is not degraded.
+            #expect(diagnostic.logDescription.contains(codeText))
+            #expect(diagnostic.logDescription.contains(diagnostic.message))
         }
     }
 
@@ -99,7 +109,27 @@ struct LibRawDecoderErrorTests {
 
         for error in errors {
             #expect(error.errorDescription?.isEmpty == false)
+            // No user-facing surface may contain the LibRaw integer code,
+            // including the negative sign LibRaw uses for its error codes.
+            #expect((error.errorDescription?.contains("-100002") ?? false) == false)
+            #expect((error.failureReason?.contains("-100002") ?? false) == false)
         }
+    }
+
+    @Test("DecoderDiagnostic separates user-facing text from the loggable form")
+    func diagnosticSurfaceSplit() {
+        let diagnostic = RAWDecodingError.DecoderDiagnostic(code: -100002, message: "Unsupported file")
+
+        // User-facing: message only, never the code.
+        #expect(diagnostic.userFacingSummary == "Unsupported file")
+        #expect(diagnostic.description == "Unsupported file")
+        #expect("\(diagnostic)" == "Unsupported file")
+
+        // Loggable: both the message and the code, for debugging.
+        #expect(diagnostic.logDescription.contains("Unsupported file"))
+        #expect(diagnostic.logDescription.contains("-100002"))
+        #expect(diagnostic.code == -100002)
+        #expect(diagnostic.message == "Unsupported file")
     }
 }
 

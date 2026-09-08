@@ -272,6 +272,12 @@ extension RAWDecoderProcessing {
 /// remain available for logging without the UI ever seeing an integer code.
 public enum RAWDecodingError: Error, Equatable {
     /// Diagnostic detail from the underlying decoder.
+    ///
+    /// `code` is an opaque LibRaw integer that means nothing to a user; it
+    /// must never reach UI. It stays available on this type for logging.
+    /// `description` (and every other user-facing surface derived from this
+    /// type) deliberately omits it — use `logDescription` when the code is
+    /// wanted.
     public struct DecoderDiagnostic: Equatable, Sendable, CustomStringConvertible {
         public let code: Int32
         public let message: String
@@ -281,7 +287,18 @@ public enum RAWDecodingError: Error, Equatable {
             self.message = message
         }
 
-        public var description: String { "\(message) (code \(code))" }
+        /// Safe to show a user: the decoder's message, with no internal code.
+        public var userFacingSummary: String { message }
+
+        /// `CustomStringConvertible` conformance mirrors `userFacingSummary`
+        /// so that reaching for the general-purpose string form (e.g. string
+        /// interpolation, `"\(diagnostic)"`) can never reintroduce the code
+        /// into user-facing text.
+        public var description: String { userFacingSummary }
+
+        /// Full diagnostic detail, including the underlying decoder's
+        /// integer code. For logging only — never display this in UI.
+        public var logDescription: String { "\(message) (code \(code))" }
     }
 
     case fileNotFound(URL)
@@ -325,7 +342,7 @@ extension RAWDecodingError: LocalizedError {
     }
 
     public var failureReason: String? {
-        diagnostic?.description
+        diagnostic?.userFacingSummary
     }
 
     /// The underlying decoder diagnostic, when the failure came from the decoder.

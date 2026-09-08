@@ -70,6 +70,151 @@ struct RAWMetadataTests {
         }
     }
 
+    @Test("LibRaw's non-standard 16×16 layout (filters == 1) is not modelled")
+    func unmodelledSixteenByLayout() {
+        let layout = RAWMetadata.SensorColorLayout(
+            pattern: .bayer,
+            filters: 1,
+            colorDescription: "RGBG",
+            colorCount: 3
+        )
+        #expect(layout.colorPlaneIndex(row: 0, column: 0) == nil)
+    }
+
+    @Test(
+        "Bayer colour-plane lookup at active-image (0,0) ignores non-zero geometry margins",
+        arguments: [(0, 0), (17, 5), (200, 130)]
+    )
+    func bayerLookupIgnoresMargins(margin: (top: Int, left: Int)) {
+        // Coordinates are active-image coordinates: the margin describes
+        // where the active area sits *inside the raw readout*, but must
+        // never be added again when indexing `filters`, because LibRaw's
+        // own `filters` value already has that fold-in baked in.
+        let layout = RAWTestData.bayerLayout(filters: 0xB4B4B4B4)
+        let geometry = RAWMetadata.Geometry(
+            rawWidth: 4080, rawHeight: 3040,
+            visibleWidth: 4056, visibleHeight: 3040,
+            topMargin: margin.top, leftMargin: margin.left,
+            outputWidth: 4056, outputHeight: 3040,
+            flip: 0, pixelAspect: 1
+        )
+
+        // What the "filters" code says for (0,0), regardless of margin.
+        #expect(layout.colorPlaneLetter(row: 0, column: 0) == "R")
+
+        // A regression guard against a future implementation that folds the
+        // margin into `row`/`column` again: compute what that (wrong) index
+        // would be, and require the real API to disagree whenever the
+        // margin is non-zero.
+        let wronglyMarginAdjusted = layout.colorPlaneIndex(
+            row: geometry.topMargin,
+            column: geometry.leftMargin
+        )
+        if margin.top % 8 != 0 || margin.left % 2 != 0 {
+            #expect(layout.colorPlaneIndex(row: 0, column: 0) != wronglyMarginAdjusted)
+        }
+    }
+
+    @Test(
+        "X-Trans colour-plane lookup at active-image (0,0) ignores non-zero geometry margins",
+        arguments: [(0, 0), (9, 7), (61, 43)]
+    )
+    func xTransLookupIgnoresMargins(margin: (top: Int, left: Int)) {
+        // An asymmetric 6×6 pattern: every cell is distinct, so an
+        // off-by-margin bug (adding the margin before indexing) changes the
+        // answer instead of silently agreeing by coincidence.
+        let pattern = [
+            [0, 1, 2, 3, 4, 5],
+            [6, 7, 8, 9, 10, 11],
+            [12, 13, 14, 15, 16, 17],
+            [18, 19, 20, 21, 22, 23],
+            [24, 25, 26, 27, 28, 29],
+            [30, 31, 32, 33, 34, 35]
+        ]
+        let layout = RAWMetadata.SensorColorLayout(
+            pattern: .xTrans,
+            filters: 9,
+            colorDescription: "RGB",
+            colorCount: 3,
+            xTransPattern: pattern
+        )
+        let geometry = RAWMetadata.Geometry(
+            rawWidth: 100, rawHeight: 100,
+            visibleWidth: 100 - margin.left, visibleHeight: 100 - margin.top,
+            topMargin: margin.top, leftMargin: margin.left,
+            outputWidth: 100 - margin.left, outputHeight: 100 - margin.top,
+            flip: 0, pixelAspect: 1
+        )
+
+        // What the pattern says for (0,0), regardless of margin.
+        #expect(layout.colorPlaneIndex(row: 0, column: 0) == 0)
+
+        let wronglyMarginAdjusted = layout.colorPlaneIndex(
+            row: geometry.topMargin,
+            column: geometry.leftMargin
+        )
+        if margin.top % 6 != 0 || margin.left % 6 != 0 {
+            #expect(layout.colorPlaneIndex(row: 0, column: 0) != wronglyMarginAdjusted)
+        }
+    }
+
+    @Test("Bayer lookup wraps negative and large coordinates onto the repeating pattern")
+    func bayerLookupWrapsCoordinates() {
+        let layout = RAWTestData.bayerLayout(filters: 0xB4B4B4B4)
+
+        #expect(layout.colorPlaneIndex(row: -1, column: -1) == layout.colorPlaneIndex(row: 7, column: 1))
+        #expect(layout.colorPlaneIndex(row: -2, column: 0) == layout.colorPlaneIndex(row: 6, column: 0))
+        #expect(layout.colorPlaneIndex(row: 0, column: 0) == layout.colorPlaneIndex(row: 8, column: 0))
+        #expect(layout.colorPlaneIndex(row: 0, column: 0) == layout.colorPlaneIndex(row: 800, column: 200))
+        #expect(layout.colorPlaneIndex(row: 0, column: 1) == layout.colorPlaneIndex(row: 0, column: -1))
+    }
+
+    @Test("X-Trans lookup wraps negative and large coordinates onto the 6×6 pattern")
+    func xTransLookupWrapsCoordinates() {
+        let pattern = [
+            [1, 1, 0, 1, 1, 2],
+            [1, 1, 2, 1, 1, 0],
+            [2, 0, 1, 0, 2, 1],
+            [1, 1, 2, 1, 1, 0],
+            [1, 1, 0, 1, 1, 2],
+            [0, 2, 1, 2, 0, 1]
+        ]
+        let layout = RAWMetadata.SensorColorLayout(
+            pattern: .xTrans,
+            filters: 9,
+            colorDescription: "RGBG",
+            colorCount: 3,
+            xTransPattern: pattern
+        )
+
+        #expect(layout.colorPlaneIndex(row: -1, column: -1) == layout.colorPlaneIndex(row: 5, column: 5))
+        #expect(layout.colorPlaneIndex(row: -6, column: 0) == layout.colorPlaneIndex(row: 0, column: 0))
+        #expect(layout.colorPlaneIndex(row: 0, column: 0) == layout.colorPlaneIndex(row: 600, column: 1200))
+    }
+
+    @Test("A raw-readout coordinate converts to active-image coordinates via geometry")
+    func colorPlaneIndexFromRawReadout() {
+        let layout = RAWTestData.bayerLayout(filters: 0xB4B4B4B4)
+        let geometry = RAWMetadata.Geometry(
+            rawWidth: 4080, rawHeight: 3040,
+            visibleWidth: 4056, visibleHeight: 3020,
+            topMargin: 20, leftMargin: 24,
+            outputWidth: 4056, outputHeight: 3020,
+            flip: 0, pixelAspect: 1
+        )
+
+        // Raw-readout (20, 24) is active-image (0, 0).
+        #expect(
+            layout.colorPlaneIndex(rawReadoutRow: 20, rawReadoutColumn: 24, geometry: geometry)
+                == layout.colorPlaneIndex(row: 0, column: 0)
+        )
+        // Raw-readout (21, 25) is active-image (1, 1).
+        #expect(
+            layout.colorPlaneIndex(rawReadoutRow: 21, rawReadoutColumn: 25, geometry: geometry)
+                == layout.colorPlaneIndex(row: 1, column: 1)
+        )
+    }
+
     @Test("Missing values stay missing")
     func missingValuesAreExplicit() {
         let exposure = RAWMetadata.Exposure()
