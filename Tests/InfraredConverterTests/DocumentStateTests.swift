@@ -17,6 +17,10 @@ struct DocumentStateTests {
         func decode(at url: URL, options: RAWDecodeOptions) throws -> DecodedRAW {
             try result.get()
         }
+
+        func decodeMosaic(at url: URL) throws -> DecodedRAWMosaic {
+            throw RAWDecodingError.unsupportedRawStorage(url, reason: "StubDecoder does not implement decodeMosaic")
+        }
     }
 
     @Test

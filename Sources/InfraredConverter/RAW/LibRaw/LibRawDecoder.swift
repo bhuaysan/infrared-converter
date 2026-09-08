@@ -115,6 +115,155 @@ public struct LibRawDecoder: RAWDecoder {
         }
     }
 
+    /// `RAW file → open → metadata snapshot → unpack → RAWMosaic`.
+    ///
+    /// `dcraw_process` is never called on this path: the call sequence is
+    /// exactly `ir_libraw_open_file` → `ir_libraw_copy_metadata` →
+    /// `ir_libraw_unpack` → `ir_libraw_describe_mosaic` →
+    /// `ir_libraw_copy_mosaic`. The metadata snapshot is taken immediately
+    /// after open/unpack, before any processing that could mutate
+    /// `imgdata.color` (black-level folding in particular) would have a
+    /// chance to run — and since this path never calls `dcraw_process`, that
+    /// mutation never happens at all.
+    ///
+    /// Only `RAWMosaicProcessing.SourceStorage.singleChannel` (LibRaw's
+    /// `raw_image`) is supported: every other storage kind throws
+    /// `RAWDecodingError.unsupportedRawStorage` or `.unsupportedSensorLayout`
+    /// rather than being silently reinterpreted.
+    public func decodeMosaic(at url: URL) throws -> DecodedRAWMosaic {
+        try withOpenContext(url: url, options: .init()) { context in
+            let metadata = try Self.metadata(from: context, url: url)
+
+            var status = ir_libraw_unpack(context)
+            guard status.error == IR_LIBRAW_OK else {
+                throw Self.error(from: status, url: url, stage: .unpack)
+            }
+
+            var info = ir_libraw_mosaic_info()
+            status = ir_libraw_describe_mosaic(context, &info)
+            guard status.error == IR_LIBRAW_OK else {
+                throw Self.error(from: status, url: url, stage: .describeMosaic)
+            }
+
+            let sourceStorage = Self.sourceStorage(from: info.storage)
+            guard sourceStorage == .singleChannel else {
+                if sourceStorage == .unsupportedLayout {
+                    throw RAWDecodingError.unsupportedSensorLayout(
+                        url,
+                        reason: "LibRaw reports a Foveon sensor or a non-standard 16×16 CFA layout, "
+                            + "neither of which this app models as a mosaic."
+                    )
+                }
+                throw RAWDecodingError.unsupportedRawStorage(
+                    url,
+                    reason: "LibRaw unpacked this file into \(sourceStorage) storage, "
+                        + "which RAWMosaic does not model. Only single-channel (raw_image) "
+                        + "mosaics are currently supported."
+                )
+            }
+
+            // Re-validate every geometry value independently, in Swift, with
+            // checked arithmetic, before allocating or copying — the shim
+            // already validated this, but nothing crossing the decoder
+            // boundary is trusted without a second check on this side.
+            guard let width = Int(exactly: info.width),
+                  let height = Int(exactly: info.height),
+                  let sourceRowPitch = Int(exactly: info.source_row_pitch),
+                  let destinationRowStride = Int(exactly: info.destination_row_stride),
+                  let byteCount = Int(exactly: info.byte_count)
+            else {
+                throw RAWDecodingError.invalidDecodedImage(url, reason: "mosaic geometry does not fit a native Int")
+            }
+            guard width > 0, height > 0 else {
+                throw RAWDecodingError.invalidDecodedImage(url, reason: "mosaic has zero width or height")
+            }
+            guard let expectedStride = Self.checkedMultiply(width, 2), destinationRowStride == expectedStride else {
+                throw RAWDecodingError.invalidDecodedImage(
+                    url,
+                    reason: "destination row stride \(destinationRowStride) is inconsistent with "
+                        + "width \(width) at 2 bytes per sample"
+                )
+            }
+            guard let expectedByteCount = Self.checkedMultiply(destinationRowStride, height), byteCount == expectedByteCount
+            else {
+                throw RAWDecodingError.invalidDecodedImage(
+                    url,
+                    reason: "mosaic byte count \(byteCount) is inconsistent with a "
+                        + "\(destinationRowStride)-byte stride × \(height) rows"
+                )
+            }
+
+            var buffer = Data(count: byteCount)
+            let copyStatus = buffer.withUnsafeMutableBytes { rawBuffer -> ir_libraw_status in
+                guard let base = rawBuffer.bindMemory(to: UInt8.self).baseAddress else {
+                    var invalid = ir_libraw_status()
+                    invalid.error = IR_LIBRAW_ERR_BAD_STATE
+                    return invalid
+                }
+                return ir_libraw_copy_mosaic(context, base, rawBuffer.count)
+            }
+            guard copyStatus.error == IR_LIBRAW_OK else {
+                throw Self.error(from: copyStatus, url: url, stage: .copyMosaic)
+            }
+
+            let mosaic = RAWMosaic(
+                width: width,
+                height: height,
+                bytesPerRow: destinationRowStride,
+                samples: buffer,
+                sampleFormat: .uint16,
+                bitsPerSample: metadata.sensor.bitsPerRawSample,
+                sensorColorLayout: metadata.sensor
+            )
+            guard mosaic.isGeometryConsistent else {
+                throw RAWDecodingError.invalidDecodedImage(url, reason: "inconsistent mosaic geometry")
+            }
+
+            let rawWarningBits = ir_libraw_process_warnings(context)
+            // process_warnings is populated by dcraw_process, which this path
+            // never calls; reading it here reflects only whatever unpack()
+            // itself may have set, and can differ from what the RGB decode()
+            // path would report for the same file.
+            let warnings = RAWDecoderProcessing.decode(rawWarningBits: rawWarningBits)
+
+            let processing = RAWMosaicProcessing(
+                decoderIdentifier: "LibRaw \(Self.libRawVersion)",
+                sourceStorage: sourceStorage,
+                sourceRowPitch: sourceRowPitch,
+                destinationRowStride: destinationRowStride,
+                warnings: warnings,
+                rawWarningBits: rawWarningBits
+            )
+
+            Log.raw.debug(
+                """
+                Decoded mosaic \(url.lastPathComponent, privacy: .public): \
+                \(mosaic.width, privacy: .public)×\(mosaic.height, privacy: .public), \
+                \(mosaic.bitsPerSample.map(String.init) ?? "unknown", privacy: .public)bit
+                """
+            )
+
+            return DecodedRAWMosaic(
+                url: url,
+                metadata: metadata,
+                mosaic: mosaic,
+                processing: processing
+            )
+        }
+    }
+
+    private static func sourceStorage(from storage: ir_libraw_mosaic_storage) -> RAWMosaicProcessing.SourceStorage {
+        switch storage {
+        case IR_LIBRAW_MOSAIC_SINGLE_CHANNEL: return .singleChannel
+        case IR_LIBRAW_MOSAIC_THREE_CHANNEL: return .threeChannel
+        case IR_LIBRAW_MOSAIC_FOUR_CHANNEL: return .fourChannel
+        case IR_LIBRAW_MOSAIC_FLOAT: return .float
+        case IR_LIBRAW_MOSAIC_NONE: return .none
+        case IR_LIBRAW_MOSAIC_UNSUPPORTED_LAYOUT: return .unsupportedLayout
+        default: return .none
+        }
+    }
+
     // MARK: - Context lifetime
 
     private func withOpenContext<T>(
@@ -163,7 +312,7 @@ public struct LibRawDecoder: RAWDecoder {
     // MARK: - Errors
 
     private enum Stage {
-        case open, unpack, process, makeImage
+        case open, unpack, process, makeImage, describeMosaic, copyMosaic
     }
 
     private static func error(
@@ -205,6 +354,8 @@ public struct LibRawDecoder: RAWDecoder {
             return .processingFailed(url, diagnostic)
         case .makeImage:
             return .imageExtractionFailed(url, diagnostic)
+        case .describeMosaic, .copyMosaic:
+            return .invalidDecodedImage(url, reason: diagnostic.userFacingSummary)
         }
     }
 

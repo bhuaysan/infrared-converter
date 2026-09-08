@@ -220,6 +220,84 @@ uint32_t ir_libraw_process_warnings(const ir_libraw_context *ctx);
 ir_libraw_status ir_libraw_copy_metadata(ir_libraw_context *ctx,
                                          ir_libraw_metadata *out);
 
+/* Mosaic (unpack-only, no dcraw_process) ----------------------------------- */
+
+/*
+ * Which of LibRaw's mutually-exclusive rawdata storage aliases is populated
+ * after a successful unpack(). unpack() zeroes all six aliases (raw_image,
+ * color3_image, color4_image, float_image, float3_image, float4_image) and
+ * then sets exactly one, so classifying by which alias is non-null is valid
+ * (see src/decoders/unpack.cpp).
+ *
+ * Order of classification (see ir_libraw_describe_mosaic): float variants are
+ * checked first so a float DNG is never mistaken for a Bayer mosaic, then
+ * color3/color4, then the foveon/16x16-layout exclusion, then raw_image.
+ */
+typedef enum {
+    IR_LIBRAW_MOSAIC_SINGLE_CHANNEL = 0,   /* raw_image: supported */
+    IR_LIBRAW_MOSAIC_NONE,                 /* nothing unpacked */
+    IR_LIBRAW_MOSAIC_THREE_CHANNEL,        /* color3_image */
+    IR_LIBRAW_MOSAIC_FOUR_CHANNEL,         /* color4_image */
+    IR_LIBRAW_MOSAIC_FLOAT,                /* float_image / float3 / float4 */
+    IR_LIBRAW_MOSAIC_UNSUPPORTED_LAYOUT    /* foveon, or filters == 1 */
+} ir_libraw_mosaic_storage;
+
+/*
+ * Describes the mosaic LibRaw unpacked, without copying any pixel data.
+ * "active" width/height is LibRaw's imgdata.sizes.width/height (the visible
+ * image area); raw_width/raw_height is the full sensor readout including the
+ * optical-black border. source_row_pitch is LibRaw's raw_pitch, in BYTES —
+ * never assume raw_width * 2. destination_row_stride is the tightly-packed
+ * stride ir_libraw_copy_mosaic will use for its output
+ * (width * bytes_per_sample); byte_count is destination_row_stride * height,
+ * the exact capacity ir_libraw_copy_mosaic requires.
+ *
+ * bytes_per_sample is the number of bytes LibRaw stores per mosaic position
+ * in its *source* storage: 2 for IR_LIBRAW_MOSAIC_SINGLE_CHANNEL (one ushort
+ * per sensor location — this is the variant RAWMosaic models), 6/8 for the
+ * three/four-channel ushort variants, and 4/12/16 for the float variants
+ * depending on which of float_image/float3_image/float4_image is active.
+ * It is 0 for IR_LIBRAW_MOSAIC_NONE and IR_LIBRAW_MOSAIC_UNSUPPORTED_LAYOUT,
+ * for which width/height/pitch/stride/byte_count are also 0 — there is
+ * nothing to copy.
+ */
+typedef struct {
+    ir_libraw_mosaic_storage storage;
+    uint32_t width, height;
+    uint32_t raw_width, raw_height;
+    uint32_t top_margin, left_margin;
+    size_t source_row_pitch;
+    size_t bytes_per_sample;
+    size_t destination_row_stride;
+    size_t byte_count;
+} ir_libraw_mosaic_info;
+
+/*
+ * Valid after a successful ir_libraw_unpack. Never calls subtract_black,
+ * adjust_bl, raw2image or dcraw_process, and performs no interpretation of
+ * the samples beyond classifying storage and computing/validating geometry.
+ *
+ * All geometry arithmetic is performed in size_t with every multiply/add
+ * checked; a file whose reported geometry does not add up (margins that do
+ * not fit the raw readout, a pitch smaller than the raw width implies, or a
+ * computed extent that would read past LibRaw's own buffer) is reported as
+ * IR_LIBRAW_ERR_BAD_STATE rather than silently truncated or wrapped.
+ */
+ir_libraw_status ir_libraw_describe_mosaic(ir_libraw_context *ctx,
+                                           ir_libraw_mosaic_info *out);
+
+/*
+ * Copies the active mosaic area only (margins excluded) into a tightly
+ * packed, caller-owned buffer, honouring source_row_pitch row by row. Fails
+ * with IR_LIBRAW_ERR_BAD_STATE if capacity is smaller than the info's
+ * byte_count, or if the storage is IR_LIBRAW_MOSAIC_NONE or
+ * IR_LIBRAW_MOSAIC_UNSUPPORTED_LAYOUT. No LibRaw-lifetime pointer is ever
+ * returned to the caller; this is the only way mosaic bytes leave the shim.
+ */
+ir_libraw_status ir_libraw_copy_mosaic(ir_libraw_context *ctx,
+                                       uint8_t *destination,
+                                       size_t capacity);
+
 /*
  * Valid after ir_libraw_process. The returned bytes stay alive until
  * ir_libraw_free_image or ir_libraw_destroy.

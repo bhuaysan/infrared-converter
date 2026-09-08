@@ -331,6 +331,220 @@ ir_libraw_status ir_libraw_copy_metadata(ir_libraw_context *ctx,
     return make_status(LIBRAW_SUCCESS);
 }
 
+namespace {
+
+/*
+ * Resolves which of LibRaw's six mutually-exclusive rawdata storage aliases
+ * is populated, and the byte size of one stored mosaic element for that
+ * alias. Shared by ir_libraw_describe_mosaic and ir_libraw_copy_mosaic so
+ * both agree on exactly the same classification.
+ *
+ * base is the untyped start of the active storage array; it is only used for
+ * byte-offset arithmetic (row * pitch + column * bytes_per_sample) and is
+ * never returned to a caller of this shim.
+ */
+void resolve_mosaic_storage(
+    const ir_libraw_context *ctx,
+    ir_libraw_mosaic_storage &storage,
+    const uint8_t *&base,
+    size_t &bytesPerSample)
+{
+    const libraw_rawdata_t &r = ctx->processor.imgdata.rawdata;
+    const libraw_iparams_t &idata = ctx->processor.imgdata.idata;
+
+    base = nullptr;
+    bytesPerSample = 0;
+
+    if (r.float_image != nullptr) {
+        storage = IR_LIBRAW_MOSAIC_FLOAT;
+        bytesPerSample = sizeof(float);
+        base = reinterpret_cast<const uint8_t *>(r.float_image);
+    } else if (r.float3_image != nullptr) {
+        storage = IR_LIBRAW_MOSAIC_FLOAT;
+        bytesPerSample = sizeof(float) * 3;
+        base = reinterpret_cast<const uint8_t *>(r.float3_image);
+    } else if (r.float4_image != nullptr) {
+        storage = IR_LIBRAW_MOSAIC_FLOAT;
+        bytesPerSample = sizeof(float) * 4;
+        base = reinterpret_cast<const uint8_t *>(r.float4_image);
+    } else if (r.color3_image != nullptr) {
+        storage = IR_LIBRAW_MOSAIC_THREE_CHANNEL;
+        bytesPerSample = sizeof(ushort) * 3;
+        base = reinterpret_cast<const uint8_t *>(r.color3_image);
+    } else if (r.color4_image != nullptr) {
+        storage = IR_LIBRAW_MOSAIC_FOUR_CHANNEL;
+        bytesPerSample = sizeof(ushort) * 4;
+        base = reinterpret_cast<const uint8_t *>(r.color4_image);
+    } else if (idata.is_foveon != 0 || idata.filters == 1) {
+        storage = IR_LIBRAW_MOSAIC_UNSUPPORTED_LAYOUT;
+    } else if (r.raw_image != nullptr) {
+        storage = IR_LIBRAW_MOSAIC_SINGLE_CHANNEL;
+        bytesPerSample = sizeof(ushort);
+        base = reinterpret_cast<const uint8_t *>(r.raw_image);
+    } else {
+        storage = IR_LIBRAW_MOSAIC_NONE;
+    }
+}
+
+bool checked_mul(size_t a, size_t b, size_t &result)
+{
+    if (a != 0 && b > (std::numeric_limits<size_t>::max)() / a) {
+        return false;
+    }
+    result = a * b;
+    return true;
+}
+
+bool checked_add(size_t a, size_t b, size_t &result)
+{
+    if (b > (std::numeric_limits<size_t>::max)() - a) {
+        return false;
+    }
+    result = a + b;
+    return true;
+}
+
+} // namespace
+
+ir_libraw_status ir_libraw_describe_mosaic(ir_libraw_context *ctx, ir_libraw_mosaic_info *out)
+{
+    if (ctx == nullptr || out == nullptr) {
+        return bad_state("Invalid decoder context");
+    }
+    if (!ctx->unpacked) {
+        return bad_state("Mosaic requested before a successful unpack");
+    }
+
+    std::memset(out, 0, sizeof(*out));
+
+    ir_libraw_mosaic_storage storage;
+    const uint8_t *base = nullptr;
+    size_t bytesPerSample = 0;
+    resolve_mosaic_storage(ctx, storage, base, bytesPerSample);
+
+    out->storage = storage;
+
+    if (storage == IR_LIBRAW_MOSAIC_NONE || storage == IR_LIBRAW_MOSAIC_UNSUPPORTED_LAYOUT) {
+        /* Nothing to describe further: geometry stays zeroed. */
+        return make_status(LIBRAW_SUCCESS);
+    }
+    if (base == nullptr) {
+        return bad_state("Mosaic storage pointer is unexpectedly null");
+    }
+
+    const libraw_image_sizes_t &s = ctx->processor.imgdata.sizes;
+
+    const size_t width = static_cast<size_t>(s.width);
+    const size_t height = static_cast<size_t>(s.height);
+    const size_t rawWidth = static_cast<size_t>(s.raw_width);
+    const size_t rawHeight = static_cast<size_t>(s.raw_height);
+    const size_t topMargin = static_cast<size_t>(s.top_margin);
+    const size_t leftMargin = static_cast<size_t>(s.left_margin);
+    const size_t sourceRowPitch = static_cast<size_t>(s.raw_pitch);
+
+    if (width == 0 || height == 0) {
+        return bad_state("Mosaic has zero width or height");
+    }
+
+    /* left_margin + width must fit inside raw_width; top_margin + height
+     * must fit inside raw_height. */
+    size_t leftPlusWidth = 0;
+    if (!checked_add(leftMargin, width, leftPlusWidth) || leftPlusWidth > rawWidth) {
+        return bad_state("Active width and left margin exceed the raw readout width");
+    }
+    size_t topPlusHeight = 0;
+    if (!checked_add(topMargin, height, topPlusHeight) || topPlusHeight > rawHeight) {
+        return bad_state("Active height and top margin exceed the raw readout height");
+    }
+
+    size_t minimumPitch = 0;
+    if (!checked_mul(rawWidth, bytesPerSample, minimumPitch) || sourceRowPitch < minimumPitch) {
+        return bad_state("Row pitch is smaller than raw width implies");
+    }
+
+    /* The last byte the copy will read must stay within LibRaw's own buffer. */
+    const size_t lastRowIndex = topPlusHeight - 1; /* height >= 1, so no underflow */
+    size_t lastRowByteOffset = 0;
+    if (!checked_mul(lastRowIndex, sourceRowPitch, lastRowByteOffset)) {
+        return bad_state("Row byte offset overflows");
+    }
+    size_t lastColumnByteOffset = 0;
+    if (!checked_mul(leftPlusWidth, bytesPerSample, lastColumnByteOffset)) {
+        return bad_state("Column byte offset overflows");
+    }
+    size_t lastByte = 0;
+    if (!checked_add(lastRowByteOffset, lastColumnByteOffset, lastByte)) {
+        return bad_state("Last-byte offset overflows");
+    }
+    size_t sourceBufferBytes = 0;
+    if (!checked_mul(sourceRowPitch, rawHeight, sourceBufferBytes)) {
+        return bad_state("Source buffer size overflows");
+    }
+    if (lastByte > sourceBufferBytes) {
+        return bad_state("Mosaic geometry would read past the end of LibRaw's buffer");
+    }
+
+    size_t destinationRowStride = 0;
+    if (!checked_mul(width, bytesPerSample, destinationRowStride)) {
+        return bad_state("Destination row stride overflows");
+    }
+    size_t byteCount = 0;
+    if (!checked_mul(destinationRowStride, height, byteCount)) {
+        return bad_state("Destination buffer size overflows");
+    }
+
+    out->width = static_cast<uint32_t>(width);
+    out->height = static_cast<uint32_t>(height);
+    out->raw_width = static_cast<uint32_t>(rawWidth);
+    out->raw_height = static_cast<uint32_t>(rawHeight);
+    out->top_margin = static_cast<uint32_t>(topMargin);
+    out->left_margin = static_cast<uint32_t>(leftMargin);
+    out->source_row_pitch = sourceRowPitch;
+    out->bytes_per_sample = bytesPerSample;
+    out->destination_row_stride = destinationRowStride;
+    out->byte_count = byteCount;
+
+    return make_status(LIBRAW_SUCCESS);
+}
+
+ir_libraw_status ir_libraw_copy_mosaic(ir_libraw_context *ctx, uint8_t *destination, size_t capacity)
+{
+    if (ctx == nullptr || destination == nullptr) {
+        return bad_state("Invalid arguments");
+    }
+
+    ir_libraw_mosaic_info info;
+    ir_libraw_status status = ir_libraw_describe_mosaic(ctx, &info);
+    if (status.error != IR_LIBRAW_OK) {
+        return status;
+    }
+    if (info.storage == IR_LIBRAW_MOSAIC_NONE || info.storage == IR_LIBRAW_MOSAIC_UNSUPPORTED_LAYOUT) {
+        return bad_state("Mosaic storage is unsupported for copy");
+    }
+    if (capacity < info.byte_count) {
+        return bad_state("Destination buffer is smaller than the mosaic requires");
+    }
+
+    ir_libraw_mosaic_storage storage;
+    const uint8_t *base = nullptr;
+    size_t bytesPerSample = 0;
+    resolve_mosaic_storage(ctx, storage, base, bytesPerSample);
+    if (base == nullptr || storage != info.storage) {
+        return bad_state("Mosaic storage changed unexpectedly between describe and copy");
+    }
+
+    const size_t rowBytes = static_cast<size_t>(info.width) * bytesPerSample;
+    for (uint32_t row = 0; row < info.height; ++row) {
+        const size_t sourceRowOffset =
+            (static_cast<size_t>(row) + info.top_margin) * info.source_row_pitch
+            + static_cast<size_t>(info.left_margin) * bytesPerSample;
+        const size_t destinationRowOffset = static_cast<size_t>(row) * info.destination_row_stride;
+        std::memcpy(destination + destinationRowOffset, base + sourceRowOffset, rowBytes);
+    }
+
+    return make_status(LIBRAW_SUCCESS);
+}
+
 ir_libraw_status ir_libraw_make_image(ir_libraw_context *ctx, ir_libraw_image *out)
 {
     if (ctx == nullptr || out == nullptr) {

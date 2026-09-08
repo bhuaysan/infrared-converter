@@ -15,6 +15,12 @@ public protocol RAWDecoder: Sendable {
     /// Decodes a RAW file into pixels plus the metadata and an explicit
     /// description of what the decoder did to produce them.
     func decode(at url: URL, options: RAWDecodeOptions) throws -> DecodedRAW
+
+    /// Decodes a RAW file into its LibRaw-unpacked sensor mosaic, without
+    /// ever calling `dcraw_process` — no black-level subtraction, no
+    /// normalisation, no white balance, no demosaicing, no colour matrix, no
+    /// gamma, no orientation. See `RAWMosaic` for exactly what a sample is.
+    func decodeMosaic(at url: URL) throws -> DecodedRAWMosaic
 }
 
 extension RAWDecoder {
@@ -41,6 +47,136 @@ public struct DecodedRAW: Sendable {
         self.metadata = metadata
         self.image = image
         self.processing = processing
+    }
+}
+
+/// The result of a successful mosaic decode: `RAW file → open → metadata
+/// snapshot → unpack → RAWMosaic`, with no `dcraw_process` anywhere in the
+/// call sequence.
+public struct DecodedRAWMosaic: Sendable {
+    public let url: URL
+    /// The metadata snapshot, taken immediately after open/unpack and before
+    /// any black-level or normalisation processing could mutate it. In
+    /// particular `metadata.levels.black`/`perPlaneBlack` are the values
+    /// LibRaw reports *before* `adjust_bl()` would fold `black` into
+    /// `cblack[0...3]` and zero it — this path never calls `adjust_bl()`, so
+    /// that folding never happens, but the snapshot timing is what guarantees
+    /// it regardless.
+    public let metadata: RAWMetadata
+    public let mosaic: RAWMosaic
+    /// What the decoder did — and, just as importantly, explicitly did not
+    /// do — to produce `mosaic`.
+    public let processing: RAWMosaicProcessing
+
+    public init(
+        url: URL,
+        metadata: RAWMetadata,
+        mosaic: RAWMosaic,
+        processing: RAWMosaicProcessing
+    ) {
+        self.url = url
+        self.metadata = metadata
+        self.mosaic = mosaic
+        self.processing = processing
+    }
+}
+
+/// An explicit record of what happened — and did not happen — to produce a
+/// `RAWMosaic`.
+///
+/// This is a **separate type** from `RAWDecoderProcessing` deliberately:
+/// the processed-RGB `decode()` path and this mosaic path represent very
+/// different states of the data (a demosaiced, colour-processed RGB image
+/// versus an unpacked-only single-channel mosaic), and overloading one type
+/// across both would make at least one of them lie by omission or force
+/// meaningless fields (e.g. "applied demosaic algorithm" on a path that never
+/// demosaics). The always-false facts below are not caller-settable
+/// parameters — they are constant for this milestone's mosaic path, and are
+/// modelled as `let` so that is self-evident from the type itself rather
+/// than from documentation someone has to trust.
+public struct RAWMosaicProcessing: Equatable, Sendable {
+    /// Which storage LibRaw actually populated after `unpack()`. This
+    /// project's `LibRawDecoder.decodeMosaic` only succeeds for
+    /// `.singleChannel` (LibRaw's `raw_image`, one `UInt16` per mosaic
+    /// position) — every other storage kind is reported as
+    /// `RAWDecodingError.unsupportedRawStorage` rather than silently
+    /// reinterpreted.
+    public enum SourceStorage: Equatable, Sendable {
+        /// `raw_image`: one sample per sensor mosaic location. The only
+        /// storage kind `RAWMosaic` currently models.
+        case singleChannel
+        case threeChannel
+        case fourChannel
+        case float
+        case none
+        case unsupportedLayout
+    }
+
+    /// Identifies the decoder and its version, e.g. `"LibRaw 0.22.2-Release"`.
+    public var decoderIdentifier: String
+    /// Which LibRaw rawdata storage alias `mosaic` was copied from.
+    public var sourceStorage: SourceStorage
+    /// LibRaw's own `raw_pitch`, in bytes, for the source buffer this mosaic
+    /// was copied from. Not necessarily `rawWidth * bytesPerSample` — some
+    /// decoders set a wider pitch; see `RAWMosaic` and the shim's
+    /// `ir_libraw_describe_mosaic`.
+    public var sourceRowPitch: Int
+    /// The tightly packed row stride of `RAWMosaic.samples`
+    /// (`width * bytesPerSampleValue`). Equal to `RAWMosaic.bytesPerRow`.
+    public var destinationRowStride: Int
+
+    /// Black level has **not** been subtracted from `mosaic`'s samples.
+    /// `adjust_bl()`/`subtract_black_internal()` — the only places LibRaw
+    /// subtracts black — run inside `dcraw_process`/`raw2image_ex`, neither
+    /// of which this path calls.
+    public let blackLevelSubtracted: Bool = false
+    /// Samples have **not** been rescaled so the saturation level maps to
+    /// full range.
+    public let normalizedToFullRange: Bool = false
+    /// No white-balance multipliers — camera, daylight, or otherwise — have
+    /// been applied. `unpack()` and everything it calls never reads
+    /// `imgdata.params` (LibRaw's output-processing options, which includes
+    /// `user_mul`/`use_camera_wb`); only `dcraw_process` does.
+    public let whiteBalanceApplied: Bool = false
+    /// No demosaicing has happened: `mosaic` holds one sample per sensor
+    /// mosaic location, not one full-colour pixel per location.
+    public let demosaiced: Bool = false
+    /// No camera or vendor colour matrix has been applied.
+    public let cameraColorMatrixApplied: Bool = false
+    /// No gamma or other transfer function has been applied. (LibRaw's own
+    /// per-format *linearisation* curve, where a format uses one, already
+    /// ran inside `unpack()` — see `RAWMosaic`'s documentation for why that
+    /// is distinct from this gamma fact.)
+    public let gammaApplied: Bool = false
+    /// No orientation (rotation/flip) transform has been applied; `mosaic`'s
+    /// geometry is exactly the sensor's own active-area layout.
+    public let orientationApplied: Bool = false
+
+    /// Application-level warnings the decoder raised while opening/unpacking
+    /// this file, using the same mapping as `RAWDecoderProcessing.Warning`.
+    public var warnings: [RAWDecoderProcessing.Warning]
+    /// The complete, uninterpreted LibRaw warning bitfield. Diagnostic use
+    /// only — never surface this in UI. Note this is captured after
+    /// `unpack()`, not after `process()` (this path never processes); some
+    /// warnings LibRaw only raises during `dcraw_process` will not appear
+    /// here even though `RAWDecoderProcessing.rawWarningBits` could show them
+    /// on the RGB path for the same file.
+    public var rawWarningBits: UInt32
+
+    public init(
+        decoderIdentifier: String,
+        sourceStorage: SourceStorage,
+        sourceRowPitch: Int,
+        destinationRowStride: Int,
+        warnings: [RAWDecoderProcessing.Warning] = [],
+        rawWarningBits: UInt32 = 0
+    ) {
+        self.decoderIdentifier = decoderIdentifier
+        self.sourceStorage = sourceStorage
+        self.sourceRowPitch = sourceRowPitch
+        self.destinationRowStride = destinationRowStride
+        self.warnings = warnings
+        self.rawWarningBits = rawWarningBits
     }
 }
 
@@ -343,6 +479,15 @@ public enum RAWDecodingError: Error, Equatable {
     case outOfMemory(URL)
     /// The decoder could not be created at all.
     case decoderUnavailable
+    /// `decodeMosaic` found that LibRaw unpacked this file into a storage
+    /// kind `RAWMosaic` does not model (e.g. a three/four-channel or float
+    /// buffer, or nothing at all). This is never silently reinterpreted, and
+    /// `decodeMosaic` never falls back to `dcraw_process`.
+    case unsupportedRawStorage(URL, reason: String)
+    /// `decodeMosaic` found a sensor colour layout it cannot describe well
+    /// enough to build a `RAWMosaic` for (Foveon, or LibRaw's non-standard
+    /// 16×16 CFA layout).
+    case unsupportedSensorLayout(URL, reason: String)
 }
 
 extension RAWDecodingError: LocalizedError {
@@ -368,11 +513,20 @@ extension RAWDecodingError: LocalizedError {
             return "There was not enough memory to decode “\(url.lastPathComponent)”."
         case .decoderUnavailable:
             return "The RAW decoder could not be initialised."
+        case .unsupportedRawStorage(let url, _):
+            return "“\(url.lastPathComponent)” could not be unpacked into a mosaic this app supports."
+        case .unsupportedSensorLayout(let url, _):
+            return "“\(url.lastPathComponent)” has a sensor colour layout this app does not support yet."
         }
     }
 
     public var failureReason: String? {
-        diagnostic?.userFacingSummary
+        switch self {
+        case .unsupportedRawStorage(_, let reason), .unsupportedSensorLayout(_, let reason):
+            return reason
+        default:
+            return diagnostic?.userFacingSummary
+        }
     }
 
     /// The underlying decoder diagnostic, when the failure came from the decoder.
@@ -384,7 +538,8 @@ extension RAWDecodingError: LocalizedError {
              .processingFailed(_, let d),
              .imageExtractionFailed(_, let d):
             return d
-        case .fileNotFound, .fileNotReadable, .invalidDecodedImage, .outOfMemory, .decoderUnavailable:
+        case .fileNotFound, .fileNotReadable, .invalidDecodedImage, .outOfMemory, .decoderUnavailable,
+             .unsupportedRawStorage, .unsupportedSensorLayout:
             return nil
         }
     }

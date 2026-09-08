@@ -33,6 +33,38 @@ struct LibRawDecoderErrorTests {
         }
     }
 
+    @Test("decodeMosaic on a nonexistent file fails before the decoder is involved")
+    func decodeMosaicNonexistentFile() {
+        let url = URL(fileURLWithPath: "/tmp/definitely-not-here-\(UUID().uuidString).orf")
+
+        #expect(throws: RAWDecodingError.fileNotFound(url)) {
+            _ = try decoder.decodeMosaic(at: url)
+        }
+    }
+
+    @Test("decodeMosaic on a file that is not RAW is rejected without leaking decoder codes")
+    func decodeMosaicNonRAWFile() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("not-a-raw-mosaic-\(Self.digitFreeSuffix()).orf")
+        try Data("this is plainly not a RAW file".utf8).write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        do {
+            _ = try decoder.decodeMosaic(at: url)
+            Issue.record("Expected the decoder to reject a non-RAW file")
+        } catch let error as RAWDecodingError {
+            switch error {
+            case .unsupportedFormat, .openFailed:
+                break
+            default:
+                Issue.record("Expected .unsupportedFormat or .openFailed, got \(error)")
+                return
+            }
+            let description = try #require(error.errorDescription)
+            #expect(description.contains(url.lastPathComponent))
+        }
+    }
+
     @Test("A file that is not RAW is rejected without leaking decoder codes",
           arguments: [Data("this is plainly not a RAW file".utf8),
                       Data((0..<65536).map { UInt8($0 % 251) })])
@@ -125,7 +157,9 @@ struct LibRawDecoderErrorTests {
             .imageExtractionFailed(url, diagnostic),
             .invalidDecodedImage(url, reason: "geometry"),
             .outOfMemory(url),
-            .decoderUnavailable
+            .decoderUnavailable,
+            .unsupportedRawStorage(url, reason: "three-channel storage"),
+            .unsupportedSensorLayout(url, reason: "Foveon sensor")
         ]
 
         for error in errors {
