@@ -16,14 +16,20 @@ and then diverge, and they are not interchangeable.
 ```text
                  open_file()
                       ↓
-              metadata snapshot          ← taken here, before any processing
+        current-state metadata snapshot     ← imgdata.{idata,sizes,color}
                       ↓
                    unpack()
+                   ├─ format-specific decode / optional linearisation
+                   ├─ crop_masked_pixels() where applicable
+                   └─ cblack/black canonicalisation, then the RAW-state copy
                    ↙      ↘
-   copy raw_image          dcraw_process() → dcraw_make_mem_image()
-          ↓                          ↓
-      RAWMosaic                   RAWImage
-   (application-owned          (reference / preview only)
+  RAW-state metadata        dcraw_process() → dcraw_make_mem_image()
+   snapshot                            ↓
+          ↓                         RAWImage
+   copy raw_image              (reference / preview only)
+          ↓
+      RAWMosaic
+   (application-owned
     RAW pipeline)
 ```
 
@@ -35,10 +41,43 @@ and then diverge, and they are not interchangeable.
   for future processing, and its demosaicing and black/white handling are
   LibRaw's, not ours.
 
-The metadata snapshot is taken before either branch. This matters: LibRaw's
-`adjust_bl()` and `subtract_black_internal()` **mutate** `imgdata.color`,
-folding `black` into `cblack[0...3]` and then zeroing both. Metadata read after
-processing would describe the post-process state, not the file.
+### The two metadata snapshots
+
+Both paths snapshot metadata before any *processing*, but they snapshot
+different LibRaw state, deliberately.
+
+| | Mosaic path | Processed-RGB path |
+| --- | --- | --- |
+| Taken | after `unpack()` | after `open_file()` |
+| Source | `imgdata.rawdata.{iparams,sizes,color}` | `imgdata.{idata,sizes,color}` |
+| Describes | the samples in `RAWMosaic` | the file as parsed |
+
+Why the mosaic path waits, and why it reads `rawdata`:
+
+- **`unpack()` can change RAW-level metadata.** For `raw_image` files it calls
+  `crop_masked_pixels()` to derive black levels from the optical-black border,
+  and then canonicalises the common component of `cblack[0...3]` into `black`
+  (`i = min(cblack[0...3])`, subtracted from each entry and added to `black`).
+  A snapshot taken before `unpack()` therefore need not describe the samples
+  that come out of it.
+- **`imgdata.rawdata.color` is the copy LibRaw itself takes** at the very end
+  of `unpack()`, in the same statement block that publishes the `raw_image`
+  buffer. It is the state LibRaw pairs with those samples. The live
+  `imgdata.color`, by contrast, is what `raw2image_ex()` restores *from*
+  `rawdata` and then `adjust_bl()`/`subtract_black_internal()` mutate — folding
+  `black` into `cblack[0...3]` and zeroing both — and `scale_colors()` rewrites
+  `maximum`.
+
+So the mosaic's metadata and its samples describe the same RAW state by
+construction, not because the path happens to stop early. Immediately after
+`unpack()` the two states are identical copies; they diverge only once
+`dcraw_process` runs.
+
+The consequence for callers: **how the effective black level is split between
+`Levels.black` and `Levels.perPlaneBlack` differs between the two paths**, and
+neither split is wrong. Always combine them through
+`Levels.blackLevel(row:column:colorPlane:)`; never compare the fields across
+paths and never pre-sum them by hand.
 
 ## Sample vocabulary
 
@@ -48,6 +87,8 @@ These terms are distinct and must not be used interchangeably.
 | --- | --- | --- |
 | **Encoded RAW file values** | The bytes in the file: compressed, packed, vendor-specific. | Not exposed by this project. |
 | **LibRaw-unpacked sensor mosaic sample** | After LibRaw's format-specific decoding — bit unpacking, byte order, and, for formats that use one, LibRaw's per-format linearisation curve. One sample per mosaic location. | `RAWMosaic.samples` |
+| **Source RAW bit depth** | How wide a sample was *in the file*, per the format parser. Source/file-format information only. | `RAWMosaic.sourceRawBitDepth`, `SensorColorLayout.sourceRawBitDepth` |
+| **White / saturation level** | The value a normalisation stage treats as full scale. | `RAWMetadata.Levels.maximum` / `linearMaximum` |
 | **Black-corrected sample** | The above, minus the effective black level. | Not implemented yet. |
 | **Normalised sample** | Black-corrected and rescaled against the saturation level. | Not implemented yet. |
 | **Demosaiced camera RGB** | Three channels per pixel, camera-native primaries, no matrix applied. | `RAWImage` (produced by LibRaw, on the reference path only) |
@@ -82,6 +123,65 @@ constant rather than a caller-settable parameter.
 | Camera colour matrix | no | `dcraw_process` only. |
 | Gamma / transfer function | no | `dcraw_process` only. |
 | Orientation | no | Mosaic geometry is the sensor's own active-area layout. |
+
+## Bit depth is not a white level
+
+These three are distinct, and conflating them would silently mis-scale every
+image:
+
+```text
+source RAW bit depth
+        ≠
+LibRaw-unpacked sample numeric domain
+        ≠
+white / saturation level
+```
+
+- **Source RAW bit depth** (`RAWMosaic.sourceRawBitDepth`, from LibRaw's
+  `imgdata.color.raw_bps`) describes the *file*: how many bits a sample
+  occupied before LibRaw touched it. It is optional, and stays `nil` when the
+  decoder reports nothing — no `16` is ever substituted.
+- **The unpacked numeric domain** is whatever `unpack()` produced. Several
+  formats pass samples through a per-format linearisation curve inside
+  `unpack()`, which can move values outside the source depth's nominal range;
+  LibRaw updates `maximum` when it does.
+- **The white level** is `RAWMetadata.Levels.maximum` (and per-plane
+  `linearMaximum`), read from the same post-unpack RAW state as the samples.
+
+So `2 ^ sourceRawBitDepth - 1` is **not** the authoritative white level and must
+never be used as one. The future normalisation stage is conceptually
+
+```text
+(sample - black) / (white - black)
+```
+
+with `black` from `Levels.blackLevel(row:column:colorPlane:)` and `white` from
+the level metadata or an explicitly selected white-level model — never derived
+from the bit depth. None of this is implemented yet.
+
+For `.uint16` mosaic storage a reported source depth of `1...16` is accepted and
+`nil` is accepted; `0`, a negative value, or anything above `16` makes
+`RAWMosaic.isGeometryConsistent` false. A depth wider than the storage is a
+claim the storage cannot hold, so it is rejected rather than believed — and in
+no case is the value used to rescale samples.
+
+## Masked pixels and who owns black estimation
+
+For V1, application-owned black subtraction will use **LibRaw's post-unpack
+black-level model**, including any black level LibRaw derived from masked
+(optical-black) pixels inside `crop_masked_pixels()` during `unpack()`. This is
+a deliberate choice, not an oversight.
+
+The project does **not**:
+
+- expose the optical-black border samples in `RAWMosaic` (it is active-area
+  only),
+- independently estimate black from that border,
+- override LibRaw's black estimation.
+
+Independent black estimation from masked pixels is a plausible later
+calibration feature, and would be its own explicit, testable stage. It is out
+of scope here.
 
 ## Geometry and coordinates
 
@@ -146,17 +246,48 @@ Measured from `RAW/OLYMPUS.ORF` under LibRaw 0.22.2.
 | LibRaw `raw_pitch` | 8160 bytes |
 | Copied row stride | 8112 bytes |
 | Storage / format | `raw_image`, `UInt16` |
-| Useful precision | 12 bits |
+| Source RAW bit depth | 12 |
 | Min / max sample | 61 / 2187 |
-| Metadata maximum | 4095 (0 samples at or above it) |
+| Metadata maximum / linear maximum | 4095 (0 samples at or above it) / `[3680, 3680, 3680, 3680]` |
 | Samples below effective black | 11 |
+| Per-CFA-plane means (sparse) | 584.5 / 423.3 / 137.2 / 430.4 |
 
-Black levels remain **metadata only** at this stage: global black 0, per-plane
-`[64, 64, 64, 64]`. The mosaic still contains that offset, deliberately. The
-11 samples below the effective black level are expected — sensor noise
-straddles the black point — and are a reason the future subtraction stage must
-decide explicitly what to do with negative results rather than clamping by
-accident.
+Black levels remain **metadata only** at this stage, and this fixture shows the
+`unpack()` redistribution concretely:
+
+| State | `black` | `cblack[0...3]` | effective per-plane black |
+| --- | --- | --- | --- |
+| pre-unpack (`imgdata.color`) | 0 | `[64, 64, 64, 64]` | 64 |
+| post-unpack (`imgdata.rawdata.color`) | 64 | `[0, 0, 0, 0]` | 64 |
+
+`crop_masked_pixels()` contributes nothing here — the E-PL3 reports zero
+margins, so there is no masked border to estimate from — and the entire change
+is the canonicalisation. The effective level is unchanged, which is why nothing
+downstream that goes through `blackLevel(row:column:colorPlane:)` moves.
+
+The mosaic still contains that offset, deliberately. The 11 samples below the
+effective black level are expected — sensor noise straddles the black point —
+and are a reason the future subtraction stage must decide explicitly what to do
+with negative results rather than clamping by accident.
+
+## Decoder warnings by stage
+
+LibRaw accumulates `process_warnings` with `|=` and never clears it outside
+`recycle()`, so the set only grows as the pipeline advances. The shim's
+`ir_libraw_warning_bits` therefore requires only a successful open, **not** a
+successful `dcraw_process`.
+
+| Warning | Raised in | Mosaic path | RGB path |
+| --- | --- | --- | --- |
+| `vendorCropSuggested` | `identify()` | yes | yes |
+| `jpegDecodingUnavailable` | `identify()` | yes | yes |
+| `fujiProcessingApplied` | `parse_fuji()` | yes | yes |
+| `fallbackToAHDDemosaic` | `dcraw_process()` | no | yes |
+| `badCameraWhiteBalance` | `scale_colors()` | no | yes |
+
+What the mosaic path reports is a genuine prefix of the full set, not a
+suppressed zero. Flags one path cannot raise stay mapped, because the other
+can.
 
 ## Not yet decided
 
@@ -164,4 +295,4 @@ accident.
 - The working colour space (ADR 0002), which is downstream of demosaicing.
 - Whether the mosaic path should ever expose the masked border, e.g. for
   measuring the black level from the optical-black region instead of trusting
-  metadata.
+  LibRaw's own estimate (see "Masked pixels and who owns black estimation").

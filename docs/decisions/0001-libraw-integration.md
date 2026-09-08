@@ -165,11 +165,12 @@ Three claims in this ADR were stronger than the implementation:
 
 - **Black levels.** The boundary preserved `black`, `cblack[0...3]` and the
   black pattern's *dimensions*, but discarded the pattern *values* in
-  `cblack[6...]`. It now carries the complete model. Note that our metadata is
-  read straight after `open_file()`, i.e. before `LibRaw::adjust_bl()` folds
-  `black` into the per-plane offsets — so the terms are kept separate and
-  combined explicitly by `Levels.blackLevel(row:column:colorPlane:)`. A
-  consumer that pre-sums them differently will be wrong.
+  `cblack[6...]`. It now carries the complete model. The claim that our
+  metadata is "read straight after `open_file()`" was true when written and is
+  now true of the processed-RGB path only; see A6. Either way the terms are
+  kept separate and combined explicitly by
+  `Levels.blackLevel(row:column:colorPlane:)`. A consumer that pre-sums them
+  differently will be wrong.
 - **User-facing decoder codes.** Decision 2 claims the error model "never
   carries an opaque integer to the UI". It did: `DecoderDiagnostic.description`
   embedded the code and the failure view rendered it. Every user-facing string
@@ -207,9 +208,10 @@ Decision 3 lists what LibRaw still performs. Two refinements:
 - **Black subtraction and scaling** happen inside `dcraw_process` via
   `adjust_bl()` and `subtract_black_internal()`, which also *mutate*
   `imgdata.color` (zeroing `cblack` and `black`). Our metadata snapshot is
-  taken before that, so `RAWMetadata.Levels` describes the file, not the
-  post-process state. This matters for the mosaic milestone, which will want
-  the pre-process values.
+  taken before that, so `RAWMetadata.Levels` describes a pre-*processing*
+  state. The prediction that the mosaic milestone "will want the pre-process
+  values" held, but was not precise enough: pre-process is not the same as
+  pre-`unpack`. A6 corrects it.
 
 
 ### A5 — Mosaic access, and what `unpack()` alone guarantees
@@ -240,3 +242,75 @@ the vendored 0.22.2 source rather than assumed:
   representation LibRaw can give us, which is not the same as an untouched one.
 
 The concrete RAW-stage contract now lives in `docs/raw-pipeline.md`.
+
+### A6 — "Before unpack" was the wrong guarantee for the mosaic path
+
+Both A2 and A4 lean on the same claim: that a metadata snapshot taken
+immediately after `open_file()` "guarantees the RAW state". For the
+processed-RGB path that is still the right snapshot — it describes the file,
+before `dcraw_process` rewrites `imgdata.color`. For the mosaic path it was
+wrong, and this amendment records why.
+
+`LibRaw::unpack()` can itself change RAW-level metadata, verified against the
+vendored 0.22.2 source rather than assumed:
+
+- for `raw_image` files it calls `crop_masked_pixels()` — LibRaw's own comment
+  is "calculate black levels" — which derives `black`/`cblack` from masked
+  (optical-black) sensor samples where the format has them;
+- it then canonicalises the common component of `cblack[0...3]` into `black`:
+  `i = min(cblack[0...3])`, subtracted from each entry and added to `black`;
+- it finally `memmove`s `imgdata.{color,sizes,idata}` into
+  `imgdata.rawdata.{color,sizes,iparams}`, in the same statement block that
+  publishes the `raw_image` buffer.
+
+So a pre-`unpack` snapshot need not describe the samples `unpack()` produces.
+
+**Decision.** `LibRawDecoder.decodeMosaic(at:)` snapshots metadata *after* a
+successful `unpack()`, and reads `imgdata.rawdata.{iparams,sizes,color}` rather
+than the live `imgdata.{idata,sizes,color}`. Both halves are deliberate:
+
+- **after unpack**, so the metadata reflects any black level `unpack()` derived
+  or redistributed;
+- **from `rawdata`**, because that is the copy LibRaw itself pairs with the
+  `raw_image` buffer, and it is immune to later mutation — `raw2image_ex()`
+  restores the live `imgdata.color` *from* `rawdata` and then
+  `adjust_bl()`/`subtract_black_internal()` mutate it and `scale_colors()`
+  rewrites `maximum`.
+
+Immediately after `unpack()` the two states are identical copies, so the choice
+of source is not observable on the mosaic path alone. It is chosen anyway,
+because it is the one that stays correct if the path ever grows a stage that
+also processes.
+
+The shim's `ir_libraw_copy_metadata` therefore takes an explicit
+`ir_libraw_metadata_source`, and refuses `IR_LIBRAW_METADATA_RAW_STATE` before
+a successful unpack rather than returning zeroed structures that would look
+like plausible metadata.
+
+**Observable consequence.** For the Olympus E-PL3, the pre-unpack state reports
+`black 0, cblack [64, 64, 64, 64]` and the post-unpack state reports
+`black 64, cblack [0, 0, 0, 0]`. The redistribution is value-preserving — the
+effective per-plane level is 64 either way — but the *split* differs between
+the two decode paths. `Levels.blackLevel(row:column:colorPlane:)` is the only
+supported way to combine them, and A2's warning against pre-summing now has
+teeth.
+
+### A7 — Warning bits were gated on a call the mosaic path never makes
+
+`ir_libraw_process_warnings` returned 0 unless `dcraw_process()` had succeeded.
+Since `decodeMosaic` deliberately never calls it, every warning that path could
+observe was discarded, and `RAWMosaicProcessing.rawWarningBits` was
+structurally always 0 while claiming to report what `unpack()` had raised.
+
+LibRaw accumulates `process_warnings` with `|=` and clears it only in
+`recycle()`, and it raises warnings well before `dcraw_process`:
+`LIBRAW_WARN_VENDOR_CROP_SUGGESTED`, `LIBRAW_WARN_NO_JPEGLIB` and
+`LIBRAW_WARN_PARSEFUJI_PROCESSED` all come from `identify()`/`parse_fuji()`,
+i.e. during `open_file()`.
+
+The function is now `ir_libraw_warning_bits` — the old name asserted a
+relationship to `dcraw_process` that was never the right contract — and it
+requires only a successful open. The typed application-level mapping is
+unchanged: flags only `dcraw_process` can raise (`LIBRAW_WARN_FALLBACK_TO_AHD`,
+`LIBRAW_WARN_BAD_CAMERA_WB`) stay mapped, because the RGB path does raise them.
+The stage-by-stage table is in `docs/raw-pipeline.md`.

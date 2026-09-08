@@ -47,9 +47,9 @@ unpacked sensor mosaic.
 
 There are two decode paths, and they are not interchangeable:
 
-- **`decodeMosaic(at:)`** — `open → metadata snapshot → unpack → RAWMosaic`.
-  `dcraw_process` is never called. One LibRaw-unpacked sample per sensor mosaic
-  location, active area only. This is the foundation for the
+- **`decodeMosaic(at:)`** — `open → unpack → RAW-state metadata snapshot →
+  RAWMosaic`. `dcraw_process` is never called. One LibRaw-unpacked sample per
+  sensor mosaic location, active area only. This is the foundation for the
   application-owned pipeline.
 - **`decode(at:options:)`** — the existing processed-RGB path, kept as the
   workspace preview and as a diagnostic reference. LibRaw does the demosaicing
@@ -78,8 +78,10 @@ investigate, not a test to adjust:
 | --- | --- |
 | Raw readout / active area | 4080 × 3040 / 4056 × 3040 (both margins 0) |
 | Full / half output | 4056 × 3040 / 2028 × 1520 |
-| CFA | `0xB4B4B4B4`, `RGBG`, 12 bits per raw sample |
-| Black | global 0, per-plane `[64, 64, 64, 64]`, no pattern |
+| CFA | `0xB4B4B4B4`, `RGBG`, source RAW bit depth 12 |
+| Black (pre-unpack, RGB path) | global 0, per-plane `[64, 64, 64, 64]`, no pattern |
+| Black (post-unpack, mosaic path) | global 64, per-plane `[0, 0, 0, 0]`, no pattern |
+| Effective black level | 64 on every plane, either way |
 | Maximum / linear maximum | 4095 / `[3680, 3680, 3680, 3680]` |
 | Camera WB | `[0.640625, 1.0, 5.5625, 0.0]` |
 | Daylight pre-multipliers | `[2.2629104, 0.9284695, 1.2071348, 0.0]` |
@@ -107,14 +109,29 @@ black-level lookups. Values are **not** rescaled — a 12-bit E-PL3 sample stays
 in `0...4095` inside a 16-bit cell.
 
 A sample is a **LibRaw-unpacked sensor sample**, not an ADC value: LibRaw's
-unpackers apply per-format linearisation curves inside `unpack()` itself.
+unpackers apply per-format linearisation curves inside `unpack()` itself. For
+the same reason `RAWMosaic.sourceRawBitDepth` is *file-format* information and
+never a white level — `2 ^ depth - 1` must not be used as one; normalisation
+takes its white level from `RAWMetadata.Levels`.
 Everything after that — black subtraction, normalisation, white balance,
 demosaicing, colour matrix, gamma, orientation — is recorded on
 `RAWMosaicProcessing` as explicitly not applied, and those facts are `let`
 constants rather than parameters a caller could set wrongly.
 
 Black levels stay metadata-only at this stage. The mosaic deliberately still
-contains the per-plane black offset; subtracting it is the next milestone.
+contains the black offset; subtracting it is the next milestone, and it will
+use LibRaw's post-unpack black-level model — including any level LibRaw derived
+from masked pixels during `unpack()`. The mosaic does not expose the
+optical-black border, and the app does not estimate black independently.
+
+The mosaic path's metadata is snapshotted **after** `unpack()`, from
+`imgdata.rawdata.{iparams,sizes,color}` — the copy LibRaw itself pairs with the
+`raw_image` buffer. `unpack()` can move RAW-level metadata (it derives black
+from masked pixels where applicable, then canonicalises the common `cblack`
+component into `black`), so an earlier snapshot need not describe the samples
+that come out of it. One consequence: the two decode paths split the effective
+black level differently between `Levels.black` and `Levels.perPlaneBlack`.
+Always combine them via `Levels.blackLevel(row:column:colorPlane:)`.
 
 Only LibRaw's single-channel `raw_image` storage is supported. Three/four-channel,
 float, Foveon and the `filters == 1` layout fail explicitly with
@@ -220,14 +237,24 @@ separate because this is the model LibRaw exposes right after `open_file()`,
 *before* `adjust_bl()` folds `black` into the per-plane offsets. Pattern
 coordinates are active-image coordinates, matching LibRaw's own use of it.
 
-The Olympus E-PL3 uses only the simple per-plane case: `black == 0`,
-`perPlaneBlack == [64, 64, 64, 64]`, no pattern.
+How the total is split between `black` and `perPlaneBlack` depends on which
+path produced the metadata, because `unpack()` canonicalises the common
+`cblack` component into `black`. For the Olympus E-PL3: `black == 0`,
+`perPlaneBlack == [64, 64, 64, 64]` before unpack, and `black == 64`,
+`perPlaneBlack == [0, 0, 0, 0]` after — effective level 64 either way, no
+pattern. Use `blackLevel(row:column:colorPlane:)`; never compare the raw fields
+across paths.
 
 #### Decoder warnings
 
 LibRaw's `process_warnings` bitfield is translated into a small typed
-`RAWDecoderProcessing.Warning` set. Only flags this build can actually raise are
-mapped; flags belonging to back-ends we do not compile (RawSpeed, the DNG SDK,
+`RAWDecoderProcessing.Warning` set. LibRaw only ever ORs bits into it, so the
+set grows as the pipeline advances and is readable from the first successful
+open onward — the mosaic path captures the warnings visible after `unpack()`,
+the RGB path those visible after `dcraw_process`. That is a genuine subset
+relationship, not a suppressed zero; the two flags only `dcraw_process` raises
+(AHD fallback, bad camera WB) stay mapped regardless. Only flags this build can
+actually raise are mapped; flags belonging to back-ends we do not compile (RawSpeed, the DNG SDK,
 LittleCMS) or to options we never pass (bad-pixel maps, dark frames) are
 deliberately left unmapped, each with its reason recorded in source. The
 complete uninterpreted bitfield stays available as `rawWarningBits` for logging
@@ -277,8 +304,12 @@ See [RAW/README.md](RAW/README.md).
   the mosaic path.
 - The mosaic path supports only single-channel `raw_image` storage; no
   three/four-channel, float, Foveon or `filters == 1` file has a mosaic path.
-- The mosaic excludes the optical-black border, so the black level cannot yet
-  be measured from masked pixels — only read from metadata.
+- The mosaic excludes the optical-black border, so the black level cannot be
+  measured from masked pixels independently — the app uses LibRaw's own
+  post-unpack estimate. Deliberate for V1; see docs/raw-pipeline.md.
+- No RAW fixture in the test set raises a LibRaw warning at any stage, so the
+  warning-bit lifecycle is tested structurally rather than against an observed
+  non-zero bitfield.
 - Only Olympus ORF has been verified against a real file.
 - The preview is display-only: the camera-native linear samples are interpreted
   as linear sRGB with no white balance, so a visible-light frame shows the
