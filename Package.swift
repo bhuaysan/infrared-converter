@@ -77,7 +77,11 @@ let package = Package(
         ),
         .testTarget(
             name: "InfraredConverterTests",
-            dependencies: ["InfraredConverter"],
+            // CLibRaw is a direct dependency so the shim's own lifecycle
+            // contract (which calls are valid at which stage, and what they
+            // return before that) can be tested at the C boundary rather than
+            // only inferred through LibRawDecoder.
+            dependencies: ["InfraredConverter", "CLibRaw"],
             path: "Tests/InfraredConverterTests"
         )
     ],

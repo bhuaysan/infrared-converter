@@ -3,8 +3,8 @@ import Foundation
 @testable import InfraredConverter
 
 /// Integration tests for the direct-mosaic-access path against a real RAW
-/// file: `RAW file → open → metadata snapshot → unpack → RAWMosaic`, with
-/// `dcraw_process` never called.
+/// file: `RAW file → open → unpack → RAW-state metadata snapshot → RAWMosaic`,
+/// with `dcraw_process` never called.
 ///
 /// These require a local fixture (see `RAWFixtures`) and skip cleanly
 /// without it.
@@ -29,20 +29,29 @@ struct LibRawDecoderMosaicFixtureTests {
         #expect(decoded.mosaic.isGeometryConsistent)
     }
 
-    @Test("Bits per sample is the E-PL3's useful 12-bit precision, and values fit within it")
-    func bitsPerSampleAndRange() throws {
+    @Test("The source RAW bit depth is the E-PL3's 12 bits, and it is not used as a white level")
+    func sourceRawBitDepthAndRange() throws {
         let url = try #require(RAWFixtures.olympusORF)
         let decoded = try LibRawDecoder().decodeMosaic(at: url)
 
-        #expect(decoded.mosaic.bitsPerSample == 12)
+        #expect(decoded.mosaic.sourceRawBitDepth == 12)
 
         let statistics = MosaicStatistics(mosaic: decoded.mosaic)
-        // An invariant, not a hardcoded pixel: every sample must fit within
-        // the precision the decoder itself reports (2^12 - 1 = 4095).
-        let bits = try #require(decoded.mosaic.bitsPerSample)
-        let ceiling = (1 << bits) - 1
-        #expect(Int(statistics.maximum) <= ceiling)
         #expect(statistics.maximum > statistics.minimum)
+
+        // Samples do happen to fit the source depth's range for this camera,
+        // but that is an observation about this file, not a guarantee the
+        // type makes — `unpack()` may linearise, and the depth describes the
+        // file rather than what came out. So the white level a later stage
+        // will use comes from the level metadata, and the two are asserted
+        // separately here precisely so they are not conflated.
+        let depth = try #require(decoded.mosaic.sourceRawBitDepth)
+        #expect(depth == 12)
+        #expect(Int(statistics.maximum) <= (1 << depth) - 1)
+
+        // The authoritative white level. For the E-PL3 it coincides with
+        // 2^12 - 1; the point is that it is read, not derived.
+        #expect(decoded.metadata.levels.maximum == 4095)
     }
 
     @Test("The mosaic is Bayer, and the plane at active (0,0) matches the metadata's own lookup")
@@ -74,16 +83,29 @@ struct LibRawDecoderMosaicFixtureTests {
         #expect(decoded.processing.sourceStorage == .singleChannel)
     }
 
-    @Test("Black is not subtracted from the mosaic: the metadata still reports the E-PL3's own levels")
+    @Test("Black is not subtracted from the mosaic: the metadata reports the post-unpack RAW-state levels")
     func blackLevelsUntouched() throws {
         let url = try #require(RAWFixtures.olympusORF)
         let decoded = try LibRawDecoder().decodeMosaic(at: url)
 
-        // Same values LibRawDecoderFixtureTests.readsMetadata pins for the
-        // processed-RGB path: this path must report the identical, unmutated
-        // metadata, because it never calls adjust_bl() at all.
-        #expect(decoded.metadata.levels.black == 0)
-        #expect(decoded.metadata.levels.perPlaneBlack == [64, 64, 64, 64])
+        // These deliberately differ from the processed-RGB path's pinned
+        // values (black 0, per-plane [64, 64, 64, 64]), which are read from
+        // LibRaw's live state *before* unpack. `unpack()` canonicalises the
+        // common component of cblack into black — i = min(cblack[0...3]) = 64
+        // moves across — so the post-unpack RAW state this path snapshots
+        // reports the same levels split the other way round. See
+        // LibRawShimLifecycleFixtureTests.blackMetadataAcrossUnpack.
+        #expect(decoded.metadata.levels.black == 64)
+        #expect(decoded.metadata.levels.perPlaneBlack == [0, 0, 0, 0])
+
+        // The split changed; the effective black level did not. This is the
+        // number a later subtraction stage will actually use.
+        for plane in 0..<4 {
+            #expect(decoded.metadata.levels.blackLevel(row: 0, column: 0, colorPlane: plane) == 64)
+        }
+
+        // And nothing has been subtracted from the samples themselves.
+        #expect(decoded.processing.blackLevelSubtracted == false)
     }
 
     /// Prints the concrete diagnostic numbers requested for this milestone:
@@ -107,13 +129,16 @@ struct LibRawDecoderMosaicFixtureTests {
         report += "LibRaw raw_pitch (bytes): \(decoded.processing.sourceRowPitch)\n"
         report += "copied row stride (bytes): \(decoded.processing.destinationRowStride)\n"
         report += "sample storage: \(decoded.processing.sourceStorage), format: \(mosaic.sampleFormat)\n"
-        report += "bits per sample: \(mosaic.bitsPerSample.map(String.init) ?? "unreported")\n"
+        report += "source RAW bit depth: \(mosaic.sourceRawBitDepth.map(String.init) ?? "unreported")\n"
         report += "min: \(statistics.minimum), max: \(statistics.maximum), mean (sparse sample): \(statistics.mean)\n"
         report += "per-CFA-plane means (sparse sample): \(statistics.perPlaneMean)\n"
         report += "count below effective black level (full buffer): \(statistics.belowBlackCount)\n"
         report += "count at/above metadata.levels.maximum (full buffer): \(statistics.atOrAboveMaximumCount)\n"
         report += "metadata.levels.maximum: \(metadata.levels.maximum)\n"
         report += "metadata.levels.dataMaximum: \(String(describing: metadata.levels.dataMaximum))\n"
+        report += "metadata.levels.black: \(metadata.levels.black)\n"
+        report += "metadata.levels.perPlaneBlack: \(metadata.levels.perPlaneBlack)\n"
+        report += "metadata.levels.linearMaximum: \(String(describing: metadata.levels.linearMaximum))\n"
         report += "-----------------------------------------------------\n"
 
         // swift-testing has no first-class "print for the record" API in
