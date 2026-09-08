@@ -9,7 +9,7 @@ struct LibRawDecoderErrorTests {
 
     @Test("The vendored LibRaw reports its version")
     func reportsVersion() {
-        #expect(LibRawDecoder.libRawVersion.hasPrefix("0.21"))
+        #expect(LibRawDecoder.libRawVersion.hasPrefix("0.22"))
     }
 
     @Test("A nonexistent file fails before the decoder is involved")

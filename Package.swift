@@ -7,44 +7,64 @@ let package = Package(
         .macOS(.v14)
     ],
     targets: [
-        // Vendored LibRaw 0.21.4 plus the small plain-C shim that is the only
-        // C++ surface the Swift code ever sees.
-        // See docs/decisions/0001-libraw-integration.md.
+        // Vendored LibRaw, built verbatim from the upstream tarball.
+        //
+        // This target exists purely so that upstream's warnings can be silenced
+        // without silencing ours: `-w` applies here and nowhere else. See
+        // Sources/CLibRaw/VENDOR.md.
         .target(
-            name: "CLibRaw",
-            path: "Sources/CLibRaw",
+            name: "CLibRawVendor",
+            path: "Sources/CLibRawVendor",
             exclude: [
-                "vendor/COPYRIGHT",
-                "vendor/LICENSE.CDDL",
-                "vendor/LICENSE.LGPL",
-                "vendor/src/Makefile",
+                "COPYRIGHT",
+                "LICENSE.CDDL",
+                "LICENSE.LGPL",
                 // Glue for optional back-ends we do not build (Adobe DNG SDK,
                 // RawSpeed). They compile to nothing but reference headers we
                 // do not vendor.
-                "vendor/src/integration",
+                "src/integration",
                 // LibRaw ships "placeholder" translation units used when the
                 // corresponding real implementation is left out of a build.
                 // We build the real ones, so these must be excluded or they
                 // produce duplicate symbols.
-                "vendor/src/postprocessing/postprocessing_ph.cpp",
-                "vendor/src/preprocessing/preprocessing_ph.cpp",
-                "vendor/src/write/write_ph.cpp"
+                "src/postprocessing/postprocessing_ph.cpp",
+                "src/preprocessing/preprocessing_ph.cpp",
+                "src/write/write_ph.cpp"
             ],
             sources: [
-                "shim",
-                "vendor/src"
+                "src"
+            ],
+            // The target root is the include root: upstream's sources use
+            // "libraw/…", "internal/…" and "../../internal/…" interchangeably.
+            publicHeadersPath: ".",
+            cxxSettings: [
+                // LibRaw optional back-ends we deliberately do not build.
+                // NO_LCMS is deliberately absent: LibRaw derives it itself from
+                // the absence of USE_LCMS/USE_LCMS2, and defining it here warns.
+                .define("NO_JPEG"),
+                .define("LIBRAW_NODLL"),
+                // Upstream's own warnings are not actionable for us and would
+                // bury the ones from code we own. Scoped to this target only.
+                .unsafeFlags(["-w"])
+            ]
+        ),
+        // Our plain-C boundary: the only C++ surface Swift ever sees, and the
+        // only file in the project that includes libraw/libraw.h.
+        //
+        // Compiled with warnings enabled — it is code we own.
+        .target(
+            name: "CLibRaw",
+            dependencies: ["CLibRawVendor"],
+            path: "Sources/CLibRaw",
+            sources: [
+                "shim"
             ],
             publicHeadersPath: "include",
             cxxSettings: [
-                .headerSearchPath("vendor"),
-                .headerSearchPath("include"),
-                // LibRaw optional back-ends we deliberately do not build.
-                .define("NO_JPEG"),
-                .define("NO_LCMS"),
+                // Must match the vendor target: LIBRAW_NODLL changes the
+                // declarations in libraw_types.h.
                 .define("LIBRAW_NODLL"),
-                // LibRaw's own sources produce a large number of warnings that
-                // are not actionable for us; keep our build output readable.
-                .unsafeFlags(["-w"])
+                .unsafeFlags(["-Wall", "-Wextra"])
             ],
             linkerSettings: [
                 .linkedLibrary("c++")
