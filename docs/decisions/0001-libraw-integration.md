@@ -2,6 +2,9 @@
 
 Status: accepted
 Date: 2026-09-08
+Amended: 2026-09-08 — LibRaw 0.21.4 → 0.22.2, vendor/shim target split, and
+three corrections to what this ADR claimed the boundary guaranteed. The three
+decisions themselves are unchanged; see "Amendments" at the end.
 
 ## Context
 
@@ -20,8 +23,9 @@ not bake in colour decisions calibrated for visible light.
 
 ## Decision 1 — Vendor LibRaw source into the package
 
-LibRaw 0.21.4 sources are vendored under `Sources/CLibRaw/vendor/` and built as
-an ordinary SwiftPM C++ target.
+LibRaw sources are vendored under `Sources/CLibRawVendor/` and built as an
+ordinary SwiftPM C++ target. (Originally LibRaw 0.21.4 under
+`Sources/CLibRaw/vendor/`; now 0.22.2 — see Amendments.)
 
 Alternatives considered:
 
@@ -69,7 +73,8 @@ struct and an image descriptor.
 
 The shim also translates LibRaw's integer error codes into a small classified
 enum while preserving the original code and message, so the application's error
-model never carries an opaque integer to the UI.
+model never carries an opaque integer to the UI. (The Swift side did leak the
+code into user-facing text despite this; corrected — see Amendments.)
 
 ## Decision 3 — Decoder configuration makes no irreversible colour decision
 
@@ -128,3 +133,80 @@ so no application stage is ever applied twice.
 - The remaining obstacle to fully custom infrared processing is decoder-side
   demosaicing. Removing it means consuming `imgdata.rawdata` instead of
   `dcraw_process`, which the shim can grow without changing the Swift API.
+
+
+## Amendments
+
+### A1 — LibRaw 0.22.2, and a two-target build
+
+The vendored tree is now **LibRaw 0.22.2** under `Sources/CLibRawVendor/`, and
+the single `CLibRaw` target has been split in two:
+
+```text
+InfraredConverter (Swift)  →  CLibRaw (our shim)  →  CLibRawVendor (upstream)
+```
+
+The original target applied `-w` to upstream *and* to `libraw_shim.cpp`, so
+warnings in code we own were invisible. The vendor target keeps `-w`; the shim
+target builds with `-Wall -Wextra` and compiles clean. Swift still sees only the
+shim's plain-C surface.
+
+Upgrading required no source changes and no new defines. The 0.22.2 tree only
+adds files relative to 0.21.4, so the exclusion list carried over after being
+re-checked. One define was *removed*: `NO_LCMS`, which 0.22 derives itself and
+which now warns if defined explicitly.
+
+The E-PL3 fixture reproduces every recorded 0.21.4 value exactly (see the
+README table). Decision 3's parameter table is unaffected.
+
+### A2 — What the boundary preserves was overstated
+
+Three claims in this ADR were stronger than the implementation:
+
+- **Black levels.** The boundary preserved `black`, `cblack[0...3]` and the
+  black pattern's *dimensions*, but discarded the pattern *values* in
+  `cblack[6...]`. It now carries the complete model. Note that our metadata is
+  read straight after `open_file()`, i.e. before `LibRaw::adjust_bl()` folds
+  `black` into the per-plane offsets — so the terms are kept separate and
+  combined explicitly by `Levels.blackLevel(row:column:colorPlane:)`. A
+  consumer that pre-sums them differently will be wrong.
+- **User-facing decoder codes.** Decision 2 claims the error model "never
+  carries an opaque integer to the UI". It did: `DecoderDiagnostic.description`
+  embedded the code and the failure view rendered it. Every user-facing string
+  surface is now code-free; `logDescription` is the loggable form.
+- **Warnings.** `RAWDecoderProcessing.warnings` existed but was never
+  populated, which is worse than absent — it implied a capture that was not
+  happening. It is now a typed set decoded from `process_warnings`, mapping
+  only flags this build can raise.
+
+### A3 — CFA coordinates are active-image coordinates
+
+`SensorColorLayout.colorPlaneIndex(row:column:)` documented its coordinates as
+raw-readout coordinates. That was wrong, and would have produced a
+margin-sized origin error the moment a camera with non-zero margins met the
+mosaic pipeline.
+
+The convention is **active-image coordinates**, chosen because the processing
+pipeline will operate on the active-area mosaic, and because it is what LibRaw
+itself uses: `fcol()` adds `top_margin`/`left_margin` before indexing the 16×16
+table, and `identify.cpp` builds the exposed `xtrans` table from the
+sensor-absolute `xtrans_abs` with those margins already folded in.
+
+The consequence worth stating plainly: **margins are accounted for exactly once,
+by LibRaw, before we see `filters` or `xtrans`.** This API must not add them
+again. Tests with non-zero margins exist specifically to fail if it ever does.
+
+### A4 — What `dcraw_process` actually does
+
+Decision 3 lists what LibRaw still performs. Two refinements:
+
+- **Orientation** is applied only when requested *and* when the camera recorded
+  a non-zero flip. The provenance record now separates the request from the
+  outcome; previously it reported a transform whenever handling was enabled,
+  including for the E-PL3, whose flip is 0.
+- **Black subtraction and scaling** happen inside `dcraw_process` via
+  `adjust_bl()` and `subtract_black_internal()`, which also *mutate*
+  `imgdata.color` (zeroing `cblack` and `black`). Our metadata snapshot is
+  taken before that, so `RAWMetadata.Levels` describes the file, not the
+  post-process state. This matters for the mosaic milestone, which will want
+  the pre-process values.
