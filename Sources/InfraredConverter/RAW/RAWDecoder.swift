@@ -82,7 +82,8 @@ public struct RAWDecodeOptions: Equatable, Sendable {
 /// decoder silently did them first. Every field is a statement of fact about
 /// the buffer in the accompanying `RAWImage`.
 public struct RAWDecoderProcessing: Equatable, Sendable {
-    /// Identifies the decoder, e.g. "LibRaw 0.21.4".
+    /// Identifies the decoder and its version, e.g. `"LibRaw 0.22.2-Release"`.
+    /// Produced by `LibRawDecoder` from the vendored library, never hardcoded.
     public var decoderIdentifier: String
     /// Black level subtracted from the samples.
     public var blackLevelSubtracted: Bool
@@ -93,8 +94,16 @@ public struct RAWDecoderProcessing: Equatable, Sendable {
     public var appliedWhiteBalanceMultipliers: [Float]
     /// Whether `appliedWhiteBalanceMultipliers` are all 1.0.
     public var whiteBalanceIsUnity: Bool { appliedWhiteBalanceMultipliers.allSatisfy { $0 == 1.0 } }
-    /// Demosaicing the decoder performed, if any.
-    public var demosaic: RAWDecodeOptions.Demosaic?
+    /// The demosaicing algorithm the caller requested, if any.
+    /// `nil` in half-size mode, where no interpolation is requested at all.
+    public var requestedDemosaic: RAWDecodeOptions.Demosaic?
+    /// The demosaicing algorithm that actually ran, if any.
+    ///
+    /// May differ from `requestedDemosaic`: LibRaw can silently substitute AHD
+    /// when the requested algorithm is unavailable for a given file (see
+    /// `Warning.fallbackToAHDDemosaic`). `nil` when no demosaicing happened
+    /// (half-size mode).
+    public var appliedDemosaic: RAWDecodeOptions.Demosaic?
     /// Whether a camera/vendor colour matrix was applied to the samples.
     public var cameraColorMatrixApplied: Bool
     /// Whether an automatic brightness/exposure scaling was applied.
@@ -140,7 +149,8 @@ public struct RAWDecoderProcessing: Equatable, Sendable {
         blackLevelSubtracted: Bool,
         normalizedToFullRange: Bool,
         appliedWhiteBalanceMultipliers: [Float],
-        demosaic: RAWDecodeOptions.Demosaic?,
+        requestedDemosaic: RAWDecodeOptions.Demosaic?,
+        appliedDemosaic: RAWDecodeOptions.Demosaic?,
         cameraColorMatrixApplied: Bool,
         autoBrightnessApplied: Bool,
         highlightReconstructionApplied: Bool,
@@ -154,7 +164,8 @@ public struct RAWDecoderProcessing: Equatable, Sendable {
         self.blackLevelSubtracted = blackLevelSubtracted
         self.normalizedToFullRange = normalizedToFullRange
         self.appliedWhiteBalanceMultipliers = appliedWhiteBalanceMultipliers
-        self.demosaic = demosaic
+        self.requestedDemosaic = requestedDemosaic
+        self.appliedDemosaic = appliedDemosaic
         self.cameraColorMatrixApplied = cameraColorMatrixApplied
         self.autoBrightnessApplied = autoBrightnessApplied
         self.highlightReconstructionApplied = highlightReconstructionApplied
@@ -188,8 +199,9 @@ extension RAWDecoderProcessing {
         case jpegDecodingUnavailable
         /// `LIBRAW_WARN_FALLBACK_TO_AHD`: the requested demosaic algorithm
         /// was unavailable for this file, and LibRaw substituted AHD.
-        /// `RAWDecoderProcessing.demosaic` reflects the caller's request, not
-        /// this fallback.
+        /// `RAWDecoderProcessing.appliedDemosaic` reflects this fallback
+        /// (`.ahd`); `RAWDecoderProcessing.requestedDemosaic` still reflects
+        /// what the caller originally asked for.
         case fallbackToAHDDemosaic
         /// `LIBRAW_WARN_PARSEFUJI_PROCESSED`: Fujifilm-specific parsing (e.g.
         /// Super CCD / EXR sensor geometry) was applied while interpreting
@@ -263,6 +275,24 @@ extension RAWDecoderProcessing {
     /// `rawWarningBits` for logging.
     static func decode(rawWarningBits: UInt32) -> [Warning] {
         Warning.allMapped.filter { rawWarningBits & $0.libRawBit != 0 }
+    }
+
+    /// Determines the demosaic algorithm that actually ran, from what was
+    /// requested, whether this was a half-size decode, and the decoded
+    /// warnings.
+    ///
+    /// - Half-size decode performs no interpolation at all: `nil`.
+    /// - Otherwise, if LibRaw reported `Warning.fallbackToAHDDemosaic`, it
+    ///   silently substituted AHD regardless of what was requested.
+    /// - Otherwise, the requested algorithm ran as asked.
+    static func appliedDemosaic(
+        requested: RAWDecodeOptions.Demosaic?,
+        halfSize: Bool,
+        warnings: [Warning]
+    ) -> RAWDecodeOptions.Demosaic? {
+        if halfSize { return nil }
+        if warnings.contains(.fallbackToAHDDemosaic) { return .ahd }
+        return requested
     }
 }
 

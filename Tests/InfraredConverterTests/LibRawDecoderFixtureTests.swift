@@ -85,7 +85,8 @@ struct LibRawDecoderFixtureTests {
         #expect(decoded.processing.cameraColorMatrixApplied == false)
         #expect(decoded.processing.autoBrightnessApplied == false)
         #expect(decoded.processing.highlightReconstructionApplied == false)
-        #expect(decoded.processing.demosaic == .ahd)
+        #expect(decoded.processing.requestedDemosaic == .ahd)
+        #expect(decoded.processing.appliedDemosaic == .ahd)
 
         // The E-PL3 fixture's own recorded flip is 0 (see readsMetadata), so
         // orientation handling is honoured but produces no actual transform:
@@ -118,7 +119,8 @@ struct LibRawDecoderFixtureTests {
         #expect(half.image.height < full.image.height)
         #expect(half.image.bitsPerChannel == 16)
         #expect(half.image.isGeometryConsistent)
-        #expect(half.processing.demosaic == nil)
+        #expect(half.processing.requestedDemosaic == nil)
+        #expect(half.processing.appliedDemosaic == nil)
     }
 
     @Test("Produces a preview image")

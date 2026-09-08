@@ -37,8 +37,13 @@ struct LibRawDecoderErrorTests {
           arguments: [Data("this is plainly not a RAW file".utf8),
                       Data((0..<65536).map { UInt8($0 % 251) })])
     func nonRAWFile(contents: Data) throws {
+        // The filename must contain no digits. This test asserts that the
+        // decoder's integer code does not appear in user-facing text, and
+        // that text embeds the filename — so a digit-bearing unique suffix
+        // (a UUID, say) can contain the code's digits by coincidence and
+        // fail the assertion at random.
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("not-a-raw-\(UUID().uuidString).orf")
+            .appendingPathComponent("not-a-raw-\(Self.digitFreeSuffix()).orf")
         try contents.write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
 
@@ -76,6 +81,22 @@ struct LibRawDecoderErrorTests {
             #expect(diagnostic.logDescription.contains(codeText))
             #expect(diagnostic.logDescription.contains(diagnostic.message))
         }
+    }
+
+    /// A unique filename suffix built only from letters, so it can never
+    /// collide with the digits of a decoder error code.
+    private static func digitFreeSuffix() -> String {
+        String(UUID().uuidString.unicodeScalars.compactMap { scalar -> Character? in
+            switch scalar {
+            case "0"..."9":
+                // Map each digit onto a distinct letter, preserving uniqueness.
+                return Character(UnicodeScalar(scalar.value - 48 + 103)!)  // 0...9 -> g...p
+            case "-":
+                return nil
+            default:
+                return Character(scalar)
+            }
+        })
     }
 
     @Test("An empty file is rejected")
@@ -160,5 +181,54 @@ struct PreviewImageRendererTests {
         )
 
         #expect(PreviewImageRenderer.makeCGImage(from: bad) == nil)
+    }
+}
+
+/// `RAWDecoderProcessing.appliedDemosaic(requested:halfSize:warnings:)` needs
+/// no RAW fixture: it is pure mapping logic driven by synthetic inputs.
+@Suite("Applied demosaic mapping")
+struct AppliedDemosaicMappingTests {
+    @Test("Half-size decode performs no interpolation, whatever was requested")
+    func halfSizeReportsNothing() {
+        for requested: RAWDecodeOptions.Demosaic? in [nil, .ahd, .vng] {
+            let applied = RAWDecoderProcessing.appliedDemosaic(
+                requested: requested, halfSize: true, warnings: []
+            )
+            #expect(applied == nil)
+        }
+    }
+
+    @Test("A fallback warning means AHD ran, regardless of what was requested",
+          arguments: [RAWDecodeOptions.Demosaic.bilinear, .vng, .ppg])
+    func fallbackOverridesNonAHDRequest(requested: RAWDecodeOptions.Demosaic) {
+        let applied = RAWDecoderProcessing.appliedDemosaic(
+            requested: requested, halfSize: false, warnings: [.fallbackToAHDDemosaic]
+        )
+        #expect(applied == .ahd)
+    }
+
+    @Test("A fallback warning with AHD already requested still reports AHD")
+    func fallbackWithAHDRequest() {
+        let applied = RAWDecoderProcessing.appliedDemosaic(
+            requested: .ahd, halfSize: false, warnings: [.fallbackToAHDDemosaic]
+        )
+        #expect(applied == .ahd)
+    }
+
+    @Test("Without a fallback warning, the requested algorithm is what ran",
+          arguments: [RAWDecodeOptions.Demosaic.bilinear, .vng, .ppg, .ahd])
+    func noFallbackAppliesRequested(requested: RAWDecodeOptions.Demosaic) {
+        let applied = RAWDecoderProcessing.appliedDemosaic(
+            requested: requested, halfSize: false, warnings: []
+        )
+        #expect(applied == requested)
+    }
+
+    @Test("Unrelated warnings do not trigger a fallback")
+    func unrelatedWarningsDoNotOverride() {
+        let applied = RAWDecoderProcessing.appliedDemosaic(
+            requested: .vng, halfSize: false, warnings: [.badCameraWhiteBalance, .fujiProcessingApplied]
+        )
+        #expect(applied == .vng)
     }
 }

@@ -176,7 +176,7 @@ private struct RAWInspectorView: View {
                     row("Colour", loaded.decoded.image.colorSpace == .cameraNative
                         ? "Camera native (no matrix)" : "sRGB")
                     row("White balance", processing.whiteBalanceIsUnity ? "Unity (none applied)" : "Applied")
-                    row("Demosaic", processing.demosaic.map(Self.demosaicDescription) ?? "None (half size)")
+                    row("Demosaic", Self.demosaicRowDescription(processing))
                 }
             }
             .padding(16)
@@ -214,6 +214,17 @@ private struct RAWInspectorView: View {
         case .ppg: return "PPG"
         case .ahd: return "AHD"
         }
+    }
+
+    /// Shows what actually ran, and flags it explicitly when that differs
+    /// from what was requested (e.g. LibRaw silently falling back to AHD).
+    private static func demosaicRowDescription(_ processing: RAWDecoderProcessing) -> String {
+        guard let applied = processing.appliedDemosaic else { return "None (half size)" }
+        let appliedText = demosaicDescription(applied)
+        guard let requested = processing.requestedDemosaic, requested != applied else {
+            return appliedText
+        }
+        return "\(appliedText) (requested \(demosaicDescription(requested)))"
     }
 
     @ViewBuilder

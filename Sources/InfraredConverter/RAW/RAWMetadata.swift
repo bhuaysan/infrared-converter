@@ -275,9 +275,13 @@ extension RAWMetadata {
             /// columns, or a `values` count that does not match `rows *
             /// columns`), so callers never index out of bounds.
             public func value(row: Int, column: Int) -> UInt32? {
-                guard rows > 0, columns > 0, values.count == rows * columns else {
-                    return nil
-                }
+                guard rows > 0, columns > 0 else { return nil }
+                // `rows * columns` can overflow for a pathological pattern —
+                // this type has a public memberwise initialiser, so a caller
+                // can construct one with unchecked extent. Fail closed rather
+                // than trap.
+                let (extent, overflow) = rows.multipliedReportingOverflow(by: columns)
+                guard !overflow, values.count == extent else { return nil }
                 let r = ((row % rows) + rows) % rows
                 let c = ((column % columns) + columns) % columns
                 return values[r * columns + c]

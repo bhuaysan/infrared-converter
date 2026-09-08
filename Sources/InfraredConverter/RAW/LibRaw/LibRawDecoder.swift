@@ -1,8 +1,8 @@
 import Foundation
 import CLibRaw
 
-/// `RAWDecoder` backed by the vendored LibRaw 0.21.4 via the plain-C shim in
-/// `Sources/CLibRaw`.
+/// `RAWDecoder` backed by the vendored LibRaw (see `libRawVersion`) via the
+/// plain-C shim in `Sources/CLibRaw`.
 ///
 /// This is the only Swift type that imports `CLibRaw`.
 ///
@@ -21,8 +21,10 @@ import CLibRaw
 /// - emit 16 bits per channel.
 ///
 /// Demosaicing is the one non-trivial operation LibRaw still performs, because
-/// this milestone needs an RGB buffer. It is reported in
-/// `RAWDecoderProcessing.demosaic`.
+/// this milestone needs an RGB buffer. What was requested and what actually
+/// ran are reported separately in `RAWDecoderProcessing.requestedDemosaic`
+/// and `RAWDecoderProcessing.appliedDemosaic`, since LibRaw can silently
+/// substitute AHD for the requested algorithm.
 public struct LibRawDecoder: RAWDecoder {
     public init() {}
 
@@ -67,6 +69,13 @@ public struct LibRawDecoder: RAWDecoder {
             // run, hence reading it here rather than from the metadata-only
             // path (readMetadata never reaches this point).
             let rawWarningBits = ir_libraw_process_warnings(context)
+            let warnings = RAWDecoderProcessing.decode(rawWarningBits: rawWarningBits)
+            let requestedDemosaic: RAWDecodeOptions.Demosaic? = options.halfSize ? nil : options.demosaic
+            let appliedDemosaic = RAWDecoderProcessing.appliedDemosaic(
+                requested: requestedDemosaic,
+                halfSize: options.halfSize,
+                warnings: warnings
+            )
 
             let processing = RAWDecoderProcessing(
                 decoderIdentifier: "LibRaw \(Self.libRawVersion)",
@@ -76,14 +85,15 @@ public struct LibRawDecoder: RAWDecoder {
                     shimOptions.user_mul.0, shimOptions.user_mul.1,
                     shimOptions.user_mul.2, shimOptions.user_mul.3
                 ],
-                demosaic: options.halfSize ? nil : options.demosaic,
+                requestedDemosaic: requestedDemosaic,
+                appliedDemosaic: appliedDemosaic,
                 cameraColorMatrixApplied: false,
                 autoBrightnessApplied: false,
                 highlightReconstructionApplied: false,
                 noiseReductionApplied: false,
                 orientationHandlingRequested: options.applyCameraOrientation,
                 appliedOrientationFlip: options.applyCameraOrientation ? metadata.geometry.flip : 0,
-                warnings: RAWDecoderProcessing.decode(rawWarningBits: rawWarningBits),
+                warnings: warnings,
                 rawWarningBits: rawWarningBits
             )
 

@@ -66,7 +66,7 @@ typedef struct ir_libraw_context ir_libraw_context;
 ir_libraw_context *ir_libraw_create(void);
 void ir_libraw_destroy(ir_libraw_context *ctx);
 
-/* "0.21.4" */
+/* Returns the vendored LibRaw's own version string, e.g. "0.22.2". */
 const char *ir_libraw_version(void);
 
 /* Processing options ------------------------------------------------------ */

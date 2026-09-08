@@ -110,7 +110,10 @@ Applied:
 
 - black-level subtraction,
 - a linear scale mapping the camera's saturation level to full 16-bit range,
-- demosaicing (AHD by default; skipped entirely in half-size mode),
+- demosaicing (AHD by default; skipped entirely in half-size mode). LibRaw can
+  silently substitute AHD for the requested algorithm, so
+  `RAWDecoderProcessing` reports `requestedDemosaic` and `appliedDemosaic`
+  separately,
 - camera orientation, when requested **and** when the camera actually recorded a
   non-zero flip. `RAWDecoderProcessing` separates the request
   (`orientationHandlingRequested`) from the outcome

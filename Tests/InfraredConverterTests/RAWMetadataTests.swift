@@ -317,6 +317,21 @@ struct RAWLevelsTests {
         // global term survives.
         #expect(levels.blackLevel(row: 0, column: 0, colorPlane: 0) == 50)
     }
+
+    @Test("A pattern whose declared extent overflows reports no value rather than trapping")
+    func overflowingPatternExtent() {
+        // `BlackPattern` has a public memberwise initialiser, so nothing
+        // stops a caller from declaring an extent that cannot be represented.
+        let pattern = RAWMetadata.Levels.BlackPattern(
+            rows: .max, columns: 2, values: [1, 2]
+        )
+        #expect(pattern.value(row: 0, column: 0) == nil)
+
+        let levels = RAWMetadata.Levels(
+            black: 50, perPlaneBlack: [], blackPattern: pattern, maximum: 4095
+        )
+        #expect(levels.blackLevel(row: 0, column: 0, colorPlane: 0) == 50)
+    }
 }
 
 @Suite("RAW image model")
