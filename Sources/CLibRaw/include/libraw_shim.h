@@ -202,6 +202,20 @@ ir_libraw_status ir_libraw_open_file(ir_libraw_context *ctx, const char *path);
 ir_libraw_status ir_libraw_unpack(ir_libraw_context *ctx);
 ir_libraw_status ir_libraw_process(ir_libraw_context *ctx);
 
+/*
+ * Bitfield of LibRaw_warnings values (see LibRaw_warnings in
+ * Sources/CLibRawVendor/libraw/libraw_const.h), raised while unpacking and
+ * processing this file. This is a verbatim, uninterpreted copy of
+ * imgdata.process_warnings — the shim performs no filtering or mapping;
+ * Swift decides which flags are meaningful for this build.
+ *
+ * Only meaningful after a successful ir_libraw_process (process_warnings is
+ * populated during unpack/dcraw_process, not at open); returns 0 before
+ * that, which is indistinguishable from "no warnings" but the caller only
+ * calls this post-process.
+ */
+uint32_t ir_libraw_process_warnings(const ir_libraw_context *ctx);
+
 /* Valid any time after a successful open. */
 ir_libraw_status ir_libraw_copy_metadata(ir_libraw_context *ctx,
                                          ir_libraw_metadata *out);

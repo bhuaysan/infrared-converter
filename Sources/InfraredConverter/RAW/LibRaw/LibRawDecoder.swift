@@ -63,6 +63,11 @@ public struct LibRawDecoder: RAWDecoder {
 
             let image = try Self.rawImage(from: shimImage, bytes: bytes, url: url)
 
+            // process_warnings is only meaningful once unpack/process have
+            // run, hence reading it here rather than from the metadata-only
+            // path (readMetadata never reaches this point).
+            let rawWarningBits = ir_libraw_process_warnings(context)
+
             let processing = RAWDecoderProcessing(
                 decoderIdentifier: "LibRaw \(Self.libRawVersion)",
                 blackLevelSubtracted: true,
@@ -76,7 +81,10 @@ public struct LibRawDecoder: RAWDecoder {
                 autoBrightnessApplied: false,
                 highlightReconstructionApplied: false,
                 noiseReductionApplied: false,
-                cameraOrientationApplied: options.applyCameraOrientation
+                orientationHandlingRequested: options.applyCameraOrientation,
+                appliedOrientationFlip: options.applyCameraOrientation ? metadata.geometry.flip : 0,
+                warnings: RAWDecoderProcessing.decode(rawWarningBits: rawWarningBits),
+                rawWarningBits: rawWarningBits
             )
 
             Log.raw.debug(
@@ -192,6 +200,19 @@ public struct LibRawDecoder: RAWDecoder {
 
     // MARK: - Image
 
+    /// Multiplies a chain of values, reporting `nil` on the first overflow
+    /// rather than wrapping. Used to re-validate every geometry value that
+    /// crosses the decoder boundary before it is used to allocate or copy.
+    private static func checkedMultiply(_ values: Int...) -> Int? {
+        var result = 1
+        for value in values {
+            let (product, overflow) = result.multipliedReportingOverflow(by: value)
+            if overflow { return nil }
+            result = product
+        }
+        return result
+    }
+
     private static func rawImage(
         from shim: ir_libraw_image,
         bytes: UnsafePointer<UInt8>,
@@ -207,21 +228,55 @@ public struct LibRawDecoder: RAWDecoder {
             )
         }
 
-        let expected = Int(shim.bytes_per_row) * Int(shim.height)
-        guard Int(shim.byte_count) >= expected else {
+        // The C shim already validated its own geometry (ir_libraw_make_image
+        // rejects overflowing or inconsistent buffers before returning), but
+        // this boundary re-validates independently with checked arithmetic:
+        // it is exactly the seam a malformed or hostile file would exploit,
+        // and nothing here should trust a size without checking it first.
+        guard let width = Int(exactly: shim.width),
+              let height = Int(exactly: shim.height),
+              let colors = Int(exactly: shim.colors),
+              let bits = Int(exactly: shim.bits),
+              let bytesPerRow = Int(exactly: shim.bytes_per_row),
+              let byteCount = Int(exactly: shim.byte_count)
+        else {
+            throw RAWDecodingError.invalidDecodedImage(url, reason: "geometry does not fit a native Int")
+        }
+
+        let bytesPerSample = bits / 8
+        guard let minimumRowBytes = checkedMultiply(width, colors, bytesPerSample) else {
             throw RAWDecodingError.invalidDecodedImage(
                 url,
-                reason: "buffer of \(shim.byte_count) bytes is smaller than the \(expected) bytes "
-                    + "implied by \(shim.width)×\(shim.height)×\(shim.colors)×\(shim.bits)bit"
+                reason: "row size implied by \(width)×\(colors)ch×\(bits)bit overflows"
+            )
+        }
+        guard bytesPerRow >= minimumRowBytes else {
+            throw RAWDecodingError.invalidDecodedImage(
+                url,
+                reason: "stride of \(bytesPerRow) bytes is smaller than the \(minimumRowBytes) bytes "
+                    + "implied by width × channels × depth"
+            )
+        }
+        guard let expected = checkedMultiply(bytesPerRow, height) else {
+            throw RAWDecodingError.invalidDecodedImage(
+                url,
+                reason: "buffer size implied by a \(bytesPerRow)-byte stride × \(height) rows overflows"
+            )
+        }
+        guard byteCount >= expected else {
+            throw RAWDecodingError.invalidDecodedImage(
+                url,
+                reason: "buffer of \(byteCount) bytes is smaller than the \(expected) bytes "
+                    + "implied by \(width)×\(height) at a \(bytesPerRow)-byte stride"
             )
         }
 
         let image = RAWImage(
-            width: Int(shim.width),
-            height: Int(shim.height),
-            channelCount: Int(shim.colors),
-            bitsPerChannel: Int(shim.bits),
-            bytesPerRow: Int(shim.bytes_per_row),
+            width: width,
+            height: height,
+            channelCount: colors,
+            bitsPerChannel: bits,
+            bytesPerRow: bytesPerRow,
             samples: Data(bytes: bytes, count: expected),
             // Set by our decoder configuration; see the type documentation.
             encoding: .linear,
@@ -279,8 +334,7 @@ public struct LibRawDecoder: RAWDecoder {
         let levels = RAWMetadata.Levels(
             black: shim.black,
             perPlaneBlack: array4(shim.cblack),
-            blackPatternRows: Int(shim.cblack_pattern_rows),
-            blackPatternColumns: Int(shim.cblack_pattern_cols),
+            blackPattern: blackPattern(from: shim),
             maximum: shim.maximum,
             dataMaximum: shim.data_maximum > 0 ? shim.data_maximum : nil,
             linearMaximum: {
@@ -317,6 +371,23 @@ public struct LibRawDecoder: RAWDecoder {
             lens: string(shim.lens),
             artist: string(shim.artist)
         )
+    }
+
+    /// Builds the black pattern from the shim's fixed-size `black_pattern`
+    /// array, honouring `black_pattern_count` — the shim already validated
+    /// row/column consistency and capped the count defensively, so this only
+    /// needs to trust `black_pattern_count` as the slice length.
+    private static func blackPattern(from shim: ir_libraw_metadata) -> RAWMetadata.Levels.BlackPattern? {
+        let rows = Int(shim.cblack_pattern_rows)
+        let columns = Int(shim.cblack_pattern_cols)
+        let count = Int(shim.black_pattern_count)
+        guard rows > 0, columns > 0, count == rows * columns else { return nil }
+
+        let values: [UInt32] = withUnsafeBytes(of: shim.black_pattern) { buffer in
+            Array(buffer.bindMemory(to: UInt32.self).prefix(count))
+        }
+        guard values.count == count else { return nil }
+        return RAWMetadata.Levels.BlackPattern(rows: rows, columns: columns, values: values)
     }
 
     private static func pattern(for shim: ir_libraw_metadata) -> RAWMetadata.SensorColorLayout.Pattern {

@@ -7,6 +7,7 @@
 #include "libraw/libraw.h"
 
 #include <cstring>
+#include <limits>
 #include <new>
 
 namespace {
@@ -264,9 +265,40 @@ ir_libraw_status ir_libraw_copy_metadata(ir_libraw_context *ctx,
         out->cblack[i] = d.color.cblack[i];
         out->linear_max[i] = static_cast<int32_t>(d.color.linear_max[i]);
     }
-    /* cblack[4]/cblack[5] describe an optional per-pixel black pattern. */
-    out->cblack_pattern_rows = d.color.cblack[4];
-    out->cblack_pattern_cols = d.color.cblack[5];
+
+    /*
+     * cblack[4]/cblack[5] describe an optional per-pixel black pattern;
+     * cblack[6 + r*cols + c] holds the pattern value at pattern row r,
+     * column c. Copy defensively: a malformed file could report rows/cols
+     * that do not fit LibRaw's own LIBRAW_CBLACK_SIZE-entry storage, or that
+     * exceed this shim's IR_LIBRAW_MAX_BLACK_PATTERN cap; in either case we
+     * report no pattern rather than read out of bounds or overrun our
+     * fixed-size array.
+     */
+    {
+        const uint64_t rows = d.color.cblack[4];
+        const uint64_t cols = d.color.cblack[5];
+        const uint64_t headerEntries = 6;
+        const uint64_t available =
+            (LIBRAW_CBLACK_SIZE > headerEntries) ? (LIBRAW_CBLACK_SIZE - headerEntries) : 0;
+        uint64_t count = (rows > 0 && cols > 0) ? (rows * cols) : 0;
+        if (count > available || count > IR_LIBRAW_MAX_BLACK_PATTERN) {
+            count = 0;
+        }
+        if (count > 0) {
+            out->cblack_pattern_rows = static_cast<uint32_t>(rows);
+            out->cblack_pattern_cols = static_cast<uint32_t>(cols);
+            for (uint64_t i = 0; i < count; ++i) {
+                out->black_pattern[i] = d.color.cblack[headerEntries + i];
+            }
+            out->black_pattern_count = static_cast<uint32_t>(count);
+        } else {
+            out->cblack_pattern_rows = 0;
+            out->cblack_pattern_cols = 0;
+            out->black_pattern_count = 0;
+        }
+    }
+
     out->maximum = d.color.maximum;
     out->data_maximum = d.color.data_maximum;
 
@@ -320,6 +352,56 @@ ir_libraw_status ir_libraw_make_image(ir_libraw_context *ctx, ir_libraw_image *o
         return bad_state("LibRaw returned a non-bitmap image");
     }
 
+    /*
+     * LibRaw's own fields are narrower (width/height/colors/bits are all
+     * unsigned short), but this project's contract does not trust that: a
+     * malformed or hostile file could still make width * colors * (bits / 8)
+     * wrap if computed in 32 bits, so every step is validated in size_t
+     * before it is reported. Any failure here is a shim-level bad-state
+     * status, never a wrapped size handed to the caller.
+     */
+    if (image->width == 0 || image->height == 0 || image->colors == 0 || image->bits == 0) {
+        LibRaw::dcraw_clear_mem(image);
+        return bad_state("LibRaw produced a zero-sized image");
+    }
+    if (image->bits % 8 != 0) {
+        LibRaw::dcraw_clear_mem(image);
+        return bad_state("LibRaw produced a non-byte-aligned bit depth");
+    }
+
+    const size_t width = static_cast<size_t>(image->width);
+    const size_t height = static_cast<size_t>(image->height);
+    const size_t colors = static_cast<size_t>(image->colors);
+    const size_t bytesPerSample = static_cast<size_t>(image->bits / 8);
+
+    auto checkedMul = [](size_t a, size_t b, size_t &result) -> bool {
+        if (a != 0 && b > (std::numeric_limits<size_t>::max)() / a) {
+            return false;
+        }
+        result = a * b;
+        return true;
+    };
+
+    size_t bytesPerRow = 0;
+    size_t bytesPerPixel = 0;
+    if (!checkedMul(colors, bytesPerSample, bytesPerPixel) ||
+        !checkedMul(width, bytesPerPixel, bytesPerRow)) {
+        LibRaw::dcraw_clear_mem(image);
+        return bad_state("Row size for the decoded image overflows");
+    }
+
+    size_t expectedBytes = 0;
+    if (!checkedMul(bytesPerRow, height, expectedBytes)) {
+        LibRaw::dcraw_clear_mem(image);
+        return bad_state("Buffer size for the decoded image overflows");
+    }
+
+    const size_t reportedBytes = static_cast<size_t>(image->data_size);
+    if (reportedBytes < expectedBytes) {
+        LibRaw::dcraw_clear_mem(image);
+        return bad_state("LibRaw's reported buffer size is smaller than its own geometry implies");
+    }
+
     ctx->image = image;
 
     std::memset(out, 0, sizeof(*out));
@@ -327,12 +409,19 @@ ir_libraw_status ir_libraw_make_image(ir_libraw_context *ctx, ir_libraw_image *o
     out->height = image->height;
     out->colors = image->colors;
     out->bits = image->bits;
-    out->bytes_per_row =
-        static_cast<uint32_t>(image->width) * image->colors * (image->bits / 8);
-    out->byte_count = image->data_size;
+    out->bytes_per_row = bytesPerRow;
+    out->byte_count = reportedBytes;
     out->bytes = image->data;
 
     return make_status(LIBRAW_SUCCESS);
+}
+
+uint32_t ir_libraw_process_warnings(const ir_libraw_context *ctx)
+{
+    if (ctx == nullptr || !ctx->processed) {
+        return 0;
+    }
+    return static_cast<uint32_t>(ctx->processor.imgdata.process_warnings);
 }
 
 void ir_libraw_free_image(ir_libraw_context *ctx)

@@ -190,14 +190,64 @@ extension RAWMetadata {
     }
 
     /// Black and saturation levels, in raw sample units.
+    ///
+    /// The effective black level at a given sample is the *sum* of every
+    /// contributing term: the global `black`, the `perPlaneBlack` offset for
+    /// that sample's colour plane (when in range), and the `blackPattern`
+    /// contribution at that sample's position (when a pattern is present).
+    /// Use `blackLevel(row:column:colorPlane:)` rather than combining the
+    /// fields by hand.
+    ///
+    /// This mirrors LibRaw's own model (`imgdata.color.black`, `cblack[0...3]`,
+    /// and the repeating pattern packed into `cblack[4...]`) as read by this
+    /// project's decoder boundary *before* `LibRaw::adjust_bl()` runs — i.e.
+    /// before LibRaw folds `black` into `cblack[0...3]` itself. Keeping the
+    /// terms separate here, rather than pre-summing them, keeps that
+    /// provenance explicit instead of silently depending on LibRaw's internal
+    /// call order.
     public struct Levels: Equatable, Sendable {
+        /// A repeating per-pixel black-offset pattern, in active-image
+        /// coordinates (the convention LibRaw itself uses when applying it,
+        /// not raw-frame coordinates).
+        public struct BlackPattern: Equatable, Sendable {
+            /// Number of pattern rows; the pattern repeats every `rows` rows.
+            public var rows: Int
+            /// Number of pattern columns; the pattern repeats every `columns`
+            /// columns.
+            public var columns: Int
+            /// `rows * columns` values, row-major: `values[r * columns + c]`.
+            public var values: [UInt32]
+
+            public init(rows: Int, columns: Int, values: [UInt32]) {
+                self.rows = rows
+                self.columns = columns
+                self.values = values
+            }
+
+            /// The pattern value at a pattern-relative position, wrapping
+            /// (modulo) on both axes. Coordinates may be negative or exceed
+            /// the pattern extent; wrapping always yields an in-range index.
+            ///
+            /// Returns `nil` when the pattern is degenerate (zero rows,
+            /// columns, or a `values` count that does not match `rows *
+            /// columns`), so callers never index out of bounds.
+            public func value(row: Int, column: Int) -> UInt32? {
+                guard rows > 0, columns > 0, values.count == rows * columns else {
+                    return nil
+                }
+                let r = ((row % rows) + rows) % rows
+                let c = ((column % columns) + columns) % columns
+                return values[r * columns + c]
+            }
+        }
+
         /// The decoder's global black level.
         public var black: UInt32
         /// Additional per-colour-plane black offsets, added to `black`.
         public var perPlaneBlack: [UInt32]
-        /// Dimensions of an optional per-pixel black pattern, when present.
-        public var blackPatternRows: Int
-        public var blackPatternColumns: Int
+        /// An optional repeating per-pixel black pattern, added on top of
+        /// `black` and `perPlaneBlack`.
+        public var blackPattern: BlackPattern?
         /// The saturation level the decoder will treat as white.
         public var maximum: UInt32
         /// The largest sample actually observed, when the decoder computed it.
@@ -208,19 +258,47 @@ extension RAWMetadata {
         public init(
             black: UInt32,
             perPlaneBlack: [UInt32],
-            blackPatternRows: Int,
-            blackPatternColumns: Int,
+            blackPattern: BlackPattern? = nil,
             maximum: UInt32,
             dataMaximum: UInt32? = nil,
             linearMaximum: [Int32]? = nil
         ) {
             self.black = black
             self.perPlaneBlack = perPlaneBlack
-            self.blackPatternRows = blackPatternRows
-            self.blackPatternColumns = blackPatternColumns
+            self.blackPattern = blackPattern
             self.maximum = maximum
             self.dataMaximum = dataMaximum
             self.linearMaximum = linearMaximum
+        }
+
+        /// The effective black level at a sample, combining the global,
+        /// per-plane and pattern contributions.
+        ///
+        /// `row`/`column` are active-image coordinates (matching
+        /// `BlackPattern.value(row:column:)`); `colorPlane` is a colour-plane
+        /// index as produced by `SensorColorLayout.colorPlaneIndex(row:
+        /// column:)`. Out-of-range `colorPlane` values contribute nothing
+        /// (rather than trapping), since not every caller has plane
+        /// information at hand. Negative `row`/`column` wrap safely.
+        public func blackLevel(row: Int, column: Int, colorPlane: Int) -> UInt32 {
+            // Saturating, never wrapping: these terms are decoded from a file
+            // and a wrapped sum would be a silently wrong black level, which
+            // is far worse than a clamped one. Real sensor levels are orders
+            // of magnitude below UInt32.max, so saturation is unreachable for
+            // well-formed input.
+            func add(_ lhs: UInt32, _ rhs: UInt32) -> UInt32 {
+                let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+                return overflow ? .max : sum
+            }
+
+            var total = black
+            if colorPlane >= 0, colorPlane < perPlaneBlack.count {
+                total = add(total, perPlaneBlack[colorPlane])
+            }
+            if let patternValue = blackPattern?.value(row: row, column: column) {
+                total = add(total, patternValue)
+            }
+            return total
         }
     }
 

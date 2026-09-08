@@ -60,18 +60,43 @@ public struct RAWImage: Equatable, Sendable {
         self.colorSpace = colorSpace
     }
 
-    /// The buffer size implied by the geometry, for consistency checking.
-    public var expectedByteCount: Int {
-        bytesPerRow * height
+    /// The buffer size implied by the geometry (`bytesPerRow × height`), for
+    /// consistency checking.
+    ///
+    /// `nil` when that multiplication would overflow `Int` — geometry this
+    /// project treats as untrustworthy input (e.g. a malformed decoded
+    /// buffer) rather than as a value to silently wrap. Callers that need a
+    /// size for allocation or copying must check this rather than force-
+    /// unwrapping or falling back to unchecked arithmetic themselves.
+    public var expectedByteCount: Int? {
+        let (result, overflow) = bytesPerRow.multipliedReportingOverflow(by: height)
+        return overflow ? nil : result
+    }
+
+    /// The minimum row size implied by width × channels × bytes-per-sample,
+    /// or `nil` when that multiplication would overflow `Int`.
+    private var minimumRowByteCount: Int? {
+        guard bitsPerChannel % 8 == 0 else { return nil }
+        let bytesPerSample = bitsPerChannel / 8
+        let (perPixel, pixelOverflow) = channelCount.multipliedReportingOverflow(by: bytesPerSample)
+        guard !pixelOverflow else { return nil }
+        let (perRow, rowOverflow) = width.multipliedReportingOverflow(by: perPixel)
+        return rowOverflow ? nil : perRow
     }
 
     /// True when `samples` is large enough for the declared geometry and the
     /// declared row stride is consistent with width × channels × depth.
+    ///
+    /// Dimensions that are not positive, a bit depth that is not a whole
+    /// number of bytes, or geometry whose implied byte count would overflow
+    /// all make this `false` rather than trap.
     public var isGeometryConsistent: Bool {
-        guard width > 0, height > 0, channelCount > 0, bitsPerChannel % 8 == 0 else {
+        guard width > 0, height > 0, channelCount > 0, bitsPerChannel > 0, bitsPerChannel % 8 == 0 else {
             return false
         }
-        let minimumRowBytes = width * channelCount * (bitsPerChannel / 8)
-        return bytesPerRow >= minimumRowBytes && samples.count >= expectedByteCount
+        guard let minimumRowBytes = minimumRowByteCount, let expected = expectedByteCount else {
+            return false
+        }
+        return bytesPerRow >= minimumRowBytes && samples.count >= expected
     }
 }

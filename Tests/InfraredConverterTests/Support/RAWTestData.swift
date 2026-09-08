@@ -38,8 +38,6 @@ enum RAWTestData {
             levels: .init(
                 black: 0,
                 perPlaneBlack: [64, 64, 64, 64],
-                blackPatternRows: 0,
-                blackPatternColumns: 0,
                 maximum: 4095
             ),
             color: .init(
@@ -86,7 +84,8 @@ enum RAWTestData {
             autoBrightnessApplied: false,
             highlightReconstructionApplied: false,
             noiseReductionApplied: false,
-            cameraOrientationApplied: true
+            orientationHandlingRequested: true,
+            appliedOrientationFlip: 0
         )
     }
 

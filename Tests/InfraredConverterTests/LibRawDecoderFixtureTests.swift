@@ -42,6 +42,12 @@ struct LibRawDecoderFixtureTests {
         #expect(metadata.levels.maximum > 0)
         #expect(metadata.levels.perPlaneBlack.count == 4)
 
+        // The E-PL3 has no per-pixel black pattern: its black level is fully
+        // described by the global and per-plane terms alone.
+        #expect(metadata.levels.black == 0)
+        #expect(metadata.levels.perPlaneBlack == [64, 64, 64, 64])
+        #expect(metadata.levels.blackPattern == nil)
+
         // White-balance metadata must survive the boundary; without it we
         // cannot build an infrared white-balance stage on top.
         let cameraMultipliers = try #require(metadata.color.cameraMultipliers)
@@ -80,6 +86,18 @@ struct LibRawDecoderFixtureTests {
         #expect(decoded.processing.autoBrightnessApplied == false)
         #expect(decoded.processing.highlightReconstructionApplied == false)
         #expect(decoded.processing.demosaic == .ahd)
+
+        // The E-PL3 fixture's own recorded flip is 0 (see readsMetadata), so
+        // orientation handling is honoured but produces no actual transform:
+        // "requested" and "applied" are real, separate facts here.
+        #expect(decoded.processing.orientationHandlingRequested)
+        #expect(decoded.metadata.geometry.flip == 0)
+        #expect(decoded.processing.appliedOrientationFlip == 0)
+        #expect(decoded.processing.orientationTransformApplied == false)
+
+        // process_warnings is only meaningful after processing; whatever it
+        // reports must be consistent with the mapped warnings.
+        #expect(decoded.processing.warnings == RAWDecoderProcessing.decode(rawWarningBits: decoded.processing.rawWarningBits))
 
         // Sanity: real image content, not a constant buffer.
         let statistics = SampleStatistics(image: image)
