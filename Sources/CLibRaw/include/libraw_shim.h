@@ -17,11 +17,21 @@
 #ifndef IR_LIBRAW_SHIM_H
 #define IR_LIBRAW_SHIM_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/*
+ * Defensive cap on the number of black-pattern values the shim will copy out
+ * of LibRaw's imgdata.color.cblack[6...]. LibRaw itself bounds cblack at
+ * LIBRAW_CBLACK_SIZE (4104) entries, 6 of which are the row/column header;
+ * this cap is comfortably below that and exists so a malformed file cannot
+ * make the shim report an implausibly large pattern.
+ */
+#define IR_LIBRAW_MAX_BLACK_PATTERN 4096
 
 /* Errors ------------------------------------------------------------------ */
 
@@ -120,8 +130,24 @@ typedef struct {
     /* Levels */
     uint32_t black;
     uint32_t cblack[4];        /* per-plane black offsets */
+    /*
+     * Optional repeating per-pixel black pattern, from LibRaw's
+     * imgdata.color.cblack[4] (row count), cblack[5] (column count) and
+     * cblack[6 + r * cblack[5] + c] (the pattern value at pattern row r,
+     * column c). The pattern is indexed by active/visible-image coordinates
+     * (the convention LibRaw itself uses when applying it), not raw-frame
+     * coordinates.
+     *
+     * cblack_pattern_rows/cols are 0 when LibRaw reports no pattern, or when
+     * the reported dimensions do not fit LibRaw's own cblack storage or this
+     * shim's IR_LIBRAW_MAX_BLACK_PATTERN cap — in that case black_pattern is
+     * unpopulated and must not be used. black_pattern_count is always
+     * cblack_pattern_rows * cblack_pattern_cols when a pattern is present.
+     */
     uint32_t cblack_pattern_rows;
     uint32_t cblack_pattern_cols;
+    uint32_t black_pattern[IR_LIBRAW_MAX_BLACK_PATTERN];
+    uint32_t black_pattern_count;
     uint32_t maximum;
     uint32_t data_maximum;
     int32_t linear_max[4];
@@ -155,8 +181,15 @@ typedef struct {
     uint32_t height;
     uint32_t colors;            /* channels per pixel, interleaved */
     uint32_t bits;              /* bits per channel */
-    uint32_t bytes_per_row;
-    uint32_t byte_count;
+    /*
+     * Memory-describing fields, sized size_t and validated (non-overflowing,
+     * consistent with LibRaw's own reported data size) before being handed
+     * back — see ir_libraw_make_image. bytes_per_row == width * colors *
+     * (bits / 8); byte_count is LibRaw's reported buffer size, which may
+     * exceed bytes_per_row * height but is guaranteed not to be smaller.
+     */
+    size_t bytes_per_row;
+    size_t byte_count;
     const uint8_t *bytes;       /* owned by the context until _free_image */
 } ir_libraw_image;
 
