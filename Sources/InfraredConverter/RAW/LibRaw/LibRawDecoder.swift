@@ -34,7 +34,7 @@ public struct LibRawDecoder: RAWDecoder {
 
     public func readMetadata(at url: URL) throws -> RAWMetadata {
         try withOpenContext(url: url, options: .init()) { context in
-            try Self.metadata(from: context, url: url)
+            try Self.metadata(from: context, url: url, source: IR_LIBRAW_METADATA_CURRENT)
         }
     }
 
@@ -44,7 +44,14 @@ public struct LibRawDecoder: RAWDecoder {
             ir_libraw_default_options(&shimOptions)
             Self.apply(options, to: &shimOptions)
 
-            let metadata = try Self.metadata(from: context, url: url)
+            // Snapshot LibRaw's live state before dcraw_process mutates it
+            // (subtract_black_internal/adjust_bl fold black into cblack and
+            // zero both; scale_colors rewrites maximum). This path hands back
+            // the *processed* image, so its metadata must describe the file
+            // rather than the post-process state.
+            let metadata = try Self.metadata(
+                from: context, url: url, source: IR_LIBRAW_METADATA_CURRENT
+            )
 
             var status = ir_libraw_unpack(context)
             guard status.error == IR_LIBRAW_OK else {
@@ -65,10 +72,10 @@ public struct LibRawDecoder: RAWDecoder {
 
             let image = try Self.rawImage(from: shimImage, bytes: bytes, url: url)
 
-            // process_warnings is only meaningful once unpack/process have
-            // run, hence reading it here rather than from the metadata-only
-            // path (readMetadata never reaches this point).
-            let rawWarningBits = ir_libraw_process_warnings(context)
+            // Read after process, so this is the fullest set of warning bits
+            // available for the file: open/identify, unpack and dcraw_process
+            // have all contributed. LibRaw only ever ORs bits in.
+            let rawWarningBits = ir_libraw_warning_bits(context)
             let warnings = RAWDecoderProcessing.decode(rawWarningBits: rawWarningBits)
             let requestedDemosaic: RAWDecodeOptions.Demosaic? = options.halfSize ? nil : options.demosaic
             let appliedDemosaic = RAWDecoderProcessing.appliedDemosaic(
@@ -115,16 +122,30 @@ public struct LibRawDecoder: RAWDecoder {
         }
     }
 
-    /// `RAW file → open → metadata snapshot → unpack → RAWMosaic`.
+    /// `RAW file → open → unpack → RAW-state metadata snapshot → RAWMosaic`.
     ///
     /// `dcraw_process` is never called on this path: the call sequence is
-    /// exactly `ir_libraw_open_file` → `ir_libraw_copy_metadata` →
-    /// `ir_libraw_unpack` → `ir_libraw_describe_mosaic` →
-    /// `ir_libraw_copy_mosaic`. The metadata snapshot is taken immediately
-    /// after open/unpack, before any processing that could mutate
-    /// `imgdata.color` (black-level folding in particular) would have a
-    /// chance to run — and since this path never calls `dcraw_process`, that
-    /// mutation never happens at all.
+    /// exactly `ir_libraw_open_file` → `ir_libraw_unpack` →
+    /// `ir_libraw_copy_metadata(IR_LIBRAW_METADATA_RAW_STATE)` →
+    /// `ir_libraw_describe_mosaic` → `ir_libraw_copy_mosaic`.
+    ///
+    /// The metadata snapshot is deliberately taken **after** `unpack()`, and
+    /// from `imgdata.rawdata.{iparams,sizes,color}` rather than
+    /// `imgdata.{idata,sizes,color}`. Both parts of that matter:
+    ///
+    /// - `unpack()` can change RAW-level metadata. For `raw_image` files it
+    ///   calls `crop_masked_pixels()` to derive black levels from the
+    ///   optical-black border, and then canonicalises the common component
+    ///   of `cblack[0...3]` into `black`. A snapshot taken before `unpack()`
+    ///   therefore need not describe the samples that come out of it.
+    /// - `imgdata.rawdata.color` is the copy LibRaw itself takes at the very
+    ///   end of `unpack()`, in the same statement block that publishes the
+    ///   `raw_image` buffer. It is the state LibRaw pairs with those samples,
+    ///   and — unlike the live `imgdata.color`, which `raw2image_ex()`
+    ///   restores from it and then mutates — nothing downstream rewrites it.
+    ///
+    /// So the metadata and the mosaic describe the same RAW state by
+    /// construction, not by this path happening to stop early.
     ///
     /// Only `RAWMosaicProcessing.SourceStorage.singleChannel` (LibRaw's
     /// `raw_image`) is supported: every other storage kind throws
@@ -132,12 +153,17 @@ public struct LibRawDecoder: RAWDecoder {
     /// rather than being silently reinterpreted.
     public func decodeMosaic(at url: URL) throws -> DecodedRAWMosaic {
         try withOpenContext(url: url, options: .init()) { context in
-            let metadata = try Self.metadata(from: context, url: url)
-
             var status = ir_libraw_unpack(context)
             guard status.error == IR_LIBRAW_OK else {
                 throw Self.error(from: status, url: url, stage: .unpack)
             }
+
+            // Post-unpack, pre-processing RAW-state snapshot. Requires the
+            // unpack above to have succeeded: the shim rejects the RAW-state
+            // source before that rather than returning zeroed structures.
+            let metadata = try Self.metadata(
+                from: context, url: url, source: IR_LIBRAW_METADATA_RAW_STATE
+            )
 
             var info = ir_libraw_mosaic_info()
             status = ir_libraw_describe_mosaic(context, &info)
@@ -212,18 +238,20 @@ public struct LibRawDecoder: RAWDecoder {
                 bytesPerRow: destinationRowStride,
                 samples: buffer,
                 sampleFormat: .uint16,
-                bitsPerSample: metadata.sensor.bitsPerRawSample,
+                sourceRawBitDepth: metadata.sensor.sourceRawBitDepth,
                 sensorColorLayout: metadata.sensor
             )
             guard mosaic.isGeometryConsistent else {
                 throw RAWDecodingError.invalidDecodedImage(url, reason: "inconsistent mosaic geometry")
             }
 
-            let rawWarningBits = ir_libraw_process_warnings(context)
-            // process_warnings is populated by dcraw_process, which this path
-            // never calls; reading it here reflects only whatever unpack()
-            // itself may have set, and can differ from what the RGB decode()
-            // path would report for the same file.
+            // Warnings observed through open + unpack. LibRaw raises some
+            // during identify() (vendor crop, missing JPEG support, Fujifilm
+            // parsing) and some during unpack(); the ones it only raises in
+            // dcraw_process (AHD fallback, bad camera WB) cannot appear here,
+            // because this path never processes. This is a genuinely smaller
+            // set than the RGB path's for the same file, not an empty one.
+            let rawWarningBits = ir_libraw_warning_bits(context)
             let warnings = RAWDecoderProcessing.decode(rawWarningBits: rawWarningBits)
 
             let processing = RAWMosaicProcessing(
@@ -239,7 +267,7 @@ public struct LibRawDecoder: RAWDecoder {
                 """
                 Decoded mosaic \(url.lastPathComponent, privacy: .public): \
                 \(mosaic.width, privacy: .public)×\(mosaic.height, privacy: .public), \
-                \(mosaic.bitsPerSample.map(String.init) ?? "unknown", privacy: .public)bit
+                \(mosaic.sourceRawBitDepth.map(String.init) ?? "unknown", privacy: .public)bit
                 """
             )
 
@@ -312,7 +340,7 @@ public struct LibRawDecoder: RAWDecoder {
     // MARK: - Errors
 
     private enum Stage {
-        case open, unpack, process, makeImage, describeMosaic, copyMosaic
+        case open, metadata, unpack, process, makeImage, describeMosaic, copyMosaic
     }
 
     private static func error(
@@ -342,7 +370,7 @@ public struct LibRawDecoder: RAWDecoder {
         }
 
         switch stage {
-        case .open:
+        case .open, .metadata:
             // A positive LibRaw code is an errno from the file access itself.
             if status.error == IR_LIBRAW_ERR_IO, status.libraw_code > 0 {
                 return .fileNotReadable(url)
@@ -452,11 +480,24 @@ public struct LibRawDecoder: RAWDecoder {
 
     // MARK: - Metadata
 
-    private static func metadata(from context: OpaquePointer, url: URL) throws -> RAWMetadata {
+    /// Snapshots metadata from one of LibRaw's two distinct states.
+    ///
+    /// - `.current` (`imgdata.idata/sizes/color`) is LibRaw's live working
+    ///   state, valid straight after open. `dcraw_process` mutates it.
+    /// - `.rawState` (`imgdata.rawdata.iparams/sizes/color`) is the copy
+    ///   LibRaw itself takes at the end of `unpack()` and pairs with the
+    ///   `rawdata.raw_image` buffer. It requires a successful unpack, and is
+    ///   the only snapshot that provably describes the same samples a
+    ///   `RAWMosaic` carries.
+    private static func metadata(
+        from context: OpaquePointer,
+        url: URL,
+        source: ir_libraw_metadata_source
+    ) throws -> RAWMetadata {
         var shim = ir_libraw_metadata()
-        let status = ir_libraw_copy_metadata(context, &shim)
+        let status = ir_libraw_copy_metadata(context, source, &shim)
         guard status.error == IR_LIBRAW_OK else {
-            throw Self.error(from: status, url: url, stage: .open)
+            throw Self.error(from: status, url: url, stage: .metadata)
         }
         return convert(shim)
     }
@@ -488,7 +529,7 @@ public struct LibRawDecoder: RAWDecoder {
             filters: shim.filters,
             colorDescription: string(shim.cdesc) ?? "",
             colorCount: Int(shim.colors),
-            bitsPerRawSample: shim.raw_bps > 0 ? Int(shim.raw_bps) : nil,
+            sourceRawBitDepth: shim.raw_bps > 0 ? Int(shim.raw_bps) : nil,
             xTransPattern: shim.has_xtrans != 0 ? xTransPattern(shim.xtrans) : nil
         )
 

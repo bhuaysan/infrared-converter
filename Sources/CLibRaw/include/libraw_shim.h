@@ -122,7 +122,15 @@ typedef struct {
     uint32_t filters;      /* LibRaw CFA pattern code; 0 => not a simple mosaic */
     char cdesc[5];         /* colour-plane letters, e.g. "RGBG" */
     int colors;            /* number of distinct colour planes */
-    uint32_t raw_bps;      /* bits per raw sample as reported by the decoder */
+    /*
+     * LibRaw's imgdata.color.raw_bps: the bit depth of the samples as stored
+     * in the SOURCE FILE, as the format parser reports it. It is not a
+     * statement about the numeric domain of the unpacked samples — unpack()
+     * may apply a format-specific linearisation curve and update maximum —
+     * so 2^raw_bps - 1 must never be used as a white/saturation level. Use
+     * the level fields below for that. 0 means "not reported".
+     */
+    uint32_t raw_bps;
     int is_foveon;
     int has_xtrans;        /* non-zero => xtrans[6][6] is meaningful */
     char xtrans[6][6];
@@ -204,20 +212,68 @@ ir_libraw_status ir_libraw_process(ir_libraw_context *ctx);
 
 /*
  * Bitfield of LibRaw_warnings values (see LibRaw_warnings in
- * Sources/CLibRawVendor/libraw/libraw_const.h), raised while unpacking and
- * processing this file. This is a verbatim, uninterpreted copy of
- * imgdata.process_warnings — the shim performs no filtering or mapping;
- * Swift decides which flags are meaningful for this build.
+ * Sources/CLibRawVendor/libraw/libraw_const.h). This is a verbatim,
+ * uninterpreted copy of imgdata.process_warnings — the shim performs no
+ * filtering or mapping; Swift decides which flags are meaningful for this
+ * build.
  *
- * Only meaningful after a successful ir_libraw_process (process_warnings is
- * populated during unpack/dcraw_process, not at open); returns 0 before
- * that, which is indistinguishable from "no warnings" but the caller only
- * calls this post-process.
+ * Lifecycle: LibRaw accumulates these bits with |= and never clears them
+ * except in recycle(), so the value only ever grows as the pipeline
+ * advances. Bits are already set during open_file()/identify() (e.g.
+ * LIBRAW_WARN_VENDOR_CROP_SUGGESTED, LIBRAW_WARN_NO_JPEGLIB,
+ * LIBRAW_WARN_PARSEFUJI_PROCESSED), more during unpack() and more again
+ * during dcraw_process() (e.g. LIBRAW_WARN_FALLBACK_TO_AHD from
+ * dcraw_process itself, LIBRAW_WARN_BAD_CAMERA_WB from scale_colors()).
+ *
+ * This function therefore requires only a successful open — deliberately
+ * NOT a successful dcraw_process — so the unpack-only mosaic path can
+ * observe the warnings that exist at its own stage. Returns 0 for a null or
+ * unopened context, where LibRaw has genuinely raised nothing yet.
  */
-uint32_t ir_libraw_process_warnings(const ir_libraw_context *ctx);
+uint32_t ir_libraw_warning_bits(const ir_libraw_context *ctx);
 
-/* Valid any time after a successful open. */
+/*
+ * Which LibRaw state a metadata snapshot is taken from. These are distinct
+ * structures, and after dcraw_process they hold different values.
+ */
+typedef enum {
+    /*
+     * imgdata.idata / imgdata.sizes / imgdata.color — LibRaw's live working
+     * state. Valid after a successful open. dcraw_process MUTATES this:
+     * raw2image_ex() first restores it from imgdata.rawdata (below), then
+     * subtract_black_internal()/adjust_bl() fold black into cblack and zero
+     * them, and scale_colors() rewrites maximum. A snapshot taken here after
+     * processing describes the processed state, not the RAW state.
+     */
+    IR_LIBRAW_METADATA_CURRENT = 0,
+    /*
+     * imgdata.rawdata.iparams / .sizes / .color — the copy LibRaw itself
+     * makes at the very end of unpack() (see the memmove block at the tail of
+     * LibRaw::unpack in src/decoders/unpack.cpp) and pairs with the
+     * rawdata.raw_image buffer. Requires a successful unpack; a call before
+     * that fails with IR_LIBRAW_ERR_BAD_STATE rather than returning zeroed
+     * structures.
+     *
+     * This is the state that describes the samples ir_libraw_copy_mosaic
+     * hands back — including any black level unpack() derived from masked
+     * pixels via crop_masked_pixels(), and unpack()'s subsequent
+     * canonicalisation of the common cblack component into black. It is also
+     * immune to later dcraw_process mutation.
+     *
+     * Capture metadata (exposure, lens, artist, timestamp) has no rawdata
+     * counterpart in LibRaw and is always read from imgdata.other/.lens for
+     * both sources; unpack() does not touch it.
+     */
+    IR_LIBRAW_METADATA_RAW_STATE = 1
+} ir_libraw_metadata_source;
+
+/*
+ * Copies a metadata snapshot from the requested LibRaw state.
+ * IR_LIBRAW_METADATA_CURRENT is valid after a successful open;
+ * IR_LIBRAW_METADATA_RAW_STATE requires a successful unpack.
+ */
 ir_libraw_status ir_libraw_copy_metadata(ir_libraw_context *ctx,
+                                         ir_libraw_metadata_source source,
                                          ir_libraw_metadata *out);
 
 /* Mosaic (unpack-only, no dcraw_process) ----------------------------------- */

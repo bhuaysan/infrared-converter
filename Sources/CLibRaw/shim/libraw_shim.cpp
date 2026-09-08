@@ -219,51 +219,55 @@ ir_libraw_status ir_libraw_process(ir_libraw_context *ctx)
     return make_status(code);
 }
 
-ir_libraw_status ir_libraw_copy_metadata(ir_libraw_context *ctx,
-                                         ir_libraw_metadata *out)
+/*
+ * Fills `out` from the three structures a metadata snapshot needs, plus the
+ * live imgdata for the capture fields (exposure/lens/artist), which LibRaw
+ * keeps only in imgdata.other/.lens — there is no rawdata counterpart, and
+ * unpack() does not modify them.
+ *
+ * Split out from ir_libraw_copy_metadata so that the "current" and
+ * "post-unpack RAW state" snapshots go through byte-for-byte identical
+ * conversion logic and can only differ in the state they read.
+ */
+static ir_libraw_status copy_metadata_from(const libraw_data_t &d,
+                                           const libraw_iparams_t &idata,
+                                           const libraw_image_sizes_t &sizes,
+                                           const libraw_colordata_t &color,
+                                           ir_libraw_metadata *out)
 {
-    if (ctx == nullptr || out == nullptr) {
-        return bad_state("Invalid decoder context");
-    }
-    if (!ctx->opened) {
-        return bad_state("Metadata requested before a successful open");
-    }
-
     std::memset(out, 0, sizeof(*out));
 
-    const libraw_data_t &d = ctx->processor.imgdata;
+    copy_string(out->make, sizeof(out->make), idata.make);
+    copy_string(out->model, sizeof(out->model), idata.model);
+    copy_string(out->normalized_make, sizeof(out->normalized_make), idata.normalized_make);
+    copy_string(out->normalized_model, sizeof(out->normalized_model), idata.normalized_model);
+    copy_string(out->software, sizeof(out->software), idata.software);
 
-    copy_string(out->make, sizeof(out->make), d.idata.make);
-    copy_string(out->model, sizeof(out->model), d.idata.model);
-    copy_string(out->normalized_make, sizeof(out->normalized_make), d.idata.normalized_make);
-    copy_string(out->normalized_model, sizeof(out->normalized_model), d.idata.normalized_model);
-    copy_string(out->software, sizeof(out->software), d.idata.software);
+    out->raw_width = sizes.raw_width;
+    out->raw_height = sizes.raw_height;
+    out->visible_width = sizes.width;
+    out->visible_height = sizes.height;
+    out->top_margin = sizes.top_margin;
+    out->left_margin = sizes.left_margin;
+    out->output_width = sizes.iwidth;
+    out->output_height = sizes.iheight;
+    out->flip = sizes.flip;
+    out->pixel_aspect = sizes.pixel_aspect;
 
-    out->raw_width = d.sizes.raw_width;
-    out->raw_height = d.sizes.raw_height;
-    out->visible_width = d.sizes.width;
-    out->visible_height = d.sizes.height;
-    out->top_margin = d.sizes.top_margin;
-    out->left_margin = d.sizes.left_margin;
-    out->output_width = d.sizes.iwidth;
-    out->output_height = d.sizes.iheight;
-    out->flip = d.sizes.flip;
-    out->pixel_aspect = d.sizes.pixel_aspect;
-
-    out->filters = d.idata.filters;
-    copy_string(out->cdesc, sizeof(out->cdesc), d.idata.cdesc);
-    out->colors = d.idata.colors;
-    out->raw_bps = d.color.raw_bps;
-    out->is_foveon = static_cast<int>(d.idata.is_foveon);
+    out->filters = idata.filters;
+    copy_string(out->cdesc, sizeof(out->cdesc), idata.cdesc);
+    out->colors = idata.colors;
+    out->raw_bps = color.raw_bps;
+    out->is_foveon = static_cast<int>(idata.is_foveon);
 
     /* filters == 9 is LibRaw's marker for a 6x6 X-Trans layout. */
-    out->has_xtrans = (d.idata.filters == 9) ? 1 : 0;
-    std::memcpy(out->xtrans, d.idata.xtrans, sizeof(out->xtrans));
+    out->has_xtrans = (idata.filters == 9) ? 1 : 0;
+    std::memcpy(out->xtrans, idata.xtrans, sizeof(out->xtrans));
 
-    out->black = d.color.black;
+    out->black = color.black;
     for (int i = 0; i < 4; ++i) {
-        out->cblack[i] = d.color.cblack[i];
-        out->linear_max[i] = static_cast<int32_t>(d.color.linear_max[i]);
+        out->cblack[i] = color.cblack[i];
+        out->linear_max[i] = static_cast<int32_t>(color.linear_max[i]);
     }
 
     /*
@@ -276,8 +280,8 @@ ir_libraw_status ir_libraw_copy_metadata(ir_libraw_context *ctx,
      * fixed-size array.
      */
     {
-        const uint64_t rows = d.color.cblack[4];
-        const uint64_t cols = d.color.cblack[5];
+        const uint64_t rows = color.cblack[4];
+        const uint64_t cols = color.cblack[5];
         const uint64_t headerEntries = 6;
         const uint64_t available =
             (LIBRAW_CBLACK_SIZE > headerEntries) ? (LIBRAW_CBLACK_SIZE - headerEntries) : 0;
@@ -289,7 +293,7 @@ ir_libraw_status ir_libraw_copy_metadata(ir_libraw_context *ctx,
             out->cblack_pattern_rows = static_cast<uint32_t>(rows);
             out->cblack_pattern_cols = static_cast<uint32_t>(cols);
             for (uint64_t i = 0; i < count; ++i) {
-                out->black_pattern[i] = d.color.cblack[headerEntries + i];
+                out->black_pattern[i] = color.cblack[headerEntries + i];
             }
             out->black_pattern_count = static_cast<uint32_t>(count);
         } else {
@@ -299,20 +303,20 @@ ir_libraw_status ir_libraw_copy_metadata(ir_libraw_context *ctx,
         }
     }
 
-    out->maximum = d.color.maximum;
-    out->data_maximum = d.color.data_maximum;
+    out->maximum = color.maximum;
+    out->data_maximum = color.data_maximum;
 
-    out->has_cam_mul = (d.color.cam_mul[0] > 0.0f) ? 1 : 0;
-    out->has_pre_mul = (d.color.pre_mul[0] > 0.0f) ? 1 : 0;
+    out->has_cam_mul = (color.cam_mul[0] > 0.0f) ? 1 : 0;
+    out->has_pre_mul = (color.pre_mul[0] > 0.0f) ? 1 : 0;
     for (int i = 0; i < 4; ++i) {
-        out->cam_mul[i] = d.color.cam_mul[i];
-        out->pre_mul[i] = d.color.pre_mul[i];
+        out->cam_mul[i] = color.cam_mul[i];
+        out->pre_mul[i] = color.pre_mul[i];
     }
-    std::memcpy(out->rgb_cam, d.color.rgb_cam, sizeof(out->rgb_cam));
-    std::memcpy(out->cam_xyz, d.color.cam_xyz, sizeof(out->cam_xyz));
-    out->has_rgb_cam = (d.color.rgb_cam[0][0] != 0.0f || d.color.rgb_cam[1][1] != 0.0f) ? 1 : 0;
-    out->has_cam_xyz = (d.color.cam_xyz[0][0] != 0.0f || d.color.cam_xyz[1][1] != 0.0f) ? 1 : 0;
-    out->as_shot_wb_applied = d.color.as_shot_wb_applied;
+    std::memcpy(out->rgb_cam, color.rgb_cam, sizeof(out->rgb_cam));
+    std::memcpy(out->cam_xyz, color.cam_xyz, sizeof(out->cam_xyz));
+    out->has_rgb_cam = (color.rgb_cam[0][0] != 0.0f || color.rgb_cam[1][1] != 0.0f) ? 1 : 0;
+    out->has_cam_xyz = (color.cam_xyz[0][0] != 0.0f || color.cam_xyz[1][1] != 0.0f) ? 1 : 0;
+    out->as_shot_wb_applied = color.as_shot_wb_applied;
 
     out->iso_speed = d.other.iso_speed;
     out->has_iso = (d.other.iso_speed > 0.0f) ? 1 : 0;
@@ -329,6 +333,36 @@ ir_libraw_status ir_libraw_copy_metadata(ir_libraw_context *ctx,
     copy_string(out->artist, sizeof(out->artist), d.other.artist);
 
     return make_status(LIBRAW_SUCCESS);
+}
+
+ir_libraw_status ir_libraw_copy_metadata(ir_libraw_context *ctx,
+                                         ir_libraw_metadata_source source,
+                                         ir_libraw_metadata *out)
+{
+    if (ctx == nullptr || out == nullptr) {
+        return bad_state("Invalid decoder context");
+    }
+    if (!ctx->opened) {
+        return bad_state("Metadata requested before a successful open");
+    }
+
+    const libraw_data_t &d = ctx->processor.imgdata;
+
+    switch (source) {
+    case IR_LIBRAW_METADATA_RAW_STATE:
+        /*
+         * imgdata.rawdata.{iparams,sizes,color} only exist once unpack() has
+         * written them. Reading them before that would return zeroed
+         * structures that look like plausible metadata, so refuse instead.
+         */
+        if (!ctx->unpacked) {
+            return bad_state("RAW-state metadata requested before a successful unpack");
+        }
+        return copy_metadata_from(d, d.rawdata.iparams, d.rawdata.sizes, d.rawdata.color, out);
+    case IR_LIBRAW_METADATA_CURRENT:
+    default:
+        return copy_metadata_from(d, d.idata, d.sizes, d.color, out);
+    }
 }
 
 namespace {
@@ -630,9 +664,16 @@ ir_libraw_status ir_libraw_make_image(ir_libraw_context *ctx, ir_libraw_image *o
     return make_status(LIBRAW_SUCCESS);
 }
 
-uint32_t ir_libraw_process_warnings(const ir_libraw_context *ctx)
+uint32_t ir_libraw_warning_bits(const ir_libraw_context *ctx)
 {
-    if (ctx == nullptr || !ctx->processed) {
+    /*
+     * Gated on `opened`, not `processed`: LibRaw already raises warnings
+     * during open_file()/identify() and unpack(), and the mosaic path never
+     * calls dcraw_process. Requiring `processed` here silently discarded
+     * every warning that path could observe. See the header for the
+     * lifecycle.
+     */
+    if (ctx == nullptr || !ctx->opened) {
         return 0;
     }
     return static_cast<uint32_t>(ctx->processor.imgdata.process_warnings);

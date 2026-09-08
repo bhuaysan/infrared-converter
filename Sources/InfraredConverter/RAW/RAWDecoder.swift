@@ -152,15 +152,24 @@ public struct RAWMosaicProcessing: Equatable, Sendable {
     /// geometry is exactly the sensor's own active-area layout.
     public let orientationApplied: Bool = false
 
-    /// Application-level warnings the decoder raised while opening/unpacking
-    /// this file, using the same mapping as `RAWDecoderProcessing.Warning`.
+    /// Application-level warnings the decoder raised while opening and
+    /// unpacking this file, using the same mapping as
+    /// `RAWDecoderProcessing.Warning`.
+    ///
+    /// These are the warnings **observed through unpack**, a genuine subset
+    /// of what full processing can report for the same file. LibRaw raises
+    /// some during `open_file()`/`identify()` —
+    /// `Warning.vendorCropSuggested`, `.jpegDecodingUnavailable`,
+    /// `.fujiProcessingApplied` — and some during `unpack()`. The two this
+    /// path can never see are `.fallbackToAHDDemosaic` (raised by
+    /// `dcraw_process` itself) and `.badCameraWhiteBalance` (raised by
+    /// `scale_colors()`); both are still mapped, because the RGB path does
+    /// raise them.
     public var warnings: [RAWDecoderProcessing.Warning]
     /// The complete, uninterpreted LibRaw warning bitfield. Diagnostic use
-    /// only — never surface this in UI. Note this is captured after
-    /// `unpack()`, not after `process()` (this path never processes); some
-    /// warnings LibRaw only raises during `dcraw_process` will not appear
-    /// here even though `RAWDecoderProcessing.rawWarningBits` could show them
-    /// on the RGB path for the same file.
+    /// only — never surface this in UI. Captured after `unpack()`, not after
+    /// `process()`, which this path never calls; see `warnings` for what
+    /// that does and does not include.
     public var rawWarningBits: UInt32
 
     public init(
@@ -326,7 +335,8 @@ extension RAWDecoderProcessing {
     public enum Warning: Hashable, Sendable {
         /// `LIBRAW_WARN_BAD_CAMERA_WB`: the file's as-shot white balance could
         /// not be read; `RAWMetadata.ColorMetadata.cameraMultipliers` is
-        /// unreliable or absent.
+        /// unreliable or absent. Raised by `scale_colors()`, so it appears
+        /// only on the processed-RGB path.
         case badCameraWhiteBalance
         /// `LIBRAW_WARN_NO_JPEGLIB`: this format needs JPEG decompression
         /// (Kodak JPEG-compressed RAW, or lossy-compressed DNG) but this
@@ -337,7 +347,8 @@ extension RAWDecoderProcessing {
         /// was unavailable for this file, and LibRaw substituted AHD.
         /// `RAWDecoderProcessing.appliedDemosaic` reflects this fallback
         /// (`.ahd`); `RAWDecoderProcessing.requestedDemosaic` still reflects
-        /// what the caller originally asked for.
+        /// what the caller originally asked for. Raised by `dcraw_process`
+        /// itself, so it appears only on the processed-RGB path.
         case fallbackToAHDDemosaic
         /// `LIBRAW_WARN_PARSEFUJI_PROCESSED`: Fujifilm-specific parsing (e.g.
         /// Super CCD / EXR sensor geometry) was applied while interpreting
@@ -384,6 +395,14 @@ extension RAWDecoderProcessing {
 
     /// Translates LibRaw's raw `process_warnings` bitfield into the mapped
     /// `[Warning]` this build can interpret.
+    ///
+    /// The same mapping serves both decode paths. Which flags each path can
+    /// actually observe differs — `.vendorCropSuggested`,
+    /// `.jpegDecodingUnavailable` and `.fujiProcessingApplied` are raised
+    /// during `open_file()`/`identify()` and so reach the unpack-only mosaic
+    /// path, while `.fallbackToAHDDemosaic` and `.badCameraWhiteBalance` are
+    /// raised inside `dcraw_process` and so cannot. A flag is not dropped
+    /// from this mapping merely because one path cannot produce it.
     ///
     /// Deliberately unmapped, with the reason recorded here rather than
     /// guessed at:

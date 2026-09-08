@@ -137,8 +137,21 @@ extension RAWMetadata {
         public var colorDescription: String
         /// Number of distinct colour planes (3 or 4 for most cameras).
         public var colorCount: Int
-        /// Bits per raw sample as reported by the decoder, when known.
-        public var bitsPerRawSample: Int?
+        /// The bit depth of the samples **as stored in the source file**,
+        /// as the decoder's format parser reports it (LibRaw's
+        /// `imgdata.color.raw_bps`), or `nil` when it reported none.
+        ///
+        /// This is source/file-format information. It is deliberately **not**
+        /// a white level, and `2^sourceRawBitDepth - 1` must never be used as
+        /// one: `unpack()` may apply a format-specific linearisation curve
+        /// that changes the samples' numeric domain, and LibRaw updates
+        /// `Levels.maximum` accordingly. Normalisation belongs to
+        /// `Levels.maximum` / `Levels.linearMaximum` and an explicitly chosen
+        /// white-level model, not to this value.
+        ///
+        /// It is optional rather than defaulted: substituting `16` for an
+        /// unreported depth would invent a fact the decoder did not state.
+        public var sourceRawBitDepth: Int?
         /// 6×6 colour-plane indices, present only for `.xTrans`.
         public var xTransPattern: [[Int]]?
 
@@ -147,14 +160,14 @@ extension RAWMetadata {
             filters: UInt32,
             colorDescription: String,
             colorCount: Int,
-            bitsPerRawSample: Int? = nil,
+            sourceRawBitDepth: Int? = nil,
             xTransPattern: [[Int]]? = nil
         ) {
             self.pattern = pattern
             self.filters = filters
             self.colorDescription = colorDescription
             self.colorCount = colorCount
-            self.bitsPerRawSample = bitsPerRawSample
+            self.sourceRawBitDepth = sourceRawBitDepth
             self.xTransPattern = xTransPattern
         }
 
@@ -242,12 +255,29 @@ extension RAWMetadata {
     /// fields by hand.
     ///
     /// This mirrors LibRaw's own model (`imgdata.color.black`, `cblack[0...3]`,
-    /// and the repeating pattern packed into `cblack[4...]`) as read by this
-    /// project's decoder boundary *before* `LibRaw::adjust_bl()` runs — i.e.
-    /// before LibRaw folds `black` into `cblack[0...3]` itself. Keeping the
-    /// terms separate here, rather than pre-summing them, keeps that
-    /// provenance explicit instead of silently depending on LibRaw's internal
-    /// call order.
+    /// and the repeating pattern packed into `cblack[4...]`), read before
+    /// `LibRaw::adjust_bl()` / `subtract_black_internal()` run — those are
+    /// part of `dcraw_process`, and they fold `black` into `cblack[0...3]`
+    /// and then zero both.
+    ///
+    /// **How `black` and `perPlaneBlack` are split depends on which decode
+    /// path produced this metadata, and the split is not stable across
+    /// `unpack()`.** `unpack()` canonicalises the common component of
+    /// `cblack[0...3]` into `black`: it takes `i = min(cblack[0...3])`,
+    /// subtracts `i` from each entry and adds it to `black`. For the Olympus
+    /// E-PL3 that turns `black 0, cblack [64, 64, 64, 64]` into
+    /// `black 64, cblack [0, 0, 0, 0]`.
+    ///
+    /// - `LibRawDecoder.decodeMosaic(at:)` reports the **post-unpack** split,
+    ///   because that is the state describing the samples in its `RAWMosaic`.
+    /// - `LibRawDecoder.decode(at:options:)` and `readMetadata(at:)` report
+    ///   the **pre-unpack** split, as read from the file.
+    ///
+    /// The redistribution is value-preserving, so
+    /// `blackLevel(row:column:colorPlane:)` returns the same effective level
+    /// either way. That is exactly why the terms are kept separate and summed
+    /// through one accessor: **never compare `black` or `perPlaneBlack`
+    /// across paths, and never pre-sum them by hand.**
     public struct Levels: Equatable, Sendable {
         /// A repeating per-pixel black-offset pattern, in active-image
         /// coordinates (the convention LibRaw itself uses when applying it,
