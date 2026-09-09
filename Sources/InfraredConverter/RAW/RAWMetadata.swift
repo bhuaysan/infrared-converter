@@ -157,6 +157,9 @@ extension RAWMetadata {
         /// `Levels.maximum` / `Levels.linearMaximum` and an explicitly chosen
         /// white-level model, not to this value.
         ///
+        /// Because it is diagnostic rather than structural, it takes no
+        /// part in validating a mosaic: see `RAWMosaic.isGeometryConsistent`.
+        ///
         /// It is optional rather than defaulted: substituting `16` for an
         /// unreported depth would invent a fact the decoder did not state.
         public var sourceRawBitDepth: Int?

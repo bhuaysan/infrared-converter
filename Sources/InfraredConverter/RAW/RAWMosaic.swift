@@ -61,14 +61,24 @@ public struct RAWMosaic: Equatable, Sendable {
     public let width: Int
     /// Height of the active mosaic area, in samples.
     public let height: Int
-    /// Byte offset between the starts of consecutive rows. Tightly packed:
-    /// `bytesPerRow == width * bytesPerSampleValue`.
+    /// Byte offset between the starts of consecutive rows.
+    ///
+    /// This type **supports padded row stride**: `bytesPerRow` need only be
+    /// at least `width * bytesPerSampleValue`, and a larger value is valid.
+    /// `LibRawDecoder`'s current active-area extraction produces tightly
+    /// packed rows (`bytesPerRow == width * bytesPerSampleValue`), but that
+    /// is a property of that one producer, not of this type — a manually
+    /// constructed mosaic may pad, and every reader here and in
+    /// `RAWMosaicNormalizer` honours the stride rather than assuming tight
+    /// packing.
     public let bytesPerRow: Int
-    /// Tightly packed sample storage, active area only, `sampleFormat`-typed,
-    /// little-endian. LibRaw writes native `unsigned short`, and every
-    /// platform this project targets (arm64 and x86_64 macOS) is
-    /// little-endian, so native and little-endian coincide here; `sample(row:
-    /// column:)` decodes explicitly rather than relying on that.
+    /// Sample storage, active area only, `sampleFormat`-typed,
+    /// little-endian, laid out row by row at `bytesPerRow` intervals — tight
+    /// when `bytesPerRow == width * bytesPerSampleValue`, padded otherwise.
+    /// LibRaw writes native `unsigned short`, and every platform this project
+    /// targets (arm64 and x86_64 macOS) is little-endian, so native and
+    /// little-endian coincide here; `sample(row:column:)` decodes explicitly
+    /// rather than relying on that.
     public let samples: Data
     public let sampleFormat: SampleFormat
     /// What the decoder reports as the source sample width — `12` for the
@@ -101,6 +111,13 @@ public struct RAWMosaic: Equatable, Sendable {
     /// `RAWMetadata.Levels`, or from an explicitly chosen white-level model —
     /// never from this property.
     ///
+    /// It is also **not a storage invariant**. It does not participate in
+    /// `isGeometryConsistent`: a mosaic whose decoder reported a value wider
+    /// than the storage — or a format code rather than a depth — is still a
+    /// perfectly readable `UInt16` mosaic, and rejecting it would let
+    /// diagnostic metadata veto valid pixel data. Nothing in this project's
+    /// processing reads this value, and nothing may start to.
+    ///
     /// It is optional rather than defaulted: samples are stored in 16-bit
     /// cells regardless, and substituting `16` for an unreported depth would
     /// invent a fact the decoder did not state.
@@ -114,16 +131,6 @@ public struct RAWMosaic: Equatable, Sendable {
     private var bytesPerSampleValue: Int {
         switch sampleFormat {
         case .uint16: return 2
-        }
-    }
-
-    /// The widest source bit depth `sampleFormat`'s storage can represent
-    /// without loss. A reported depth above this is a claim the storage
-    /// cannot hold, and makes the mosaic inconsistent rather than being
-    /// accepted — samples are never rescaled to reconcile the two.
-    private var maximumRepresentableBitDepth: Int {
-        switch sampleFormat {
-        case .uint16: return 16
         }
     }
 
@@ -160,20 +167,20 @@ public struct RAWMosaic: Equatable, Sendable {
     }
 
     /// True when `samples` is large enough for the declared geometry and
-    /// `bytesPerRow` is consistent with `width * bytesPerSampleValue`.
+    /// `bytesPerRow` is at least `width * bytesPerSampleValue`.
     ///
     /// Non-positive dimensions, or geometry whose implied byte count would
     /// overflow, make this `false` rather than trap.
+    ///
+    /// This validates facts about the **actual in-memory representation** —
+    /// width, height, stride, byte count, overflow, sample storage — and
+    /// nothing else. `sourceRawBitDepth` deliberately takes no part: it is
+    /// diagnostic source-format metadata that is not universally a literal
+    /// bit depth, so an odd value there says nothing about whether these
+    /// `UInt16` samples are readable. A mosaic reporting, say, `24` is still
+    /// geometrically valid, its samples are unchanged, and normalisation
+    /// does not consult the value.
     public var isGeometryConsistent: Bool {
-        // An unreported source depth is acceptable. A reported one must be
-        // both meaningful (>= 1) and representable in this mosaic's storage:
-        // a claim of, say, 24 bits alongside `.uint16` samples cannot be
-        // true, and accepting it would leave a later stage to discover the
-        // contradiction.
-        if let sourceRawBitDepth,
-           sourceRawBitDepth < 1 || sourceRawBitDepth > maximumRepresentableBitDepth {
-            return false
-        }
         guard width > 0, height > 0 else { return false }
         guard let minimumRowBytes = minimumRowByteCount, let expected = expectedByteCount else {
             return false

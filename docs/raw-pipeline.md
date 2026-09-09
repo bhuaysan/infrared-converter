@@ -237,11 +237,12 @@ never be used as one. The normalisation stage described below takes `black`
 from `Levels.blackLevel(row:column:colorPlane:)` and `white` from an explicitly
 selected white-level policy — never from the bit depth.
 
-For `.uint16` mosaic storage a reported source depth of `1...16` is accepted and
-`nil` is accepted; `0`, a negative value, or anything above `16` makes
-`RAWMosaic.isGeometryConsistent` false. A depth wider than the storage is a
-claim the storage cannot hold, so it is rejected rather than believed — and in
-no case is the value used to rescale samples.
+Because it is not universally a literal bit depth, it is **diagnostic metadata
+and never a storage invariant**. `RAWMosaic.isGeometryConsistent` validates
+facts about the in-memory representation — width, height, stride, byte count,
+overflow, sample storage — and does not consult `sourceRawBitDepth` at all. Any
+reported value, `nil` included, leaves an otherwise valid `UInt16` mosaic valid
+and its samples untouched; the value is never used to rescale anything.
 
 ## Masked pixels and who owns black estimation
 
@@ -284,6 +285,12 @@ Coordinates are **active-image coordinates**, the same convention used by
 by the extraction; do not apply them again when indexing.
 
 ### Row stride
+
+`RAWMosaic` **supports padded row stride**: `bytesPerRow` need only be at least
+`width × bytesPerSampleValue`, and both its own sample lookup and
+`RAWMosaicNormalizer` honour whatever stride it declares. `LibRawDecoder`'s
+current active-area extraction happens to produce tightly packed rows, but that
+is a property of that one producer, not a guarantee of the type.
 
 LibRaw's source buffer uses `imgdata.sizes.raw_pitch`, **in bytes**, which is
 not always `raw_width × 2` — some decoders set a wider pitch. The extraction

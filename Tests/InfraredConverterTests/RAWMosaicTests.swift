@@ -110,52 +110,52 @@ struct RAWMosaicTests {
 
     // MARK: - Source RAW bit depth
 
-    @Test("A reported source RAW bit depth of 0 is invalid, not trapped on")
-    func zeroSourceRawBitDepthIsInconsistent() {
-        let m = RAWMosaic(
-            width: 4, height: 3, bytesPerRow: 8, samples: Self.makeSamples(width: 4, height: 3),
-            sampleFormat: .uint16, sourceRawBitDepth: 0, sensorColorLayout: RAWTestData.bayerLayout()
-        )
-        #expect(!m.isGeometryConsistent)
-    }
-
-    @Test("Every source RAW bit depth 1...16 is representable in .uint16 storage")
-    func representableSourceRawBitDepths() {
-        for depth in 1...16 {
+    @Test("Source RAW bit depth is diagnostic metadata and never decides mosaic validity")
+    func sourceRawBitDepthDoesNotDecideValidity() throws {
+        // `raw_bps` is not universally a literal bit depth — for some
+        // formats LibRaw stores a RAW format code there — so it describes
+        // the source file, not this mosaic's storage. An otherwise valid
+        // UInt16 mosaic stays valid whatever it says, including 0, a
+        // negative value, and depths far wider than the storage.
+        for depth in [0, -1, 1, 8, 12, 16, 17, 24, 32, Int.max] {
             let m = RAWMosaic(
                 width: 4, height: 3, bytesPerRow: 8, samples: Self.makeSamples(width: 4, height: 3),
                 sampleFormat: .uint16, sourceRawBitDepth: depth,
                 sensorColorLayout: RAWTestData.bayerLayout()
             )
-            #expect(m.isGeometryConsistent, "depth \(depth) should be representable")
-        }
-    }
-
-    @Test("A source RAW bit depth above the storage width is inconsistent, and never rescales samples")
-    func oversizedSourceRawBitDepthIsInconsistent() {
-        // A claim of more than 16 bits cannot be true of `.uint16` storage.
-        // It is reported as inconsistent rather than accepted, and — the
-        // point of the test — the samples are left exactly as they are; the
-        // value is never used to rescale them.
-        for depth in [17, 24, 32, Int.max] {
-            let m = RAWMosaic(
-                width: 4, height: 3, bytesPerRow: 8, samples: Self.makeSamples(width: 4, height: 3),
-                sampleFormat: .uint16, sourceRawBitDepth: depth,
-                sensorColorLayout: RAWTestData.bayerLayout()
-            )
-            #expect(!m.isGeometryConsistent, "depth \(depth) should not be accepted")
+            #expect(m.isGeometryConsistent, "depth \(depth) must not affect geometry validity")
+            // Carried through untouched, and — the point of the test — never
+            // used to rescale the samples.
             #expect(m.sourceRawBitDepth == depth)
             #expect(m.sample(row: 1, column: 2) == 102)
+            #expect(m.sample(row: 0, column: 0) == 0)
         }
     }
 
-    @Test("A negative reported source RAW bit depth is invalid")
-    func negativeSourceRawBitDepthIsInconsistent() {
-        let m = RAWMosaic(
-            width: 4, height: 3, bytesPerRow: 8, samples: Self.makeSamples(width: 4, height: 3),
-            sampleFormat: .uint16, sourceRawBitDepth: -1, sensorColorLayout: RAWTestData.bayerLayout()
-        )
-        #expect(!m.isGeometryConsistent)
+    @Test("A source RAW bit depth of 24 changes neither validity nor normalisation")
+    func oversizedSourceRawBitDepthIsStillProcessable() throws {
+        // Regression guard for the contract this replaced: a 24-bit claim
+        // alongside UInt16 storage used to make the mosaic inconsistent.
+        // It is now accepted, and normalising it produces exactly what the
+        // same geometry with a 12-bit claim produces.
+        func mosaic(depth: Int?) -> RAWMosaic {
+            RAWMosaic(
+                width: 4, height: 3, bytesPerRow: 8, samples: Self.makeSamples(width: 4, height: 3),
+                sampleFormat: .uint16, sourceRawBitDepth: depth,
+                sensorColorLayout: RAWTestData.bayerLayout()
+            )
+        }
+        let oversized = mosaic(depth: 24)
+        #expect(oversized.isGeometryConsistent)
+
+        let levels = RAWMetadata.Levels(black: 0, perPlaneBlack: [0, 0, 0, 0], maximum: 4095)
+        let normalizer = RAWMosaicNormalizer()
+        let fromOversized = try normalizer.process(mosaic: oversized, levels: levels)
+        let fromReported = try normalizer.process(mosaic: mosaic(depth: 12), levels: levels)
+        let fromUnreported = try normalizer.process(mosaic: mosaic(depth: nil), levels: levels)
+
+        #expect(fromOversized.values == fromReported.values)
+        #expect(fromOversized.values == fromUnreported.values)
     }
 
     @Test("An unreported source RAW bit depth is valid: the samples are still usable")
