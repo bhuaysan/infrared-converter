@@ -56,15 +56,28 @@ application normalisation to Float32  ┘
    ↓
 LinearRAWMosaic (Float32, unclamped)
    ↓
-[FUTURE: IR white balance]
+explicit per-CFA-plane IR gains       ┐
+   ↓                                  ├ RAWWhiteBalancer
+WhiteBalancedRAWMosaic (Float32)      ┘
+   ↓
+[FUTURE: IR white-balance gain estimation — picker, patch, profiles]
    ↓
 [FUTURE: demosaic]
 ```
 
-`RAWMosaicNormalizer` is application-owned and does not import `CLibRaw`. It
-takes a `DecodedRAWMosaic` (or a bare `RAWMosaic` plus level metadata) and
-returns a `ProcessedRAWMosaic`, which keeps the original `UInt16` mosaic
-reachable on `.source` — nothing is mutated in place.
+Both processing stages are application-owned and neither imports `CLibRaw`.
+
+`RAWMosaicNormalizer` takes a `DecodedRAWMosaic` (or a bare `RAWMosaic` plus
+level metadata) and returns a `ProcessedRAWMosaic`, which keeps the original
+`UInt16` mosaic reachable on `.source` — nothing is mutated in place.
+
+`RAWWhiteBalancer` takes a `ProcessedRAWMosaic` (or a bare `LinearRAWMosaic`
+plus gains) and returns a `WhiteBalancedProcessedRAWMosaic`, which keeps the
+normalised mosaic reachable on `.source` for the same reason.
+
+**Gain estimation does not exist yet.** Nothing in the project decides what the
+gains should be; every caller supplies them. The estimation stage above is a
+placeholder for future work, not a description of current behaviour.
 
 ### Black subtraction and normalisation
 
@@ -102,6 +115,68 @@ effective black is split between `black`, `perPlaneBlack` and `blackPattern`
 cannot change the result — the pre-unpack and post-unpack E-PL3 splits produce
 bit-identical output.
 
+### Infrared white balance
+
+For every sample, with `gain` the multiplier for that sample's CFA colour
+plane:
+
+```text
+value = linear * gain
+```
+
+That is the whole operation: no offset, no renormalisation, no exposure
+compensation. Gains are **literal**. `0.25` with a gain of `4` is exactly `1.0`,
+and doubling every gain doubles every output value. Nothing normalises green to
+`1`, divides through by the largest or smallest gain, preserves luminance, or
+rescales against camera metadata.
+
+`RAWWhiteBalanceGains` carries **four** slots, indexed by the CFA colour-plane
+index from `SensorColorLayout.colorPlaneIndex(row:column:)` — not by
+`colorCount`. On the E-PL3 the layout reports `colorDescription "RGBG"` and
+`colorCount 3`, yet the CFA lookup returns plane `3`:
+
+```text
+0 1     R  G1
+3 2     G2 B
+```
+
+Sizing the gain model from `colorCount`, or reducing a plane index modulo it,
+would apply red's gain to every second green sample. The two green gains are
+independently representable and are never forced to agree; a plane index
+outside `0...3` raises `RAWProcessingError.missingWhiteBalanceGain` rather than
+being folded onto an existing slot.
+
+Gains must be finite and strictly greater than zero. There is no upper bound:
+infrared capture legitimately needs extreme multipliers, and `0.01`, `20` and
+`100` are all accepted. Zero, negative, NaN and infinite gains raise
+`RAWProcessingError.invalidWhiteBalanceGain`, validated in full before any
+pixel is touched.
+
+Nothing is clamped. Negatives stay negative, which matters for later
+neutral-region statistics, and values above `1` stay above `1`. A finite input
+that overflows `Float32` raises
+`RAWProcessingError.nonFiniteWhiteBalanceResult` rather than being clamped to
+`greatestFiniteMagnitude` or stored as an infinity; a non-finite input raises
+`RAWProcessingError.nonFiniteInputValue`.
+
+`cam_mul` and `pre_mul` are **never** applied. They are visible-light-calibrated
+diagnostics and are not a reasonable infrared default. The enforcement is
+structural: `apply(to:gains:)` receives a mosaic and a set of gains and no
+metadata at all, so there is nothing for a camera white balance to leak in
+through. The metadata stays reachable on the wrapper for display and for a
+future estimator that may deliberately consult it.
+
+Changing gains always restarts from the normalised mosaic:
+
+```text
+new result = apply(new gains, the normalised mosaic)
+       NOT   apply(new gains, the previous white-balanced result)
+```
+
+`apply(gains:replacing:)` reaches through a previous result to its normalised
+source, so gains cannot compound. See
+`docs/decisions/0003-infrared-white-balance.md`.
+
 ### What the linear stage does not do
 
 | Stage | Applied? |
@@ -117,6 +192,25 @@ bit-identical output.
 
 Each is recorded as a `let` constant on `RAWLinearProcessing`, alongside the
 white-level policy and the white level actually used.
+
+### What the white-balance stage does not do
+
+| Stage | Applied? |
+| --- | --- |
+| Per-CFA-plane white-balance gains | **yes** |
+| Clamping / clipping | no |
+| Gain normalisation of any kind | no |
+| Camera / daylight multipliers | no |
+| Gain estimation | no |
+| Demosaicing | no |
+| Camera colour matrix | no |
+| Gamma / transfer function | no |
+| Orientation | no |
+
+Each is recorded on `RAWWhiteBalanceProcessing`, alongside the exact gains
+applied and their `RAWWhiteBalanceSource` (only `.explicit` exists today). The
+gains are recorded as numbers, not as a label, so any result is reproducible
+from provenance alone.
 
 ### The two metadata snapshots
 
@@ -376,6 +470,45 @@ No value in this frame exceeds 1 because its largest sample, 2187, is well
 under the white level. That is a fact about this exposure, not a clamp; the
 synthetic suite proves values above 1 survive.
 
+### After white balance with diagnostic test gains
+
+> These gains are **test-only**. They are not an E-PL3 calibration, not a
+> recommendation, not an IR filter profile, and not the output of any
+> estimator. They are four distinct numbers chosen so each plane's
+> contribution is individually identifiable — in particular so plane 3 cannot
+> be confused with plane 1.
+
+Gains by CFA colour plane: `[2, 3, 4, 5]`, applied to the normalised buffer
+above.
+
+| | Before WB | After WB |
+| --- | --- | --- |
+| Minimum | −0.000744 | −0.002977 |
+| Maximum | 0.526668 | 2.333168 |
+| Mean | 0.082318 | 0.264747 |
+| Plane 0 mean (R, gain 2) | 0.129994 | 0.259987 |
+| Plane 1 mean (G1, gain 3) | 0.089637 | 0.268910 |
+| Plane 2 mean (B, gain 4) | 0.018112 | 0.072448 |
+| Plane 3 mean (G2, gain 5) | 0.091529 | 0.457644 |
+| Values below 0 | 11 | 11 |
+| Values exactly 0 | 6 | 6 |
+| Values above 1 | 0 | 32 208 (0.261 %) |
+| Non-finite values | 0 | 0 |
+| Output storage | 49 320 960 bytes | 49 320 960 bytes |
+
+Each per-plane mean scales by exactly its own plane's gain, which is what makes
+this table a check on plane addressing rather than a set of magic numbers. The
+two green planes scale by 3 and 5 respectively, confirming they are handled
+independently despite `colorCount == 3`.
+
+The negative count is unchanged, because every gain is strictly positive and
+multiplying by a positive number cannot change a sign. Values above 1 appear
+for the first time and are kept.
+
+Apply time for the full 12 330 240-value buffer is roughly 2.7 s in a **debug**
+build (`-Onone`, bounds checks on, one CFA lookup per sample). No optimised-build
+measurement has been taken, and no performance claim is made from this number.
+
 ## Decoder warnings by stage
 
 LibRaw accumulates `process_warnings` with `|=` and never clears it outside
@@ -397,7 +530,9 @@ can.
 
 ## Not yet decided
 
-- The working colour space (ADR 0002), which is downstream of demosaicing.
+- The working colour space, which is downstream of demosaicing.
+- How infrared white-balance gains should be *chosen*. ADR 0003 records how
+  they are applied; nothing yet estimates them.
 - Whether the mosaic path should ever expose the masked border, e.g. for
   measuring the black level from the optical-black region instead of trusting
   LibRaw's own estimate (see "Masked pixels and who owns black estimation").
