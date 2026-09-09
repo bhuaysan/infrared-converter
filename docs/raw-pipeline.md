@@ -56,16 +56,16 @@ application normalisation to Float32  ┘
    ↓
 LinearRAWMosaic (Float32, unclamped)
    │
-   ├───→ [FUTURE: IR gain estimation — picker, patch, profiles]
-   │                    ↓
-   │           RAWWhiteBalanceGains
-   │                    │
-   ↓                    ↓
-   └───────→ apply per-CFA-plane IR gains   ┐
-                        ↓                   ├ RAWWhiteBalancer
-             WhiteBalancedRAWMosaic         ┘
-                        ↓
-             [FUTURE: demosaic]
+   ├───→ measure a selected patch   ┐
+   │              ↓                 ├ RAWWhiteBalanceEstimator
+   │     RAWWhiteBalanceGains       ┘
+   │              │
+   ↓              ↓
+   └───→ apply per-CFA-plane IR gains   ┐
+                  ↓                     ├ RAWWhiteBalancer
+       WhiteBalancedRAWMosaic           ┘
+                  ↓
+       [FUTURE: demosaic]
 ```
 
 Estimation is **not** a stage downstream of white balance. It reads the
@@ -73,7 +73,7 @@ pre-white-balance `LinearRAWMosaic`, produces a `RAWWhiteBalanceGains`, and
 that value is what `RAWWhiteBalancer` then applies to the same mosaic. The two
 halves meet at the gains, not at the image.
 
-Both processing stages are application-owned and neither imports `CLibRaw`.
+All three stages are application-owned and none imports `CLibRaw`.
 
 `RAWMosaicNormalizer` takes a `DecodedRAWMosaic` (or a bare `RAWMosaic` plus
 level metadata) and returns a `ProcessedRAWMosaic`, which keeps the original
@@ -83,9 +83,13 @@ level metadata) and returns a `ProcessedRAWMosaic`, which keeps the original
 plus gains) and returns a `WhiteBalancedProcessedRAWMosaic`, which keeps the
 normalised mosaic reachable on `.source` for the same reason.
 
-**Gain estimation does not exist yet.** Nothing in the project decides what the
-gains should be; every caller supplies them. The estimation stage above is a
-placeholder for future work, not a description of current behaviour.
+`RAWWhiteBalanceEstimator` takes a `LinearRAWMosaic` and a rectangular region
+and returns a `RAWWhiteBalanceEstimate` — the gains plus the measurement that
+produced them. It never multiplies a sample or allocates an image-sized buffer.
+
+**Automatic estimation does not exist yet.** The caller still chooses which
+samples to measure; nothing decides that on its own, and no filter profile or
+saved recipe supplies gains.
 
 ### Black subtraction and normalisation
 
@@ -185,6 +189,84 @@ new result = apply(new gains, the normalised mosaic)
 source, so gains cannot compound. See
 `docs/decisions/0003-infrared-white-balance.md`.
 
+### Infrared white-balance estimation
+
+`RAWWhiteBalanceEstimator` decides what the gains should be by measuring a
+rectangle of the **pre**-white-balance mosaic. It is the only place in the
+project with an opinion about that; `RAWWhiteBalancer` still multiplies
+literally.
+
+```text
+target      = max(mean of every colour plane the layout produces)
+gain[plane] = target / mean[plane]        (.preserveStrongestMeasuredPlane)
+gain[plane] = 1                           for plane indices the layout never produces
+```
+
+`RAWActiveAreaRegion` is an application-owned integer rectangle in the same
+active-image coordinates the mosaic uses — not `CGRect`, because selecting
+samples is integer counting and a rectangle of 63.5 samples means nothing here.
+A negative origin, a non-positive width or height, a far edge that overflows
+`Int`, or any extent past the mosaic's edge raises
+`RAWProcessingError.invalidActiveAreaRegion`. **A region is never cropped to
+fit**: a silently shrunk selection would change which samples were measured
+without saying so.
+
+Which colour planes exist is **discovered**, by walking one complete repeating
+CFA cell through `SensorColorLayout.colorPlaneIndex(row:column:)` — 8 × 2 for
+Bayer, matching the packed `filters` code, and 6 × 6 for X-Trans. No LibRaw CFA
+decoding is duplicated. `colorCount` is not consulted, for the same reason the
+gain model has four slots. `.foveon`, `.none`, `.unknown`, a malformed X-Trans
+table and `filters == 1` all raise
+`unsupportedSensorLayoutForEstimation`; a plane index outside `0...3` raises
+`unsupportedColorPlaneIndex` rather than being folded.
+
+Two absences that look alike are kept apart:
+
+| Situation | Result |
+| --- | --- |
+| Plane index the layout never produces | Unused: gain exactly `1` |
+| Plane in the layout, no samples in the patch | `insufficientPatchSamples` |
+
+So a three-plane Bayer sensor and an X-Trans table using indices `0...2` both
+leave slot `3` at identity, while a 1×1 region on an RGBG sensor fails — which
+is exactly why a future UI point picker has to sample a patch, not a pixel.
+
+The statistic is the arithmetic mean, accumulated in `Double` even though the
+mosaic stores `Float`: this runs once over a small patch, not per sample in a
+12-megapixel loop, and `Float32` accumulation would add avoidable error to the
+one number every gain derives from.
+
+**Every finite sample in the region participates.** Nothing is clamped to `0`
+or `1`, no shadows or highlights are dropped, no absolute value is taken, no
+epsilon is added, and there is no percentile or outlier rejection. Finite
+negatives are real black-subtracted noise and lower a mean, as they should. A
+NaN or infinite sample raises `nonFiniteInputValue` with its coordinate rather
+than being skipped.
+
+A required plane's mean must be finite and strictly positive; zero, negative
+and non-finite means raise `invalidPlaneMean`. A ratio that is not a finite
+positive `Float32` raises `nonFiniteEstimatedGain` rather than being clamped,
+and there is no arbitrary maximum gain — a very small positive mean may
+legitimately produce a very large one.
+
+Guarantees of `.preserveStrongestMeasuredPlane`, all tested: every measured
+plane gets a finite positive gain, at least one measured gain is exactly `1`,
+none is below `1`, applying them equalises the patch means to Float32
+precision, unused slots are `1`, and nothing renormalises afterwards. The
+policy exists so the estimator does not attenuate the plane carrying the most
+signal, which is what dividing through by green or by the weakest plane would
+do.
+
+Provenance is `RAWWhiteBalanceSource.neutralPatch`, carrying the region, the
+policy, the per-plane sample counts and means, and the target mean. It does not
+repeat the gains — those already live on `RAWWhiteBalanceProcessing.gains`, and
+two copies could disagree. `RAWWhiteBalancer.apply(to:estimate:)` takes an
+estimate whole so the two halves cannot be mismatched.
+
+Cost is `O(samples in the region)` with constant auxiliary memory: four
+`Double` sums and four counters. See
+`docs/decisions/0004-neutral-patch-white-balance-estimation.md`.
+
 ### What the linear stage does not do
 
 | Stage | Applied? |
@@ -216,7 +298,8 @@ white-level policy and the white level actually used.
 | Orientation | no |
 
 Each is recorded on `RAWWhiteBalanceProcessing`, alongside the exact gains
-applied and their `RAWWhiteBalanceSource` (only `.explicit` exists today). The
+applied and their `RAWWhiteBalanceSource` (`.explicit`, or `.neutralPatch`
+carrying the measurement that produced them). The
 gains are recorded as numbers, not as a label: given the same
 `LinearRAWMosaic`, the recorded provenance contains the exact gains required to
 reproduce the white-balance transformation. The provenance does not contain the
@@ -519,6 +602,37 @@ Apply time for the full 12 330 240-value buffer is roughly 2.7 s in a **debug**
 build (`-Onone`, bounds checks on, one CFA lookup per sample). No optimised-build
 measurement has been taken, and no performance claim is made from this number.
 
+### Neutral-patch estimate for a central diagnostic region
+
+> These numbers are **diagnostic only**. The region is a geometrically central
+> rectangle, chosen because it is deterministic and contains all four CFA
+> positions. No claim is made that it is visually neutral, that this frame is a
+> grey card, or that these gains are an E-PL3 calibration, an infrared filter
+> profile or a recommended starting point. They are a measurement of one
+> rectangle in one file.
+
+Region: origin row 1488, column 1996, size 64 × 64 — 4096 samples, 1024 of each
+CFA plane. Policy `.preserveStrongestMeasuredPlane`.
+
+| Plane | Samples | Mean before WB | Estimated gain | Mean after WB |
+| --- | --- | --- | --- | --- |
+| 0 (R) | 1024 | 0.05718087 | 1.0 | 0.05718087 |
+| 1 (G1) | 1024 | 0.03957828 | 1.4447539 | 0.05718087 |
+| 2 (B) | 1024 | 0.00840750 | 6.8011756 | 0.05718087 |
+| 3 (G2) | 1024 | 0.03979002 | 1.4370658 | 0.05718087 |
+
+Target mean 0.05718087, which is plane 0's — the largest, so plane 0's gain is
+exactly `1` and no plane is attenuated. The four post-balance means agree to
+better than 2 parts in 10⁸, which is Float32 multiply noise.
+
+Planes 1 and 3 measured 0.03957828 and 0.03979002 and received different gains,
+confirming the two greens are measured independently on real data and not
+merely representable independently.
+
+Estimating over this patch takes about 0.6 ms in a **debug** build. No
+optimised-build measurement has been taken, and no performance claim is made
+from this number.
+
 ## Decoder warnings by stage
 
 LibRaw accumulates `process_warnings` with `|=` and never clears it outside
@@ -541,8 +655,10 @@ can.
 ## Not yet decided
 
 - The working colour space, which is downstream of demosaicing.
-- How infrared white-balance gains should be *chosen*. ADR 0003 records how
-  they are applied; nothing yet estimates them.
+- How infrared white-balance gains should be chosen *without* a user-selected
+  region. ADR 0003 records how gains are applied and ADR 0004 how they are
+  estimated from a selected patch; automatic estimation, robust statistics and
+  filter profiles remain open.
 - Whether the mosaic path should ever expose the masked border, e.g. for
   measuring the black level from the optical-black region instead of trusting
   LibRaw's own estimate (see "Masked pixels and who owns black estimation").

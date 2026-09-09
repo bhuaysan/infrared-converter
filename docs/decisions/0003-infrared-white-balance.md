@@ -138,12 +138,18 @@ A finite input that overflows `Float32` when multiplied by a finite gain is a
 typed error, never clamped to `greatestFiniteMagnitude` and never stored as an
 infinity. A non-finite input value is likewise reported rather than propagated.
 
-## Decision 10 — Gain estimation is out of scope
+## Decision 10 — Gain estimation is out of scope *for this stage*
 
 No grey-world, no percentile, no neutral patch, no neutral pixel, no picker, no
 histogram estimator, no camera-WB conversion, no temperature/tint model. This
-stage consumes gains supplied by the caller and does not decide what they
+stage consumes gains supplied by its caller and does not decide what they
 should be.
+
+This decision still holds and has not been superseded. It constrains
+`RAWWhiteBalancer`, not the project: neutral-patch estimation now exists as a
+separate type, `RAWWhiteBalanceEstimator`, which produces gains and hands them
+here. See
+[ADR 0004](0004-neutral-patch-white-balance-estimation.md).
 
 ## Decision 11 — Temperature and tint are not the core representation
 
