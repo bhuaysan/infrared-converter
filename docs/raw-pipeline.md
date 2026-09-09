@@ -41,6 +41,83 @@ and then diverge, and they are not interchangeable.
   for future processing, and its demosaicing and black/white handling are
   LibRaw's, not ours.
 
+## The application-owned pipeline so far
+
+```text
+RAW file
+   ↓
+LibRaw unpack
+   ↓
+RAWMosaic (UInt16)                    ← LibRaw's responsibility ends here
+   ↓
+application black subtraction         ┐
+   ↓                                  ├ RAWMosaicNormalizer
+application normalisation to Float32  ┘
+   ↓
+LinearRAWMosaic (Float32, unclamped)
+   ↓
+[FUTURE: IR white balance]
+   ↓
+[FUTURE: demosaic]
+```
+
+`RAWMosaicNormalizer` is application-owned and does not import `CLibRaw`. It
+takes a `DecodedRAWMosaic` (or a bare `RAWMosaic` plus level metadata) and
+returns a `ProcessedRAWMosaic`, which keeps the original `UInt16` mosaic
+reachable on `.source` — nothing is mutated in place.
+
+### Black subtraction and normalisation
+
+For every sample, with `black` the effective black level at that coordinate and
+colour plane and `white` the white-level policy's level:
+
+```text
+black = levels.blackLevel(row:column:colorPlane:)
+white = levels.maximum                       (.metadataMaximum policy)
+
+value = (Float(sample) - Float(black)) / Float(white - black)
+```
+
+| Input | Output |
+| --- | --- |
+| `sample == black` | `0` |
+| `sample == white` | `1` |
+| `sample < black` | `< 0`, preserved |
+| `sample > white` | `> 1`, preserved |
+
+**Nothing is clamped, in either direction.** Negatives are real — sensor noise
+straddles the black point — and values above 1 are highlight information that a
+later, explicit stage may want. `Levels.linearMaximum` is metadata only: it is
+never applied, clipped at, or normalised against. `sourceRawBitDepth` is not
+used at all. See `docs/decisions/0002-raw-normalization.md`.
+
+Invalid decoded metadata fails loudly rather than being worked around. A white
+level that is not above the effective black level has no denominator and raises
+`RAWProcessingError.invalidNormalizationRange`, carrying both levels and the
+coordinate and plane where it was found. For any metadata this stage accepts,
+every output value is finite.
+
+Only the *sum* `Levels.blackLevel(...)` returns is ever read, so how the
+effective black is split between `black`, `perPlaneBlack` and `blackPattern`
+cannot change the result — the pre-unpack and post-unpack E-PL3 splits produce
+bit-identical output.
+
+### What the linear stage does not do
+
+| Stage | Applied? |
+| --- | --- |
+| Black subtraction | **yes** |
+| White-level normalisation | **yes** |
+| Clamping / clipping | no |
+| White balance | no |
+| Demosaicing | no |
+| Camera colour matrix | no |
+| Gamma / transfer function | no |
+| Orientation | no |
+
+Each is recorded as a `let` constant on `RAWLinearProcessing`, alongside the
+white-level policy and the white level actually used.
+
 ### The two metadata snapshots
 
 Both paths snapshot metadata before any *processing*, but they snapshot
@@ -89,8 +166,8 @@ These terms are distinct and must not be used interchangeably.
 | **LibRaw-unpacked sensor mosaic sample** | After LibRaw's format-specific decoding — bit unpacking, byte order, and, for formats that use one, LibRaw's per-format linearisation curve. One sample per mosaic location. | `RAWMosaic.samples` |
 | **Source RAW bit depth** | How wide a sample was *in the file*, per the format parser. Source/file-format information only. | `RAWMosaic.sourceRawBitDepth`, `SensorColorLayout.sourceRawBitDepth` |
 | **White / saturation level** | The value a normalisation stage treats as full scale. | `RAWMetadata.Levels.maximum` / `linearMaximum` |
-| **Black-corrected sample** | The above, minus the effective black level. | Not implemented yet. |
-| **Normalised sample** | Black-corrected and rescaled against the saturation level. | Not implemented yet. |
+| **Black-corrected sample** | The above, minus the effective black level. | An intermediate inside `RAWMosaicNormalizer`; never a stored representation. |
+| **Normalised sample** | Black-corrected and rescaled against the saturation level, as `Float32`. Not clamped. | `LinearRAWMosaic.values` |
 | **Demosaiced camera RGB** | Three channels per pixel, camera-native primaries, no matrix applied. | `RAWImage` (produced by LibRaw, on the reference path only) |
 | **Working representation** | The project's defined internal processing space. | Not defined. Requires ADR 0002. |
 
@@ -138,9 +215,16 @@ white / saturation level
 ```
 
 - **Source RAW bit depth** (`RAWMosaic.sourceRawBitDepth`, from LibRaw's
-  `imgdata.color.raw_bps`) describes the *file*: how many bits a sample
-  occupied before LibRaw touched it. It is optional, and stays `nil` when the
-  decoder reports nothing — no `16` is ever substituted.
+  `imgdata.color.raw_bps`) describes the *file*: for most cameras, including
+  the reference fixture, how many bits a sample occupied before LibRaw touched
+  it. It is optional, and stays `nil` when the decoder reports nothing — no
+  `16` is ever substituted.
+
+  It is not universally a literal bit depth. For some formats — Phase One
+  among them — LibRaw sets `raw_bps` to a RAW format code instead. No
+  processing behaviour is built on this value, which is why that ambiguity is
+  harmless here, and it is exactly why nothing downstream may start depending
+  on it.
 - **The unpacked numeric domain** is whatever `unpack()` produced. Several
   formats pass samples through a per-format linearisation curve inside
   `unpack()`, which can move values outside the source depth's nominal range;
@@ -149,15 +233,9 @@ white / saturation level
   `linearMaximum`), read from the same post-unpack RAW state as the samples.
 
 So `2 ^ sourceRawBitDepth - 1` is **not** the authoritative white level and must
-never be used as one. The future normalisation stage is conceptually
-
-```text
-(sample - black) / (white - black)
-```
-
-with `black` from `Levels.blackLevel(row:column:colorPlane:)` and `white` from
-the level metadata or an explicitly selected white-level model — never derived
-from the bit depth. None of this is implemented yet.
+never be used as one. The normalisation stage described below takes `black`
+from `Levels.blackLevel(row:column:colorPlane:)` and `white` from an explicitly
+selected white-level policy — never from the bit depth.
 
 For `.uint16` mosaic storage a reported source depth of `1...16` is accepted and
 `nil` is accepted; `0`, a negative value, or anything above `16` makes
@@ -267,8 +345,29 @@ downstream that goes through `blackLevel(row:column:colorPlane:)` moves.
 
 The mosaic still contains that offset, deliberately. The 11 samples below the
 effective black level are expected — sensor noise straddles the black point —
-and are a reason the future subtraction stage must decide explicitly what to do
-with negative results rather than clamping by accident.
+and they are why the subtraction stage decides explicitly to keep negative
+results rather than clamping by accident.
+
+### After normalisation
+
+Measured over the full 12 330 240-value buffer, white level 4095, effective
+black 64, denominator 4031.
+
+| | |
+| --- | --- |
+| Minimum | −0.000744 = `(61 − 64) / 4031` |
+| Maximum | 0.526668 = `(2187 − 64) / 4031` |
+| Mean | 0.082318 |
+| Per-plane means (0/1/2/3) | 0.129994 / 0.089637 / 0.018121 / 0.091529 |
+| Values below 0 | 11 (0.0000892 %) |
+| Values exactly 0 | 6 |
+| Values above 1 | 0 (0 %) |
+| Non-finite values | 0 |
+| Output storage | `[Float]`, 49 320 960 bytes |
+
+No value in this frame exceeds 1 because its largest sample, 2187, is well
+under the white level. That is a fact about this exposure, not a clamp; the
+synthetic suite proves values above 1 survive.
 
 ## Decoder warnings by stage
 
@@ -291,7 +390,6 @@ can.
 
 ## Not yet decided
 
-- Whether black subtraction produces a signed intermediate or clamps, and where.
 - The working colour space (ADR 0002), which is downstream of demosaicing.
 - Whether the mosaic path should ever expose the masked border, e.g. for
   measuring the black level from the optical-black region instead of trusting

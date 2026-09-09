@@ -123,12 +123,17 @@ typedef struct {
     char cdesc[5];         /* colour-plane letters, e.g. "RGBG" */
     int colors;            /* number of distinct colour planes */
     /*
-     * LibRaw's imgdata.color.raw_bps: the bit depth of the samples as stored
-     * in the SOURCE FILE, as the format parser reports it. It is not a
-     * statement about the numeric domain of the unpacked samples — unpack()
-     * may apply a format-specific linearisation curve and update maximum —
-     * so 2^raw_bps - 1 must never be used as a white/saturation level. Use
-     * the level fields below for that. 0 means "not reported".
+     * LibRaw's imgdata.color.raw_bps, as the format parser reports it. For
+     * most cameras, including this project's reference fixture, it is the
+     * bit depth of the samples as stored in the SOURCE FILE; for some
+     * formats (Phase One among them) LibRaw sets it to a RAW format code
+     * instead, so it is not universally a literal bit depth.
+     *
+     * Either way it is not a statement about the numeric domain of the
+     * unpacked samples — unpack() may apply a format-specific linearisation
+     * curve and update maximum — so 2^raw_bps - 1 must never be used as a
+     * white/saturation level. Use the level fields below for that. 0 means
+     * "not reported".
      */
     uint32_t raw_bps;
     int is_foveon;

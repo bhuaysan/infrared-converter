@@ -71,9 +71,12 @@ public struct RAWMosaic: Equatable, Sendable {
     /// column:)` decodes explicitly rather than relying on that.
     public let samples: Data
     public let sampleFormat: SampleFormat
-    /// The bit depth of the samples **as stored in the source file**, as the
-    /// decoder reported it — `12` for the Olympus E-PL3 — or `nil` when it
-    /// reported none.
+    /// What the decoder reports as the source sample width — `12` for the
+    /// Olympus E-PL3 — or `nil` when it reported none. For most cameras,
+    /// including that one, it is the bit depth of the samples **as stored in
+    /// the source file**; see
+    /// `RAWMetadata.SensorColorLayout.sourceRawBitDepth` for the formats
+    /// where it is not.
     ///
     /// This is `RAWMetadata.SensorColorLayout.sourceRawBitDepth` carried
     /// alongside the data it describes, not re-derived from it.
@@ -85,7 +88,8 @@ public struct RAWMosaic: Equatable, Sendable {
     /// things are easy to conflate here and are deliberately kept apart:
     ///
     /// - *source RAW bit depth* — this property: how wide a sample was in the
-    ///   file, before LibRaw touched it;
+    ///   file, before LibRaw touched it, for the formats where LibRaw
+    ///   reports it literally;
     /// - *the unpacked sample's numeric domain* — what `unpack()` actually
     ///   produced. Several formats pass samples through a per-format
     ///   linearisation curve inside `unpack()`, which can move values outside

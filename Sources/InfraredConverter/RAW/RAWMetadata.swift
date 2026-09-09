@@ -137,9 +137,17 @@ extension RAWMetadata {
         public var colorDescription: String
         /// Number of distinct colour planes (3 or 4 for most cameras).
         public var colorCount: Int
-        /// The bit depth of the samples **as stored in the source file**,
-        /// as the decoder's format parser reports it (LibRaw's
-        /// `imgdata.color.raw_bps`), or `nil` when it reported none.
+        /// What the decoder's format parser reports as the source sample
+        /// width (LibRaw's `imgdata.color.raw_bps`), or `nil` when it
+        /// reported none.
+        ///
+        /// For most cameras, including the reference fixture, this is the
+        /// bit depth of the samples **as stored in the source file**. It is
+        /// not universally that: for some formats — Phase One among them —
+        /// LibRaw sets `raw_bps` to a RAW format code rather than a literal
+        /// bit depth. Nothing in this project's processing reads this value,
+        /// which is why the ambiguity is harmless, and is exactly why
+        /// nothing downstream may start depending on it.
         ///
         /// This is source/file-format information. It is deliberately **not**
         /// a white level, and `2^sourceRawBitDepth - 1` must never be used as
