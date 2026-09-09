@@ -2,15 +2,21 @@ import Foundation
 
 /// Where a set of `RAWWhiteBalanceGains` came from.
 ///
-/// Only one case exists: the caller supplied the numbers. Later milestones
-/// will add estimated sources (a neutral point, a neutral patch, an automatic
-/// estimator, a filter profile), and each is a real decision worth recording
-/// alongside the gains it produced — but none of them exists yet, and
+/// A case is added when the feature that produces it exists, never before:
 /// declaring cases for absent features would put metadata in the archive that
-/// no code can honestly produce.
+/// no code can honestly produce. Automatic estimation, filter profiles and
+/// saved recipes are therefore still absent.
+///
+/// A case carries **how** the gains were obtained, not the gains themselves.
+/// Those are already recorded, literally, in
+/// `RAWWhiteBalanceProcessing.gains`, and a second copy could disagree with
+/// the first.
 public enum RAWWhiteBalanceSource: Equatable, Sendable {
     /// The gains were supplied literally by the caller.
     case explicit
+    /// The gains were estimated by measuring a rectangular patch of the
+    /// pre-white-balance `LinearRAWMosaic`. See `RAWWhiteBalanceEstimator`.
+    case neutralPatch(RAWNeutralPatchWhiteBalanceSource)
 }
 
 /// What the white-balance stage did — and explicitly did not do — to produce

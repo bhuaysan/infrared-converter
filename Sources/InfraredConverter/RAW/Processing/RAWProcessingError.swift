@@ -63,6 +63,51 @@ public enum RAWProcessingError: Error, Equatable {
         input: Float,
         gain: Float
     )
+    /// A requested active-area region is not a usable selection: a negative
+    /// origin, a non-positive width or height, a far edge that overflows
+    /// `Int`, or an extent past the mosaic's edge. Reported rather than
+    /// cropped — silently shrinking a selection would change which samples a
+    /// measurement covers without saying so.
+    case invalidActiveAreaRegion(reason: String)
+    /// Per-CFA-plane estimation is not meaningful for this sensor colour
+    /// layout, so no set of colour planes could be discovered. Foveon,
+    /// already-full-colour files, layouts the decoder did not describe,
+    /// LibRaw's non-standard 16×16 Bayer code, and malformed X-Trans tables
+    /// all reach this.
+    case unsupportedSensorLayoutForEstimation(
+        pattern: RAWMetadata.SensorColorLayout.Pattern,
+        reason: String
+    )
+    /// The sensor colour layout names a colour-plane index outside
+    /// `0..<RAWWhiteBalanceGains.planeCount`, which the four-slot gain model
+    /// cannot represent. Reported rather than reduced modulo the slot count
+    /// or modulo `colorCount`: either would silently estimate one colour's
+    /// gain from another colour's samples.
+    case unsupportedColorPlaneIndex(colorPlane: Int)
+    /// A colour plane that genuinely exists in the sensor layout received no
+    /// samples at all from the requested patch, so there is nothing to
+    /// estimate its gain from.
+    ///
+    /// Deliberately distinct from a plane the layout never produces: an
+    /// unused plane gets an identity gain, while this one is a patch too
+    /// small or too badly placed to cover the CFA. Inventing a gain here
+    /// would be fabricating a measurement.
+    case insufficientPatchSamples(colorPlane: Int, region: RAWActiveAreaRegion)
+    /// A measured colour plane's arithmetic mean cannot scale to a target:
+    /// it is zero, negative, NaN or infinite. Dividing by it would produce an
+    /// infinite, negative or undefined gain, none of which is white balance.
+    ///
+    /// Note that `==` on this case is `false` when `mean` is NaN, since
+    /// `Double` comparison says so; match the case rather than comparing
+    /// whole errors when the offending value may be NaN.
+    case invalidPlaneMean(colorPlane: Int, mean: Double)
+    /// `target / planeMean` is not representable as a finite, strictly
+    /// positive `Float`, so the plane has no usable gain. Reported rather
+    /// than clamped to `Float.greatestFiniteMagnitude`, and there is
+    /// deliberately no arbitrary maximum gain: a very small but positive mean
+    /// may legitimately produce a very large gain, as long as it stays
+    /// finite.
+    case nonFiniteEstimatedGain(colorPlane: Int, targetMean: Double, planeMean: Double)
 }
 
 extension RAWProcessingError: LocalizedError {
@@ -82,6 +127,18 @@ extension RAWProcessingError: LocalizedError {
             return "The image data contains a value that is not a finite number."
         case .nonFiniteWhiteBalanceResult:
             return "These white-balance gains produce values too large to represent."
+        case .invalidActiveAreaRegion:
+            return "The selected image region is not a usable selection."
+        case .unsupportedSensorLayoutForEstimation:
+            return "White balance cannot be estimated from this sensor's colour layout."
+        case .unsupportedColorPlaneIndex:
+            return "This sensor layout names a colour plane the white-balance model cannot hold."
+        case .insufficientPatchSamples:
+            return "The selected region does not cover every colour of the sensor's filter array."
+        case .invalidPlaneMean:
+            return "The selected region is not bright enough in every colour to balance from."
+        case .nonFiniteEstimatedGain:
+            return "The selected region needs a white-balance gain too large to represent."
         }
     }
 
@@ -110,6 +167,31 @@ extension RAWProcessingError: LocalizedError {
             return """
                 \(input) x \(gain) overflows Float32 at row \(row), column \(column), \
                 colour plane \(plane).
+                """
+        case .invalidActiveAreaRegion(let reason):
+            return reason
+        case .unsupportedSensorLayoutForEstimation(let pattern, let reason):
+            return "Sensor layout \(pattern): \(reason)"
+        case .unsupportedColorPlaneIndex(let plane):
+            return """
+                Colour plane \(plane) is outside 0..<\(RAWWhiteBalanceGains.planeCount), \
+                which the gain model cannot address.
+                """
+        case .insufficientPatchSamples(let plane, let region):
+            return """
+                Colour plane \(plane) exists in this sensor layout but received no samples \
+                from the region at row \(region.originRow), column \(region.originColumn), \
+                size \(region.width)x\(region.height).
+                """
+        case .invalidPlaneMean(let plane, let mean):
+            return """
+                Colour plane \(plane) has arithmetic mean \(mean), which is not finite and \
+                greater than zero.
+                """
+        case .nonFiniteEstimatedGain(let plane, let target, let mean):
+            return """
+                Target mean \(target) divided by colour plane \(plane)'s mean \(mean) is not \
+                a finite positive Float32.
                 """
         }
     }
