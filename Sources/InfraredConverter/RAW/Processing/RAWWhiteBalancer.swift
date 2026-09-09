@@ -28,18 +28,24 @@ import Foundation
 /// This is the apply half of a deliberate split:
 ///
 /// ```text
-/// ESTIMATE gains        (future: neutral point, neutral patch, automatic,
-///                        filter profiles, saved recipes)
+/// ESTIMATE gains        RAWWhiteBalanceEstimator (neutral patch), and
+///                       future: automatic, filter profiles, saved recipes
 ///         ↓
 /// RAWWhiteBalanceGains
 ///         ↓
 /// APPLY gains           (this type)
 /// ```
 ///
-/// No estimation happens here — no grey-world, no percentile, no neutral
-/// patch, no camera-WB conversion, no temperature/tint model. Every future
-/// way of *deciding* what the gains should be is expected to end by producing
-/// a `RAWWhiteBalanceGains` and handing it to this same primitive.
+/// No estimation happens here — no grey-world, no percentile, no patch
+/// measurement, no camera-WB conversion, no temperature/tint model. Every way
+/// of *deciding* what the gains should be ends by producing a
+/// `RAWWhiteBalanceGains` and handing it to this same primitive.
+///
+/// `RAWWhiteBalanceEstimator` is the first such producer. Its scale policy is
+/// entirely resolved before this stage sees anything: what arrives here is
+/// four numbers, and they are multiplied as they are. The `estimate:`
+/// overloads below take an estimate whole so its gains and its provenance
+/// cannot be mismatched; they add no behaviour beyond that.
 ///
 /// ## Gains are literal
 ///
@@ -236,5 +242,47 @@ public struct RAWWhiteBalancer: Sendable {
         gainSource: RAWWhiteBalanceSource = .explicit
     ) throws -> WhiteBalancedProcessedRAWMosaic {
         try apply(to: previous.source, gains: gains, gainSource: gainSource)
+    }
+
+    // MARK: - Applying an estimate
+
+    // These overloads take an estimate whole. They exist because the gains
+    // and the provenance that explains them are two halves of one result, and
+    // splitting them by hand at every call site is an easy way to record a
+    // measurement that did not produce the numbers that were applied. Passing
+    // the estimate makes that mismatch unrepresentable rather than merely
+    // discouraged.
+    //
+    // Nothing about the apply stage changes here. The gains are still
+    // multiplied literally, and the estimator's scale policy has already been
+    // resolved into the numbers being handed over — this stage neither
+    // rescales them nor knows the policy exists.
+
+    /// Applies an estimate's gains to a normalised mosaic, recording that
+    /// same estimate's neutral-patch provenance.
+    public func apply(
+        to mosaic: LinearRAWMosaic,
+        estimate: RAWWhiteBalanceEstimate
+    ) throws -> WhiteBalancedRAWMosaic {
+        try apply(to: mosaic, gains: estimate.gains, gainSource: estimate.source)
+    }
+
+    /// Applies an estimate to a normalised result, keeping that whole
+    /// pre-white-balance state reachable on the returned value's `source` so
+    /// a later re-estimate can start from the same normalised mosaic.
+    public func apply(
+        to processed: ProcessedRAWMosaic,
+        estimate: RAWWhiteBalanceEstimate
+    ) throws -> WhiteBalancedProcessedRAWMosaic {
+        try apply(to: processed, gains: estimate.gains, gainSource: estimate.source)
+    }
+
+    /// Re-balances an already-balanced result from a new estimate, starting
+    /// from its normalised source rather than from its balanced values.
+    public func apply(
+        estimate: RAWWhiteBalanceEstimate,
+        replacing previous: WhiteBalancedProcessedRAWMosaic
+    ) throws -> WhiteBalancedProcessedRAWMosaic {
+        try apply(to: previous.source, estimate: estimate)
     }
 }
