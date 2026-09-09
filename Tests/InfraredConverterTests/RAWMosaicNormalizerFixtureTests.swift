@@ -116,7 +116,7 @@ struct RAWMosaicNormalizerFixtureTests {
     @Test("Every value is finite, and negatives survive while nothing is clamped to 1")
     func negativesSurviveAndNothingIsClamped() throws {
         let processed = try Self.processFixture()
-        let statistics = LinearMosaicStatistics(mosaic: processed.mosaic)
+        let statistics = MosaicStatistics(mosaic: processed.mosaic)
 
         #expect(statistics.nonFiniteCount == 0)
 
@@ -146,7 +146,7 @@ struct RAWMosaicNormalizerFixtureTests {
         let processed = try Self.processFixture()
         let linear = processed.mosaic
         let levels = processed.metadata.levels
-        let statistics = LinearMosaicStatistics(mosaic: linear)
+        let statistics = MosaicStatistics(mosaic: linear)
         let total = Double(linear.values.count)
 
         var report = "\n--- LinearRAWMosaic diagnostic (Olympus E-PL3 fixture) ---\n"
@@ -170,70 +170,5 @@ struct RAWMosaicNormalizerFixtureTests {
         print(report)
 
         #expect(statistics.nonFiniteCount == 0)
-    }
-
-    /// Full-buffer statistics over a `LinearRAWMosaic`.
-    ///
-    /// Every figure here is computed over the whole buffer, not sampled: the
-    /// counts below zero and above one are the point of the milestone and a
-    /// sparse estimate of them would be meaningless. The accumulators are
-    /// scalars, so no second full-size buffer is allocated.
-    private struct LinearMosaicStatistics {
-        let minimum: Float
-        let maximum: Float
-        let mean: Double
-        let perPlaneMean: [Int: Double]
-        let belowZeroCount: Int
-        let zeroCount: Int
-        let aboveOneCount: Int
-        let nonFiniteCount: Int
-
-        init(mosaic: LinearRAWMosaic) {
-            var minimum = Float.greatestFiniteMagnitude
-            var maximum = -Float.greatestFiniteMagnitude
-            var total = 0.0
-            var perPlaneTotal: [Int: Double] = [:]
-            var perPlaneCount: [Int: Int] = [:]
-            var belowZero = 0
-            var zero = 0
-            var aboveOne = 0
-            var nonFinite = 0
-
-            var index = 0
-            for row in 0..<mosaic.height {
-                for column in 0..<mosaic.width {
-                    let value = mosaic.values[index]
-                    index += 1
-
-                    guard value.isFinite else {
-                        nonFinite += 1
-                        continue
-                    }
-                    minimum = Swift.min(minimum, value)
-                    maximum = Swift.max(maximum, value)
-                    total += Double(value)
-                    if value < 0 { belowZero += 1 }
-                    if value == 0 { zero += 1 }
-                    if value > 1 { aboveOne += 1 }
-
-                    if let plane = mosaic.sensorColorLayout.colorPlaneIndex(row: row, column: column) {
-                        perPlaneTotal[plane, default: 0] += Double(value)
-                        perPlaneCount[plane, default: 0] += 1
-                    }
-                }
-            }
-
-            self.minimum = minimum
-            self.maximum = maximum
-            self.mean = mosaic.values.isEmpty ? 0 : total / Double(mosaic.values.count)
-            self.perPlaneMean = perPlaneTotal.reduce(into: [:]) { result, entry in
-                let count = perPlaneCount[entry.key] ?? 0
-                result[entry.key] = count > 0 ? entry.value / Double(count) : 0
-            }
-            self.belowZeroCount = belowZero
-            self.zeroCount = zero
-            self.aboveOneCount = aboveOne
-            self.nonFiniteCount = nonFinite
-        }
     }
 }
