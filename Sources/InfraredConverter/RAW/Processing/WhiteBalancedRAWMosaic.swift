@@ -23,8 +23,15 @@ public struct RAWWhiteBalanceProcessing: Equatable, Sendable {
     /// The exact multipliers applied, per CFA colour plane.
     ///
     /// The gains themselves, not a label for them: given `[2, 3, 4, 5]` this
-    /// records `[2, 3, 4, 5]`, so the transformation can be reproduced from
-    /// provenance alone. "Custom white balance" would not be reproducible.
+    /// records `[2, 3, 4, 5]`. So, given the same `LinearRAWMosaic`, this
+    /// record contains the exact gains required to reproduce the
+    /// white-balance transformation. "Custom white balance" would not.
+    ///
+    /// Note the precise claim. This record does **not** carry the source
+    /// pixels, so it reproduces the *transformation*, not the image; the
+    /// normalised mosaic it was applied to has to come from
+    /// `WhiteBalancedProcessedRAWMosaic.linearMosaic` or from decoding and
+    /// normalising the file again.
     public var gains: RAWWhiteBalanceGains
     /// How those gains were arrived at.
     public var gainSource: RAWWhiteBalanceSource

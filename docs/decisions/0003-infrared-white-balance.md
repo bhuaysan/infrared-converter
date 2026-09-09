@@ -181,8 +181,10 @@ remains open; nothing here depends on it.
   49 MB for the reference camera, alongside the normalised mosaic it is derived
   from. Keeping the source is what makes non-compounding re-balance possible,
   and is a deliberate trade.
-- Provenance records the exact gains, so any result is reproducible from
-  `RAWWhiteBalanceProcessing` alone rather than from a label like "custom
-  white balance".
+- Provenance records the exact gains rather than a label like "custom white
+  balance", so given the same `LinearRAWMosaic`,
+  `RAWWhiteBalanceProcessing` contains the exact gains required to reproduce
+  the white-balance transformation. It does not contain the source pixels, so
+  it reproduces the transformation and not the image by itself.
 - `RAWWhiteBalanceSource` has a single case, `.explicit`. Estimated sources
   will be added as the features that produce them are built, not before.

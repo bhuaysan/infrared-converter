@@ -55,15 +55,23 @@ application black subtraction         ┐
 application normalisation to Float32  ┘
    ↓
 LinearRAWMosaic (Float32, unclamped)
-   ↓
-explicit per-CFA-plane IR gains       ┐
-   ↓                                  ├ RAWWhiteBalancer
-WhiteBalancedRAWMosaic (Float32)      ┘
-   ↓
-[FUTURE: IR white-balance gain estimation — picker, patch, profiles]
-   ↓
-[FUTURE: demosaic]
+   │
+   ├───→ [FUTURE: IR gain estimation — picker, patch, profiles]
+   │                    ↓
+   │           RAWWhiteBalanceGains
+   │                    │
+   ↓                    ↓
+   └───────→ apply per-CFA-plane IR gains   ┐
+                        ↓                   ├ RAWWhiteBalancer
+             WhiteBalancedRAWMosaic         ┘
+                        ↓
+             [FUTURE: demosaic]
 ```
+
+Estimation is **not** a stage downstream of white balance. It reads the
+pre-white-balance `LinearRAWMosaic`, produces a `RAWWhiteBalanceGains`, and
+that value is what `RAWWhiteBalancer` then applies to the same mosaic. The two
+halves meet at the gains, not at the image.
 
 Both processing stages are application-owned and neither imports `CLibRaw`.
 
@@ -209,8 +217,10 @@ white-level policy and the white level actually used.
 
 Each is recorded on `RAWWhiteBalanceProcessing`, alongside the exact gains
 applied and their `RAWWhiteBalanceSource` (only `.explicit` exists today). The
-gains are recorded as numbers, not as a label, so any result is reproducible
-from provenance alone.
+gains are recorded as numbers, not as a label: given the same
+`LinearRAWMosaic`, the recorded provenance contains the exact gains required to
+reproduce the white-balance transformation. The provenance does not contain the
+source pixels, so it reproduces the *transformation*, not the image on its own.
 
 ### The two metadata snapshots
 

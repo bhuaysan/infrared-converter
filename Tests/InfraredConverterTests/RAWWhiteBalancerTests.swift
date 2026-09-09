@@ -470,7 +470,8 @@ struct RAWWhiteBalancerTests {
         #expect(processing.gains.gainsByColorPlane == [2, 3, 4, 5])
         #expect(processing.gainSource == .explicit)
 
-        // The transformation is reproducible from provenance alone.
+        // Given the same LinearRAWMosaic, the recorded provenance carries
+        // the exact gains required to reproduce the transformation.
         let replayed = try RAWWhiteBalancer()
             .apply(to: Self.uniformCell(1), gains: processing.gains)
         #expect(replayed.values == balanced.values)

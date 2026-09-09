@@ -154,7 +154,8 @@ struct RAWWhiteBalancerFixtureTests {
         #expect(balanced.isGeometryConsistent)
         #expect(balanced.valuesPerRow == 4056)
 
-        // Exact gains, reproducible from provenance alone.
+        // Exact gains: given the same LinearRAWMosaic, provenance carries
+        // everything needed to reproduce the transformation.
         #expect(balanced.processing.gains == Self.testGains)
         #expect(balanced.processing.gains.gainsByColorPlane == [2, 3, 4, 5])
         #expect(balanced.processing.gainSource == .explicit)
