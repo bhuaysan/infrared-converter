@@ -33,6 +33,36 @@ public enum RAWProcessingError: Error, Equatable {
         column: Int,
         colorPlane: Int
     )
+    /// A white-balance gain is not a usable multiplier: it is zero, negative,
+    /// NaN, or infinite. There is deliberately no upper bound — infrared
+    /// white balance legitimately needs extreme multipliers — so only these
+    /// four kinds of value are refused.
+    ///
+    /// Note that `==` on this case is `false` when `value` is NaN, since
+    /// `Float` comparison says so; match the case rather than comparing
+    /// whole errors when the offending value may be NaN.
+    case invalidWhiteBalanceGain(colorPlane: Int, value: Float)
+    /// The sensor colour layout named a colour plane the supplied gains have
+    /// no slot for, so this sample has no defined multiplier. Reported rather
+    /// than folded onto an existing plane: reducing the index modulo the slot
+    /// count would silently apply the wrong colour's gain.
+    case missingWhiteBalanceGain(row: Int, column: Int, colorPlane: Int)
+    /// An input value was NaN or infinite. The normalisation stage cannot
+    /// produce either, so this means a hand-constructed or otherwise
+    /// unvalidated mosaic reached a processing stage; it is reported rather
+    /// than multiplied and propagated silently.
+    case nonFiniteInputValue(row: Int, column: Int, value: Float)
+    /// A finite input multiplied by a finite gain overflowed `Float32`. The
+    /// result is reported rather than clamped to
+    /// `Float.greatestFiniteMagnitude` or otherwise substituted: an image
+    /// containing a silently invented value is worse than a failed stage.
+    case nonFiniteWhiteBalanceResult(
+        row: Int,
+        column: Int,
+        colorPlane: Int,
+        input: Float,
+        gain: Float
+    )
 }
 
 extension RAWProcessingError: LocalizedError {
@@ -44,6 +74,14 @@ extension RAWProcessingError: LocalizedError {
             return "This sensor colour layout does not describe a colour plane for every sample."
         case .invalidNormalizationRange:
             return "The file's black and white levels do not describe a usable range."
+        case .invalidWhiteBalanceGain:
+            return "A white-balance gain is not a usable multiplier."
+        case .missingWhiteBalanceGain:
+            return "The white-balance gains do not cover every colour plane in this sensor layout."
+        case .nonFiniteInputValue:
+            return "The image data contains a value that is not a finite number."
+        case .nonFiniteWhiteBalanceResult:
+            return "These white-balance gains produce values too large to represent."
         }
     }
 
@@ -57,6 +95,21 @@ extension RAWProcessingError: LocalizedError {
             return """
                 White level \(white) is not above the effective black level \(black) \
                 at row \(row), column \(column), colour plane \(plane).
+                """
+        case .invalidWhiteBalanceGain(let plane, let value):
+            return """
+                Gain \(value) for colour plane \(plane) is not finite and greater than zero.
+                """
+        case .missingWhiteBalanceGain(let row, let column, let plane):
+            return """
+                No gain for colour plane \(plane), sampled at row \(row), column \(column).
+                """
+        case .nonFiniteInputValue(let row, let column, let value):
+            return "Value \(value) at row \(row), column \(column) is not finite."
+        case .nonFiniteWhiteBalanceResult(let row, let column, let plane, let input, let gain):
+            return """
+                \(input) x \(gain) overflows Float32 at row \(row), column \(column), \
+                colour plane \(plane).
                 """
         }
     }
