@@ -260,6 +260,19 @@ public struct DemosaicedRAWRGBImage: Equatable, Sendable {
 /// re-editing without a second decode. When interactive editing exists and has
 /// been measured, that tradeoff can be revisited — by measurement, not by
 /// dropping buffers to make a number look smaller.
+///
+/// ## A stage-produced pairing, not a caller-assembled one
+///
+/// The two halves are a **historical claim**: this mosaic was produced from
+/// that source, by this stage, in one run. `let` properties and a
+/// module-internal initialiser make that claim true by construction — outside
+/// the module the pairing can be read in full but not minted, so a source
+/// from one processing run cannot be attached to a result from another.
+/// The same reasoning as `RAWWhiteBalanceEstimate`, and the same reason the
+/// bare value types below it stay publicly constructible: `LinearRAWMosaic`,
+/// `WhiteBalancedRAWMosaic` and `DemosaicedRAWRGBImage` are data
+/// representations that a test, an alternate producer or a future integration
+/// may legitimately build, while these wrappers assert provenance.
 public struct DemosaicedProcessedRAWImage: Sendable {
     /// The white-balanced, pre-demosaic state this was produced from,
     /// unchanged — with the normalised mosaic on its own `.source`, and the
@@ -268,7 +281,10 @@ public struct DemosaicedProcessedRAWImage: Sendable {
     /// The demosaiced linear camera-native RGB image.
     public let image: DemosaicedRAWRGBImage
 
-    public init(source: WhiteBalancedProcessedRAWMosaic, image: DemosaicedRAWRGBImage) {
+    /// Module-internal, deliberately: only `RAWDemosaicer` pairs a
+    /// white-balanced state with the image it interpolated from it. See the
+    /// type's note above on why that pairing is not forgeable from outside.
+    init(source: WhiteBalancedProcessedRAWMosaic, image: DemosaicedRAWRGBImage) {
         self.source = source
         self.image = image
     }

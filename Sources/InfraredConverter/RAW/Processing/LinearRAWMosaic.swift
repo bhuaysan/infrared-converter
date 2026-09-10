@@ -199,13 +199,29 @@ public struct LinearRAWMosaic: Equatable, Sendable {
 /// available through `source` — nothing is mutated in place — so diagnostics
 /// and reprocessing under a different policy remain possible without decoding
 /// the file again.
+///
+/// ## A stage-produced pairing, not a caller-assembled one
+///
+/// The two halves are a **historical claim**: this mosaic was produced from
+/// that source, by this stage, in one run. `let` properties and a
+/// module-internal initialiser make that claim true by construction — outside
+/// the module the pairing can be read in full but not minted, so a source
+/// from one processing run cannot be attached to a result from another.
+/// The same reasoning as `RAWWhiteBalanceEstimate`, and the same reason the
+/// bare value types below it stay publicly constructible: `LinearRAWMosaic`,
+/// `WhiteBalancedRAWMosaic` and `DemosaicedRAWRGBImage` are data
+/// representations that a test, an alternate producer or a future integration
+/// may legitimately build, while these wrappers assert provenance.
 public struct ProcessedRAWMosaic: Sendable {
     /// The decoder output this was processed from, unchanged.
     public let source: DecodedRAWMosaic
     /// The black-subtracted, normalised Float32 mosaic.
     public let mosaic: LinearRAWMosaic
 
-    public init(source: DecodedRAWMosaic, mosaic: LinearRAWMosaic) {
+    /// Module-internal, deliberately: only `RAWMosaicNormalizer` pairs a
+    /// decoder output with the mosaic it normalised from it. See the type's
+    /// note above on why that pairing is not forgeable from outside.
+    init(source: DecodedRAWMosaic, mosaic: LinearRAWMosaic) {
         self.source = source
         self.mosaic = mosaic
     }
