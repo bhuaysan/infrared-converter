@@ -4,14 +4,16 @@ import Foundation
 /// Per-channel statistics over an interleaved `R G B` Float32 buffer,
 /// computed over the whole buffer rather than sampled.
 ///
-/// Serves both RGB-domain representations: `DemosaicedRAWRGBImage`, whose
-/// values are linear camera-native sensor responses, and
-/// `WorkingColorRGBImage`, whose values are extended-linear-sRGB coordinates.
-/// They share a storage layout and nothing else, so which one a table
-/// describes has to be said by the caller.
+/// Serves all three RGB-domain representations: `DemosaicedRAWRGBImage`, whose
+/// values are linear camera-native sensor responses; `WorkingColorRGBImage`,
+/// whose values are extended-linear-sRGB coordinates; and
+/// `IRChannelMixedRGBImage`, whose values are those same coordinates after a
+/// creative channel mix. They share a storage layout and nothing else, so
+/// which one a table describes has to be said by the caller.
 ///
 /// Diagnostic only. Nothing here says anything about whether an image is
-/// *colour-correct*. For the camera-native image there is no colour to be
+/// *colour-correct*; for the channel-mixed image there is nothing to be
+/// correct about, since a creative mix is intent rather than measurement. For the camera-native image there is no colour to be
 /// correct about yet; for the working-colour image the coordinates are defined
 /// but their meaning depends entirely on the transform's provenance, and no
 /// transform in this project is a validated infrared calibration.
@@ -33,6 +35,10 @@ struct RGBImageStatistics {
     }
 
     init(image: WorkingColorRGBImage) {
+        self.init(values: image.values)
+    }
+
+    init(image: IRChannelMixedRGBImage) {
         self.init(values: image.values)
     }
 
