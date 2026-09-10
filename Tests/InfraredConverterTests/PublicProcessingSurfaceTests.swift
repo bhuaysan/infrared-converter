@@ -9,10 +9,11 @@ import InfraredConverter
 ///
 /// ## Why this file imports without `@testable`
 ///
-/// The three processed-state wrappers now have module-internal initialisers,
-/// so outside the module a `ProcessedRAWMosaic`, a
-/// `WhiteBalancedProcessedRAWMosaic` or a `DemosaicedProcessedRAWImage` can
-/// only be obtained from the stage that produced it. Swift has no way to
+/// Every processed-state wrapper has a module-internal initialiser, so outside
+/// the module a `ProcessedRAWMosaic`, a `WhiteBalancedProcessedRAWMosaic`, a
+/// `DemosaicedProcessedRAWImage`, a `WorkingColorProcessedRAWImage` or an
+/// `IRChannelMixedProcessedRAWImage` can only be obtained from the stage that
+/// produced it. Swift has no way to
 /// assert that a given line *fails* to compile, so absence cannot be tested
 /// directly. What can be pinned, and is pinned here, is the consequence that
 /// matters: with only the public surface available, the whole chain is still
@@ -124,10 +125,39 @@ struct PublicProcessingSurfaceTests {
         _ = demosaiced.metadata
         #expect(demosaiced.url == decoded.url)
 
+        let working: WorkingColorProcessedRAWImage = try RAWWorkingColorConverter()
+            .convert(demosaiced, using: .sensorRGBIdentityFalseColor)
+        _ = working.source
+        _ = working.image
+        _ = working.demosaicedImage
+        _ = working.whiteBalancedMosaic
+        _ = working.linearMosaic
+        _ = working.processing
+        _ = working.transform
+        _ = working.metadata
+        #expect(working.url == decoded.url)
+
+        let mixed: IRChannelMixedProcessedRAWImage = try IRChannelMixer()
+            .apply(to: working, mix: .redBlueSwap)
+        _ = mixed.source
+        _ = mixed.image
+        _ = mixed.workingColorImage
+        _ = mixed.demosaicedImage
+        _ = mixed.whiteBalancedMosaic
+        _ = mixed.linearMosaic
+        _ = mixed.processing
+        _ = mixed.mix
+        _ = mixed.cameraToWorkingTransform
+        _ = mixed.metadata
+        #expect(mixed.url == decoded.url)
+
         // The whole chain is readable from the last wrapper alone.
-        #expect(demosaiced.source.source.source.mosaic == decoded.mosaic)
+        #expect(mixed.source.source.source.source.source.mosaic == decoded.mosaic)
+        #expect(mixed.image.isGeometryConsistent)
+        #expect(mixed.processing.whiteBalanceApplied)
+        #expect(mixed.processing.channelMixApplied)
+        #expect(mixed.processing.mixSource == .redBlueSwap)
         #expect(demosaiced.image.isGeometryConsistent)
-        #expect(demosaiced.processing.whiteBalanceApplied)
     }
 
     @Test("The bare value types remain publicly constructible")

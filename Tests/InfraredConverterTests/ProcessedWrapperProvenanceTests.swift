@@ -2,8 +2,9 @@ import Testing
 import Foundation
 @testable import InfraredConverter
 
-/// The three processed-state wrappers — `ProcessedRAWMosaic`,
-/// `WhiteBalancedProcessedRAWMosaic` and `DemosaicedProcessedRAWImage` — are
+/// The processed-state wrappers — `ProcessedRAWMosaic`,
+/// `WhiteBalancedProcessedRAWMosaic`, `DemosaicedProcessedRAWImage`,
+/// `WorkingColorProcessedRAWImage` and `IRChannelMixedProcessedRAWImage` — are
 /// pairings a stage minted, not pairings a caller assembled.
 ///
 /// Their initialisers are module-internal, so outside the module a source
@@ -16,7 +17,7 @@ import Foundation
 ///
 /// `PublicProcessingSurfaceTests` is the compile-time companion: it imports
 /// the module *without* `@testable` and therefore only ever sees the public
-/// surface, and it obtains and fully reads all three wrappers there without an
+/// surface, and it obtains and fully reads every wrapper there without an
 /// initialiser being available to it.
 ///
 /// Synthetic input throughout — no fixture, so this runs everywhere.
@@ -84,11 +85,27 @@ struct ProcessedWrapperProvenanceTests {
         #expect(demosaiced.metadata == decoded.metadata)
         #expect(demosaiced.url == decoded.url)
 
-        // The provenance record reaches back through all three stages.
-        let processing = demosaiced.processing
-        #expect(processing.algorithm == .bilinearBayer)
+        // Stage 4 mints WorkingColorProcessedRAWImage over that image.
+        let working = try RAWWorkingColorConverter()
+            .convert(demosaiced, using: .sensorRGBIdentityFalseColor)
+        #expect(working.demosaicedImage == demosaiced.image)
+        #expect(working.source.source.source.source.mosaic == decoded.mosaic)
+
+        // Stage 5 mints IRChannelMixedProcessedRAWImage over that.
+        let mixed = try IRChannelMixer().apply(to: working, mix: .redBlueSwap)
+        #expect(mixed.workingColorImage == working.image)
+        #expect(mixed.demosaicedImage == demosaiced.image)
+        #expect(mixed.source.source.source.source.source.mosaic == decoded.mosaic)
+        #expect(mixed.url == decoded.url)
+
+        // The provenance record reaches back through all five stages.
+        let processing = mixed.processing
+        #expect(processing.mixSource == .redBlueSwap)
+        #expect(processing.cameraToWorkingTransformSource == .sensorRGBIdentityFalseColor)
+        #expect(processing.demosaicAlgorithm == .bilinearBayer)
         #expect(processing.whiteBalanceGains == gains)
-        #expect(processing.whiteBalanceProcessing.linearProcessing.whiteLevel == 4095)
+        #expect(processing.workingColorProcessing.demosaicProcessing
+            .whiteBalanceProcessing.linearProcessing.whiteLevel == 4095)
     }
 
     @Test("A wrapper forwards its own image's provenance, never a second copy")
