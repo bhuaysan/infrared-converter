@@ -108,6 +108,45 @@ public enum RAWProcessingError: Error, Equatable {
     /// may legitimately produce a very large gain, as long as it stays
     /// finite.
     case nonFiniteEstimatedGain(colorPlane: Int, targetMean: Double, planeMean: Double)
+    /// The selected demosaicing algorithm cannot run on this sensor colour
+    /// layout.
+    ///
+    /// `algorithm` is carried so the failure says *which* algorithm refused
+    /// the layout. That distinction matters most for X-Trans: the layout is
+    /// recognised and fully described, and it is the Bayer-only algorithm
+    /// that cannot interpolate it — not the project that fails to understand
+    /// the sensor. Reported rather than worked around: there is no silent
+    /// fallback to another algorithm, no treating X-Trans as Bayer, no
+    /// demosaicing a top-left 2×2 subset, and no routing back through LibRaw.
+    ///
+    /// Also raised for a CFA whose packed cell does not repeat every two
+    /// rows, for a colour plane that `colorDescription` cannot name, for a
+    /// filter colour that is not R, G or B, and for a 2×2 cell that is not
+    /// one red, one blue and two greens.
+    case unsupportedSensorLayoutForDemosaicing(
+        pattern: RAWMetadata.SensorColorLayout.Pattern,
+        algorithm: RAWDemosaicAlgorithm,
+        reason: String
+    )
+    /// A pixel needs a channel reconstructed and has no in-bounds neighbour
+    /// of that colour to reconstruct it from.
+    ///
+    /// Reachable only for pathologically small geometry — a 1×1 mosaic, or a
+    /// single row or column — since any 2×2 Bayer cell supplies every colour
+    /// to every pixel in it. Reported rather than filled with zero: an
+    /// invented value is indistinguishable from a measured one once it is in
+    /// the buffer.
+    case missingDemosaicNeighbors(row: Int, column: Int, channel: RAWLinearRGBChannel)
+    /// An interpolated channel came out NaN or infinite despite finite
+    /// contributors. Reported rather than clamped, for the same reason
+    /// `nonFiniteWhiteBalanceResult` is: an image carrying a silently
+    /// invented value is worse than a failed stage.
+    ///
+    /// Unreachable for the documented arithmetic — at most four finite
+    /// `Float32` values are summed in `Double` and divided by their count,
+    /// which cannot overflow `Float32` — and checked anyway, because the
+    /// alternative to checking is trusting.
+    case nonFiniteDemosaicResult(row: Int, column: Int, channel: RAWLinearRGBChannel)
 }
 
 extension RAWProcessingError: LocalizedError {
@@ -139,6 +178,12 @@ extension RAWProcessingError: LocalizedError {
             return "The selected region is not bright enough in every colour to balance from."
         case .nonFiniteEstimatedGain:
             return "The selected region needs a white-balance gain too large to represent."
+        case .unsupportedSensorLayoutForDemosaicing:
+            return "This sensor's colour layout cannot be demosaiced by the selected algorithm."
+        case .missingDemosaicNeighbors:
+            return "The image is too small for every pixel to receive all three colours."
+        case .nonFiniteDemosaicResult:
+            return "Demosaicing produced a value that is not a finite number."
         }
     }
 
@@ -192,6 +237,18 @@ extension RAWProcessingError: LocalizedError {
             return """
                 Target mean \(target) divided by colour plane \(plane)'s mean \(mean) is not \
                 a finite positive Float32.
+                """
+        case .unsupportedSensorLayoutForDemosaicing(let pattern, let algorithm, let reason):
+            return "Sensor layout \(pattern), algorithm \(algorithm): \(reason)"
+        case .missingDemosaicNeighbors(let row, let column, let channel):
+            return """
+                The pixel at row \(row), column \(column) has no in-bounds neighbouring \
+                sample of colour \(channel) to interpolate its \(channel) channel from.
+                """
+        case .nonFiniteDemosaicResult(let row, let column, let channel):
+            return """
+                The interpolated \(channel) channel at row \(row), column \(column) is not \
+                finite.
                 """
         }
     }
