@@ -3,7 +3,7 @@
 This document defines what a sample *is* at each stage of the RAW path, and
 which stages have and have not run.
 
-It now covers three domains.
+It now covers four domains.
 
 ```text
 MOSAIC DOMAIN               one value per CFA location; colour only via the layout
@@ -15,6 +15,10 @@ CAMERA-NATIVE RGB DOMAIN    three Float32 per pixel; linear; NOT a colour space
 
 WORKING-COLOUR RGB DOMAIN   three Float32 per pixel; linear; extended linear sRGB
     WorkingColorRGBImage
+    IRChannelMixedRGBImage
+
+DISPLAY-REFERRED DOMAIN     three UInt8 per pixel; sRGB-encoded; clipped
+    DisplayEncodedPreviewImage
 ```
 
 The **mosaic domain** runs from LibRaw's unpacked samples to a white-balanced
@@ -22,9 +26,11 @@ CFA mosaic. The **camera-native RGB domain** begins at demosaicing: three
 values per pixel, still linear, still the sensor's own filter responses, and
 still not in any colour space. The **working-colour RGB domain** begins at an
 explicit camera-to-working transform: the same layout, the same linearity, but
-the values are now coordinates in a defined space.
+the values are now coordinates in a defined space. The **display-referred
+domain** begins at the display renderer, and is the first place in the whole
+project where a number is no longer proportional to light.
 
-Those last two are the pair most easily confused, so they are named apart
+The middle two are the pair most easily confused, so they are named apart
 everywhere:
 
 ```text
@@ -32,11 +38,22 @@ linear camera-native RGB      what THIS SENSOR's filters responded with
 extended linear sRGB working  coordinates in sRGB primaries at D65, linear
 ```
 
+The last one is a different kind of thing again, and the distinction it turns
+on is the one a display stage exists to make:
+
+```text
+extended linear sRGB    scene-linear, unclamped Float32, light-proportional
+display-encoded sRGB    display-referred UInt8, clipped, transfer function applied
+```
+
 Demosaicing is decided — one application-owned reference algorithm, see
-`docs/decisions/0005-application-owned-bayer-demosaicing.md` — and so is the
-working colour space, see `docs/decisions/0006-working-color-space.md`. What
-comes after them is not: the infrared creative channel transform, exposure,
-tone mapping and display encoding all remain undecided.
+`docs/decisions/0005-application-owned-bayer-demosaicing.md` — so is the
+working colour space, see `docs/decisions/0006-working-color-space.md`, so is
+creative channel mixing, see
+`docs/decisions/0007-infrared-channel-mixing.md`, and so now is the first
+display boundary, see `docs/decisions/0008-display-preview-rendering.md`. What
+is still undecided is a real tone pipeline: the display stage clips and
+encodes, and nothing more.
 
 `CLAUDE.md` holds the project invariants; this file records the concrete
 implementation as it currently stands.
@@ -128,14 +145,37 @@ the SAME extended linear sRGB; unclamped Float32; linear
 a different PROCESSING STATE, not a different space
 
                   ↓
-       [FUTURE: exposure / tone]
+       explicit DisplayRenderSettings              ┐
+                  ↓                                │
+       exposure, in the linear domain              │
+                  ↓                                ├ DisplayPreviewRenderer
+       hard display-range clipping to 0...1        │
+                  ↓                                │
+       sRGB transfer function                      │
+                  ↓                                │
+       deterministic quantisation to 8 bits        ┘
                   ↓
-       [FUTURE: display encoding / preview]
+       DisplayEncodedPreviewImage
+
+═══════════ DISPLAY-REFERRED DOMAIN ════════════════════
+sRGB-encoded UInt8; clipped; NOT scene-linear
+
+                  ↓
+       DisplayPreviewCGImageAdapter (tagged sRGB)
+                  ↓
+       CoreGraphics / SwiftUI
+
+                  ↓
+       [FUTURE: tone mapping / contrast / curves]
                   ↓
        [FUTURE: export]
 ```
 
-Four semantic states, in two colour situations:
+The scene-linear representations are **not consumed** by the display stage,
+only read. After a render, every one of them is bit-identical to what it was,
+including every value below `0` and above `1` that the preview clipped away.
+
+Five semantic states, in three colour situations:
 
 ```text
 MOSAIC                     LinearRAWMosaic
@@ -150,6 +190,9 @@ WORKING RGB                WorkingColorRGBImage
 
 CREATIVE IR WORKING RGB    IRChannelMixedRGBImage
                            extended linear sRGB, after creative mixing
+
+DISPLAY-ENCODED RGB        DisplayEncodedPreviewImage
+                           sRGB-encoded UInt8; display-referred; clipped
 ```
 
 The last two are in the **same colour space**. What separates them is
@@ -172,7 +215,7 @@ pre-white-balance `LinearRAWMosaic`, produces a `RAWWhiteBalanceGains`, and
 that value is what `RAWWhiteBalancer` then applies to the same mosaic. The two
 halves meet at the gains, not at the image.
 
-All six stages are application-owned and none imports `CLibRaw`.
+All seven stages are application-owned and none imports `CLibRaw`.
 
 `RAWMosaicNormalizer` takes a `DecodedRAWMosaic` (or a bare `RAWMosaic` plus
 level metadata) and returns a `ProcessedRAWMosaic`, which keeps the original
@@ -203,6 +246,13 @@ receives no `RAWMetadata` and there is no default transform.
 `IRChannelMixedProcessedRAWImage`, which keeps the pre-mix working image
 reachable on `.source` so the mix can be changed without converting again. It
 receives no `RAWMetadata` either, and there is no default mix.
+
+`DisplayPreviewRenderer` takes an `IRChannelMixedProcessedRAWImage` (or a bare
+`IRChannelMixedRGBImage`) **and explicit settings** and returns a
+`DisplayPreviewProcessedRAWImage`, which keeps the scene-linear image reachable
+on `.source` so exposure can be changed without mixing again. It receives no
+`RAWMetadata` — not even the orientation, which it deliberately does not apply
+— and there is no default exposure.
 
 **Automatic estimation does not exist yet.** The caller still chooses which
 samples to measure; nothing decides that on its own, and no filter profile or
@@ -750,6 +800,140 @@ crop, no resize, no orientation, no resampling.
 with `M2` gives `M2 × workingRGB`, not `M2 × (M1 × workingRGB)`. Two red/blue
 swaps in a row would otherwise cancel.
 
+### Creative infrared RGB → display-encoded preview
+
+`DisplayPreviewRenderer` is the first stage whose output is **not**
+proportional to light. It takes a channel-mixed image and **one explicit
+`DisplayRenderSettings`**, and returns bytes a monitor can be handed correctly.
+
+See `docs/decisions/0008-display-preview-rendering.md`.
+
+#### What it is, and what it is not
+
+```text
+does:       exposure in the linear domain
+            hard display-range clipping to 0...1
+            the piecewise sRGB transfer function
+            deterministic quantisation to 8 bits
+
+does not:   tone mapping of any kind
+            highlight reconstruction
+            automatic exposure or any histogram
+            contrast, saturation, curves, LUTs
+            gamut mapping beyond the component-wise clip
+            orientation, crop or resampling
+```
+
+It is a defined clip and encode. Calling it a tone pipeline would misdescribe
+it.
+
+#### The settings
+
+`DisplayRenderSettings` carries exactly three choices, all `let`:
+
+| Property | Today's values |
+| --- | --- |
+| `exposureEV` | any finite `Double`; `2^EV` must be finite too |
+| `rangePolicy` | `.hardClipToDisplayRange` |
+| `encoding` | `.sRGB` |
+
+There is **no default** on any entry point. `0 EV` is written at the call site,
+which is where a reader can audit it.
+
+#### The arithmetic, per component
+
+```text
+1. exposure     exposed = Float(Double(sceneLinear) × exp2(EV))
+2. clipping     clipped = exposed < 0 ? 0 : (exposed > 1 ? 1 : exposed)
+3. encoding     encoded = clipped <= 0.0031308
+                            ? 12.92 × clipped
+                            : 1.055 × clipped^(1/2.4) − 0.055
+4. quantisation sample  = round(encoded × 255)      half away from zero
+```
+
+The scale is computed once per image; the multiply widens to `Double` and
+narrows to `Float32` exactly once, the convention the two stages above already
+use. The encoding is evaluated in `Double`.
+
+`pow(x, 1/2.2)` is **not** an acceptable substitute for step 3. It is a
+different curve, it differs most in the shadows, and it would make the bytes
+disagree with the sRGB profile they are then tagged with. The comparison in
+step 3 is `<=`, so the threshold itself takes the linear branch; the two
+branches differ by about `3e-8` there, and picking one by fiat is the only way
+to make the boundary deterministic.
+
+#### Clipping is destruction, and it is counted
+
+Detail above `1` and below `0` is destroyed, not recovered, compressed or
+rolled off. The stage therefore counts what it destroyed:
+`clippedLowSampleCount` and `clippedHighSampleCount` are components, not
+pixels, and are part of the provenance record.
+
+Clipping the unit cube component-wise is also this path's **entire gamut
+handling**: a coordinate outside the cube may be out of gamut, and clipping
+each component independently moves it to a different colour rather than to the
+nearest in-gamut one.
+
+None of this touches the input. `IRChannelMixedRGBImage` is bit-identical after
+a render, and every clipped value is still in it.
+
+#### Exact failures rather than plausible numbers
+
+```text
+non-finite EV, or a finite EV whose 2^EV is not finite  → nonFiniteExposure
+a NaN or infinite input coordinate                      → nonFiniteSceneLinearInput
+exposure overflowing Float32                            → nonFiniteExposedValue
+geometry that does not add up, on either side           → invalidGeometry
+CoreGraphics declining to build an image                → displayImageUnavailable
+```
+
+Both the EV and its scale are checked: `exp2(−infinity)` is `0`, a
+finite-looking multiplier that would render a black frame in silence.
+
+An overflowing exposure is refused rather than left to the clip, because a
+sample that reached infinity would clip to `1` and arrive on screen as an
+ordinary white pixel that nothing downstream could distinguish from a
+legitimately bright one.
+
+#### Output
+
+| | |
+| --- | --- |
+| Bits per component | 8 |
+| Components | 3, interleaved `R G B` |
+| Alpha | none — there is no alpha channel |
+| Bytes per pixel | 3 |
+| Bytes per row | `width × 3`, tightly packed |
+| Byte order | not applicable: one byte per component |
+| Endpoints | `0 → 0`, `1 → 255`, exactly |
+
+`0 → 0` is arithmetic. `1 → 255` is arithmetic *plus rounding*: the `Double`
+encoding of `1` is one ULP below `1`, so the product is `254.999999999999971…`
+and rounding to nearest is what recovers `255`.
+
+There is no alpha channel rather than an ignored one: the image is opaque by
+construction, and `CGImage` accepts 24-bit-per-pixel RGB with
+`kCGImageAlphaNone` directly.
+
+#### The platform image
+
+`DisplayPreviewCGImageAdapter` describes those bytes to CoreGraphics and tags
+them `CGColorSpace.sRGB` — the ordinary, non-linear one, because that is what
+they now are. It converts nothing and copies nothing.
+
+The legacy `PreviewImageRenderer` tags LibRaw's **linear** 16-bit samples
+`linearSRGB`, which is right for those bytes and wrong for these. Two paths,
+two colour spaces, two types, and no way to confuse them in a signature.
+
+#### Reprocessing
+
+`DisplayPreviewProcessedRAWImage` retains the scene-linear state, and
+`render(settings:replacing:)` reaches through it. Settings never compound:
+changing exposure re-renders from the `IRChannelMixedRGBImage`, never from the
+8-bit preview. Rendering an encoded buffer again would apply the transfer
+function twice, compound quantisation, recover no clipped highlight — and look
+entirely plausible.
+
 ### What the linear stage does not do
 
 | Stage | Applied? |
@@ -865,6 +1049,35 @@ no record of this history can disagree with another.
 A creative mix never makes anything a calibration:
 `isValidatedInfraredCalibration` is still `false`, and still forwarded from the
 upstream transform rather than restated here.
+
+### What the display stage does not do
+
+| Stage | Applied? |
+| --- | --- |
+| Exposure, in the linear domain | **yes** |
+| Hard display-range clipping to `0...1` | **yes** |
+| sRGB transfer function | **yes** |
+| Quantisation to 8 bits | **yes** |
+| Tone mapping of any kind | no |
+| Automatic exposure / histogram / auto-levels | no |
+| Highlight reconstruction | no |
+| Contrast, saturation, vibrance, HSL, curves, LUTs | no |
+| Gamut mapping beyond the component-wise clip | no |
+| Channel mixing | no — upstream, and not reapplied |
+| Camera → working transform | no — upstream, and not reapplied |
+| White balance | no — upstream, in the mosaic domain |
+| Camera colour metadata of any kind | no — none reaches this stage |
+| Sharpening / noise reduction | no |
+| Orientation / crop / resampling | no |
+| Mutation of the scene-linear input | no |
+
+Each is recorded on `DisplayPreviewProcessing`, alongside the settings and the
+two clip counts. The mix, the camera transform, the demosaic algorithm and the
+gains are read through the `IRChannelMixProcessing` it carries rather than
+copied — so no record of this history can disagree with another.
+
+`isValidatedInfraredCalibration` is still `false`. Making an image displayable
+never makes it correct.
 
 ### The two metadata snapshots
 
@@ -1375,6 +1588,53 @@ with six additions per pixel. Inside the fully parallel test run they are
 roughly twice that, which is contention rather than cost. No optimised-build
 measurement has been taken and no performance claim is made.
 
+### After display preview rendering
+
+Same chain again — identity false-colour transform, identity channel mix — then
+`DisplayPreviewRenderer` at `0 EV`, hard display-range clipping and sRGB
+encoding.
+
+| | |
+| --- | --- |
+| Preview geometry | 4056 × 3040, unchanged (no orientation applied) |
+| Buffer | 36 990 720 bytes |
+| Bytes per row | 12 168 |
+| Layout | 8 bits per component, three components `R G B`, no alpha |
+| Exposure | `0 EV` (×1) |
+| Range policy | hard display-range clipping to `0...1` |
+| Encoding | standard sRGB, tagged `CGColorSpace.sRGB` on the `CGImage` |
+| Non-finite intermediates | 0 |
+
+The clip counts, at `0 EV`, against the scene-linear input's own out-of-range
+counts:
+
+| | Source values | Clipped by the display stage |
+| --- | --- | --- |
+| Below `0` | 11 | 11 |
+| Above `1` | 0 | 0 |
+
+They match exactly, and must: at `0 EV` nothing can move a value across a
+boundary, so any difference would mean the stage clipped something it was not
+asked to. The 11 sub-black values are the same 11 the normalisation and
+white-balance tables track — they are still in the scene-linear buffer
+afterwards, unchanged.
+
+At `+1 EV` on the same frame: 39 components clip high, and the low count stays
+at 11, because a positive exposure cannot push a value below zero.
+
+Sample distribution at `0 EV`: 17 bytes are `0`, none is `255`. The frame is
+not near the top of the display range at neutral exposure — which is a fact
+about this photograph and this white balance, not a property of the stage.
+
+Eight fixed pixel coordinates, spread over the frame and both parities of both
+axes, are additionally checked against arithmetic written out step by step in
+the test — linear, exposed, clipped, encoded, quantised — at `0 EV` and again
+at `+1 EV`.
+
+LibRaw's processed RGB is **not** consulted anywhere in this. The fixture
+proves this pipeline is internally consistent on real data; it does not, and
+could not, prove that the rendering is colourimetrically right.
+
 ## Decoder warnings by stage
 
 LibRaw accumulates `process_warnings` with `|=` and never clears it outside
@@ -1396,12 +1656,15 @@ can.
 
 ## Not yet decided
 
-Demosaicing, the working colour space and creative channel mixing are no longer
-on this list. One application-owned reference demosaic algorithm is decided and
-implemented, the working representation is extended linear sRGB (ADR 0006)
-reached through an explicit provenance-carrying transform, and a linear 3×3
-creative channel mix sits after that boundary (ADR 0007). What remains open is
-everything downstream, plus image quality:
+Demosaicing, the working colour space, creative channel mixing and the first
+display boundary are no longer on this list. One application-owned reference
+demosaic algorithm is decided and implemented, the working representation is
+extended linear sRGB (ADR 0006) reached through an explicit
+provenance-carrying transform, a linear 3×3 creative channel mix sits after
+that boundary (ADR 0007), and its result now reaches a monitor through an
+explicit exposure, a named clip, the sRGB transfer function and 8-bit
+quantisation (ADR 0008). What remains open is everything downstream of *that*,
+plus image quality:
 
 - **The rest of the infrared creative colour transform** — false-colour
   mapping, hue remapping, LUT-based finishing. Channel mixing is decided; these
@@ -1412,7 +1675,20 @@ everything downstream, plus image quality:
 - Whether a **visible-light matrix is ever appropriate for infrared capture**.
   The adapter exists as an opt-in diagnostic; that is not an endorsement, and
   no IR calibration methodology has been decided.
-- **Tone mapping, exposure and display encoding.**
+- **A real tone pipeline.** ADR 0008 decided a clip and an encode, and
+  explicitly not Reinhard, filmic curves, shoulder/toe curves, local operators,
+  highlight reconstruction or automatic exposure. Those remain open, and the
+  fixture's clip counts are the argument for taking them on.
+- **Real gamut mapping.** Component-wise clipping to the unit cube is the
+  primitive stand-in.
+- **Orientation.** The pipeline still has no application-owned orientation
+  stage, so a file that asks for a flip displays unrotated. Deliberate: a
+  geometry operation hidden inside a colour stage would be invisible in the
+  one record meant to describe the pipeline.
+- **Preview resolution strategy, caching and cancellation.** The workspace
+  renders the full frame every time it opens a file.
+- **Export**, which needs its own bit depth, its own colour decisions and its
+  own ADR, and must not reuse the 8-bit preview buffer.
 - The **final production-quality Bayer algorithm**. `.bilinearBayer` is a
   correctness reference, not an image-quality answer.
 - An **X-Trans algorithm**. The layout is recognised and explicitly refused

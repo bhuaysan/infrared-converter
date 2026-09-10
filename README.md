@@ -36,9 +36,9 @@ committed, so the fixture-backed suites skip themselves there.
 
 ## Current status
 
-Implemented: the RAW decoding boundary, and an application-owned processing
-pipeline that runs from LibRaw's unpacked sensor mosaic through a defined
-working-colour representation to the first creative infrared stage.
+The workspace now shows the application-owned pipeline's own pixels. Opening a
+RAW file runs the whole chain from LibRaw's unpacked sensor mosaic to
+display-encoded bytes, and nothing LibRaw processed reaches the screen.
 
 ```text
 LibRaw unpack                    RAWMosaic (UInt16, active area)
@@ -52,13 +52,21 @@ bilinear Bayer demosaic          DemosaicedRAWRGBImage (camera-native RGB)
 explicit camera → working 3×3    WorkingColorRGBImage (extended linear sRGB)
    ↓                             IRChannelMixer
 IR channel mixing                IRChannelMixedRGBImage (same space, remixed)
+   ↓                             DisplayPreviewRenderer
+exposure, clip, sRGB, 8 bit      DisplayEncodedPreviewImage (display referred)
+   ↓                             DisplayPreviewCGImageAdapter
+tagged sRGB                      CGImage → SwiftUI
 ```
 
+Everything above the last two rows is **scene-linear**, and stays that way: the
+display stage reads it and never touches it. After a preview is rendered the
+`IRChannelMixedRGBImage` is bit-identical, every value below `0` and above `1`
+still in it.
+
 Every stage is application-owned, non-destructive and provenance-carrying:
-each result keeps the state it was produced from, so gains, algorithm or
-transform can be changed without decoding again, and each records what it did
-and explicitly did not do. Nothing is clamped; values below `0` and above `1`
-survive to the end of the chain.
+each result keeps the state it was produced from, so gains, algorithm,
+transform, mix or exposure can be changed without decoding again, and each
+records what it did and explicitly did not do.
 
 - **White balance** is per CFA plane in the mosaic domain, with no Kelvin
   limits. Gains are supplied explicitly or estimated from a caller-selected
@@ -73,12 +81,28 @@ survive to the end of the chain.
   3×3 remix inside the working colour space, with identity, red/blue swap and
   explicit-matrix mixes. It changes no colour space and is recorded as creative
   intent, never as a calibration.
+- **Display rendering** is exposure in the linear domain, hard display-range
+  clipping to `0...1`, the piecewise sRGB transfer function and 8-bit
+  quantisation — in that order, with the settings named at the call site and
+  the number of clipped samples recorded. It is deliberately **not** a tone
+  pipeline.
 
-Not implemented yet: exposure, tone, gamma and display encoding; a
-**preview or export UI** for the owned pipeline; profiles, recipes and presets
-beyond the two built-in mixes; Metal rendering. The workspace's on-screen
-image is still the legacy LibRaw processed-RGB path, kept as a diagnostic
-reference.
+What the app-owned pipeline puts on screen, for a freshly opened file: a
+centred neutral-patch white balance, bilinear demosaicing, the identity
+false-colour camera transform, an identity channel mix, `0 EV`, hard clipping
+and sRGB. Those choices are made in the application layer, visibly, because no
+processing API has a default to make them.
+
+Still legacy diagnostic behaviour: the LibRaw processed-RGB decode. It is no
+longer the workspace image. It supplies the inspector's decoder facts and a
+small labelled reference thumbnail, and is kept because comparing the two paths
+is useful while the owned one is young.
+
+Still absent: any tone control — contrast, curves, highlight recovery,
+saturation; orientation, so a file that asks for a flip displays unrotated;
+filter and capture profiles, recipes and presets beyond the two built-in mixes;
+export of any kind; a reduced-resolution or cached preview path, so the
+workspace renders the full frame each time; Metal.
 
 There are two decode paths, and they are not interchangeable:
 
@@ -86,10 +110,10 @@ There are two decode paths, and they are not interchangeable:
   RAWMosaic`. `dcraw_process` is never called. One LibRaw-unpacked sample per
   sensor mosaic location, active area only. This is the foundation for the
   application-owned pipeline above.
-- **`decode(at:options:)`** — the existing processed-RGB path, kept as the
-  workspace preview and as a diagnostic reference. LibRaw does the demosaicing
-  and the black/white handling here, which is exactly why it is not the
-  foundation.
+- **`decode(at:options:)`** — the existing processed-RGB path, kept as a
+  diagnostic reference only. LibRaw does the demosaicing and the black/white
+  handling here, which is exactly why it is not the foundation, and why it is
+  no longer what the workspace displays.
 
 The RAW-stage contract — what a sample is at each stage, what has and has not
 been applied, the geometry and coordinate rules, and the reference numbers for
@@ -101,7 +125,7 @@ decisions behind it are recorded as ADRs in
 
 | Format | Camera | Status |
 | --- | --- | --- |
-| ORF | Olympus PEN E-PL3 | verified end to end (metadata, 16-bit decode, half-size decode, preview) |
+| ORF | Olympus PEN E-PL3 | verified end to end (metadata, mosaic decode, the whole owned pipeline, display preview) |
 
 Reference values for the E-PL3 fixture under LibRaw 0.22.2, unchanged from
 0.21.4 — a future decoder upgrade that moves any of them is a finding to
@@ -118,6 +142,16 @@ investigate, not a test to adjust:
 | Maximum / linear maximum | 4095 / `[3680, 3680, 3680, 3680]` |
 | Camera WB | `[0.640625, 1.0, 5.5625, 0.0]` |
 | Daylight pre-multipliers | `[2.2629104, 0.9284695, 1.2071348, 0.0]` |
+
+Through the whole owned pipeline — centred neutral patch, bilinear demosaic,
+identity false-colour transform, identity mix, `0 EV`:
+
+| | |
+| --- | --- |
+| Preview geometry | 4056 × 3040, unchanged (no orientation applied) |
+| Preview buffer | 36 990 720 bytes, 12 168 per row, 8-bit `R G B`, no alpha |
+| Samples clipped low / high | 11 / 0 |
+| Non-finite intermediates | 0 |
 
 Other formats LibRaw supports (ARW, NEF/NRW, CR2/CR3, RAF, RW2, …) should decode
 through the same path, but none has been verified. Nothing in the decoder is
@@ -334,9 +368,20 @@ See [RAW/README.md](RAW/README.md).
 
 - `bilinearBayer` is a correctness reference, not a production demosaicer, and
   no X-Trans algorithm exists.
-- Nothing downstream of the channel-mix stage exists: no exposure, tone,
-  gamma, display encoding or export, so neither a `WorkingColorRGBImage` nor an
-  `IRChannelMixedRGBImage` can yet be shown or written to a file.
+- The display stage clips and encodes; it does not tone map. Detail above `1`
+  and below `0` is destroyed, and the provenance record says how many samples
+  that was. There is no highlight recovery, no curve and no automatic
+  exposure.
+- **Orientation is not applied anywhere.** A file that records a flip displays
+  unrotated, and the E-PL3 fixture is one. Deliberate: the pipeline has no
+  application-owned orientation stage, and hiding a geometry operation inside
+  the display encoder would keep it out of the one record meant to describe
+  the pipeline.
+- Export does not exist. The 8-bit preview buffer is a preview and must not be
+  written to a file as though it were one.
+- Exposure is not adjustable from the UI. The renderer takes any EV; the
+  workspace passes `0` and offers no control, so the retained scene-linear
+  chain that would let it re-render is deliberately not held in memory yet.
 - No transform in the project is a validated infrared colour calibration. The
   file's own `rgbFromCamera` is visible-light data and is opt-in and
   diagnostic only.
@@ -349,13 +394,19 @@ See [RAW/README.md](RAW/README.md).
   warning-bit lifecycle is tested structurally rather than against an observed
   non-zero bitfield.
 - Only Olympus ORF has been verified against a real file.
-- The preview is display-only: the camera-native linear samples are interpreted
-  as linear sRGB with no white balance, so a visible-light frame shows the
-  sensor's native channel imbalance. That is expected.
-- The workspace decodes at half resolution for the preview through the legacy
-  LibRaw path; the owned pipeline has no preview or cache yet.
-- Infrared white balance and channel mixing exist; no false-colour mapping,
-  hue remapping, filter profiles or recipes, no develop controls, no export.
+- The legacy LibRaw preview interprets camera-native linear samples as linear
+  sRGB with no white balance, so a visible-light frame shows the sensor's
+  native channel imbalance. That is expected, and it is a reference thumbnail
+  rather than the workspace image.
+- The owned preview renders the full frame on the CPU on every open, with no
+  cache and no reduced-resolution path. Preview strategy is a later decision.
+- Infrared white balance, channel mixing and a display boundary exist; no
+  false-colour mapping, hue remapping, filter profiles or recipes, no develop
+  controls, no export.
+- The workspace's white-balance patch is a centred rectangle, not a scene
+  analysis. Nothing verifies that what is in the middle of the frame is
+  neutral, and there is no picker yet.
+- The preview is 8 bit with no dithering, so a smooth gradient can band.
 - LibRaw's optional back-ends are not enabled: no libjpeg (lossy DNG, JPEG
   thumbnails), no zlib (deflate-compressed DNG), no LittleCMS, no DNG SDK, no
   RawSpeed, no OpenMP.

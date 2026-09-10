@@ -342,6 +342,8 @@ Individual stages must remain independently testable and movable where technical
 
 The working representation is established **before** the infrared channel/color transform, not after it. That ordering was originally hypothesised the other way round; implementation showed that a creative channel mix is only meaningful once the RGB axes it remixes are defined, so the stage operates inside the working representation and leaves it unchanged. See `docs/decisions/0006-working-color-space.md` and `docs/decisions/0007-infrared-channel-mixing.md`.
 
+The pipeline's "Display or Export Transform" step is now partly implemented, and only partly: a display preview boundary exists — exposure, hard display-range clipping, the sRGB transfer function, 8-bit quantisation — while export does not, and neither does any tone stage. See `docs/decisions/0008-display-preview-rendering.md`. Display and export remain separate decisions: an export path must choose its own bit depth and color handling and must never reuse the 8-bit preview buffer.
+
 Whenever processing order changes, document:
 
 1. old order
@@ -525,6 +527,17 @@ The working representation is **extended linear sRGB**: sRGB primaries, the sRGB
 Choosing that space defines only the coordinate system. How camera-native sensor RGB is mapped into it is a separate decision, carried explicitly by a camera/IR color transform with its own provenance. Do not conflate the two, and do not treat a defined working space as a claim of colorimetric accuracy for an infrared capture.
 
 Creative infrared channel mixing is a **third** decision, distinct from both. It operates inside the working representation, leaves the color space unchanged, and carries its own provenance as creative intent — never as camera calibration, white balance, working-space establishment or filter calibration. That decision is recorded in `docs/decisions/0007-infrared-channel-mixing.md`.
+
+Encoding the result for a display is a **fourth** decision, distinct from all three. It is the first point in the pipeline where a value stops being proportional to light, and it is deliberately minimal: exposure in the linear domain, an explicitly named hard clip to `0...1`, the piecewise sRGB transfer function, and deterministic 8-bit quantisation. That decision is recorded in `docs/decisions/0008-display-preview-rendering.md`.
+
+Keep these apart in code and in language:
+
+```text
+extended linear sRGB    scene-linear, unclamped Float32, light-proportional
+display-encoded sRGB    display-referred, clipped, transfer function applied
+```
+
+Scene-linear values must never be tagged as ordinary sRGB, and display-encoded values must never be tagged linear. Display encoding is not tone mapping, and a displayable image is not a color-validated one.
 
 Never rely on accidental/default ColorSync or framework behavior for major processing decisions.
 
