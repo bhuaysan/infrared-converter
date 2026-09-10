@@ -1,9 +1,18 @@
 # RAW pipeline — the RAW-stage contract
 
 This document defines what a sample *is* at each stage of the RAW path, and
-which stages have and have not run. It covers the RAW stage only: everything
-from demosaicing onward, including the working colour space, is deliberately
-out of scope and undecided.
+which stages have and have not run.
+
+It now covers two domains. The **mosaic domain** runs from LibRaw's unpacked
+samples to a white-balanced CFA mosaic: one value per sensor location, colour
+known only through the sensor layout. The **camera-native RGB domain** begins
+at demosaicing: three values per pixel, still linear, still camera-native, and
+still not in any colour space.
+
+Demosaicing itself is decided — one application-owned reference algorithm, see
+`docs/decisions/0005-application-owned-bayer-demosaicing.md`. What comes after
+it is not: the working colour space, the camera colour transform, tone mapping
+and display encoding all remain undecided.
 
 `CLAUDE.md` holds the project invariants; this file records the concrete
 implementation as it currently stands.
@@ -44,6 +53,9 @@ and then diverge, and they are not interchangeable.
 ## The application-owned pipeline so far
 
 ```text
+════════════════════ MOSAIC DOMAIN ═════════════════════
+one value per CFA location; colour only via the layout
+
 RAW file
    ↓
 LibRaw unpack
@@ -64,16 +76,33 @@ LinearRAWMosaic (Float32, unclamped)
    └───→ apply per-CFA-plane IR gains   ┐
                   ↓                     ├ RAWWhiteBalancer
        WhiteBalancedRAWMosaic           ┘
+
+═══════════ the mosaic domain ends here ════════════════
                   ↓
-       [FUTURE: demosaic]
+       application bilinear Bayer demosaic   ┐
+                  ↓                          ├ RAWDemosaicer
+       DemosaicedRAWRGBImage                 ┘
+
+═══════════ CAMERA-NATIVE RGB DOMAIN ═══════════════════
+three Float32 per pixel; linear; NOT a colour space
+
+                  ↓
+       [FUTURE: camera-native RGB → working colour space]
+                  ↓
+       [FUTURE: exposure / tone / display encoding]
+                  ↓
+       [FUTURE: preview / export]
 ```
+
+`DemosaicedRAWRGBImage` is **not** sRGB, and must not be labelled as such. No
+camera colour matrix has been applied to it; see "Demosaicing" below.
 
 Estimation is **not** a stage downstream of white balance. It reads the
 pre-white-balance `LinearRAWMosaic`, produces a `RAWWhiteBalanceGains`, and
 that value is what `RAWWhiteBalancer` then applies to the same mosaic. The two
 halves meet at the gains, not at the image.
 
-All three stages are application-owned and none imports `CLibRaw`.
+All four stages are application-owned and none imports `CLibRaw`.
 
 `RAWMosaicNormalizer` takes a `DecodedRAWMosaic` (or a bare `RAWMosaic` plus
 level metadata) and returns a `ProcessedRAWMosaic`, which keeps the original
@@ -86,6 +115,12 @@ normalised mosaic reachable on `.source` for the same reason.
 `RAWWhiteBalanceEstimator` takes a `LinearRAWMosaic` and a rectangular region
 and returns a `RAWWhiteBalanceEstimate` — the gains plus the measurement that
 produced them. It never multiplies a sample or allocates an image-sized buffer.
+
+`RAWDemosaicer` takes a `WhiteBalancedProcessedRAWMosaic` (or a bare
+`WhiteBalancedRAWMosaic`) and returns a `DemosaicedProcessedRAWImage`, which
+keeps the white-balanced mosaic reachable on `.source` — and the normalised one
+below that — so changing the gains, re-estimating them or switching algorithm
+all restart from the right earlier representation.
 
 **Automatic estimation does not exist yet.** The caller still chooses which
 samples to measure; nothing decides that on its own, and no filter profile or
@@ -284,6 +319,133 @@ Cost is `O(samples in the region)` with constant auxiliary memory: four
 `Double` sums and four counters. See
 `docs/decisions/0004-neutral-patch-white-balance-estimation.md`.
 
+### Demosaicing
+
+`RAWDemosaicer` reconstructs three values per pixel from one value per CFA
+location. It is application-owned: it imports no `CLibRaw`, receives no LibRaw
+context, and never routes the mosaic back through `dcraw_process`. It is
+**not** `RAWDecodeOptions.Demosaic`, which selects LibRaw's own algorithms on
+the separate legacy processed-RGB path.
+
+Its input is `WhiteBalancedRAWMosaic`, not `LinearRAWMosaic`, and there is no
+overload taking the latter. White balance therefore structurally precedes
+interpolation: averaging neighbours whose relative scaling is not yet correct
+would mix mismatched quantities, and on this camera the two green planes can
+carry different gains. Identity gains remain a valid way to reach this input
+unchanged.
+
+#### Supported layouts
+
+Only a genuine repeating 2×2 Bayer RGB mosaic. `pattern == .bayer` is not the
+check — that flag says a CFA code was packed, not that the code describes
+something a 2×2 algorithm may run on. `RAWBayerCellPattern.resolve` walks the
+**complete 8-row × 2-column packed cell** and requires:
+
+| Requirement | Failure |
+| --- | --- |
+| `.bayer` pattern | `.xTrans`, `.foveon`, `.none`, `.unknown` refused by name |
+| `filters != 1` | LibRaw's 16×16 layout refused |
+| every position names a colour plane | refused |
+| every plane index addressable in `colorDescription` | refused |
+| every letter is `R`, `G` or `B` | `E`, `C`, `M`, `Y` refused, never folded onto RGB |
+| rows 2…7 restate rows 0…1's **colours** | a taller repeat refused |
+| the 2×2 cell is one R, one B, two G | refused |
+
+All failures raise `RAWProcessingError.unsupportedSensorLayoutForDemosaicing`,
+carrying the pattern, the algorithm that refused it, and a reason.
+
+The repeat check compares colours, not plane indices. A cell whose lower rows
+swap which green *plane* sits in which corner is still a 2×2 mosaic here: the
+two green planes were already told apart by white balance, upstream.
+
+`RGGB`, `BGGR`, `GRBG` and `GBRG` are all supported, and the phase is
+**discovered** from the layout's own `colorPlaneIndex(row:column:)` and
+`colorDescription` — never hardcoded, and never re-deriving LibRaw's CFA
+decoding. A three-plane Bayer layout, whose greens share plane `1`, and a
+four-plane `RGBG` layout, whose greens are planes `1` and `3`, resolve to the
+same `R/G/G/B` cell.
+
+X-Trans is recognised and explicitly unsupported by this algorithm. It is not
+treated as Bayer, not demosaiced from a 2×2 subset, not downsampled and not
+routed through LibRaw. A future X-Trans algorithm would be a new
+`RAWDemosaicAlgorithm` case producing the same `DemosaicedRAWRGBImage`.
+
+#### The interpolation
+
+```text
+at a red location:    R = the native sample, copied exactly
+                      G = mean of the in-bounds AXIAL   green neighbours (N S W E)
+                      B = mean of the in-bounds DIAGONAL blue  neighbours (NW NE SW SE)
+
+at a blue location:   B = the native sample, copied exactly
+                      G = mean of the in-bounds AXIAL   green neighbours
+                      R = mean of the in-bounds DIAGONAL red   neighbours
+
+at a green location:  G = the native sample, copied exactly
+                      R = mean of the in-bounds AXIAL   red   neighbours
+                      B = mean of the in-bounds AXIAL   blue  neighbours
+```
+
+A contributor counts only if it is in bounds **and** its own CFA location
+carries the wanted colour. For a green location that resolves to one horizontal
+pair and one vertical pair; which is which follows from the discovered phase,
+since the two green positions in a cell have opposite orientations.
+
+Borders average **only their available contributors**. A corner red location
+has two axial greens and one diagonal blue, and divides by two and by one
+accordingly. Nothing is reflected, wrapped or duplicated, no out-of-bounds
+sample is invented, and the image is never cropped: every CFA location produces
+exactly one pixel. A channel with no contributor at all — a 1×1 mosaic, a
+single row, a single column — raises `missingDemosaicNeighbors` with the
+coordinate and the channel rather than being filled with zero.
+
+Native samples are copied straight across, never through `Double`, so their
+`Float32` bit patterns survive exactly, negative zero included. Interpolated
+means accumulate their at most four contributors in `Double` and narrow once,
+because `Float.greatestFiniteMagnitude + Float.greatestFiniteMagnitude`
+overflows while the average does not — an artefact of the summation, not of the
+data. Storage is `Float32` throughout; there is no `Double` buffer.
+
+Nothing is clamped. Finite negatives stay negative and values above `1` stay
+above `1`, for interpolated values as much as native ones. A non-finite sample,
+native or contributor, raises `nonFiniteInputValue` with its own coordinate
+rather than being skipped; skipping would silently change a mean's denominator.
+
+#### G1 and G2
+
+Both green CFA positions become the single output green channel. They are never
+merged, averaged or reconciled as planes:
+
+| Location | Output green |
+| --- | --- |
+| G1 | its own G1 white-balanced sample, exactly |
+| G2 | its own G2 white-balanced sample, exactly |
+| red or blue | spatial mean of its in-bounds green neighbours, normally both kinds |
+
+There is no global G1/G2 reconciliation stage. Adding one would undo the
+per-plane gains the white-balance stage deliberately keeps separate.
+
+#### Output
+
+`DemosaicedRAWRGBImage` stores tightly packed, row-major, interleaved RGB —
+exactly three `Float32` per pixel:
+
+```text
+base = (row * width + column) * 3
+```
+
+`[SIMD3<Float>]` is deliberately not the storage type: its 16-byte stride would
+turn the E-PL3's 148 MB buffer into 197 MB, a third of it padding.
+
+**The values are linear camera-native sensor responses, not colour-space
+coordinates.** They are not sRGB, not linear sRGB, not Display P3, not Adobe
+RGB, not ProPhoto RGB, not XYZ and not ACES. `R`, `G` and `B` identify which
+filter on *this* sensor produced the value, so two cameras' values are not
+comparable. No camera colour matrix, gamma or orientation has been applied, and
+the enforcement is structural: the demosaicer receives no `RAWMetadata` at all,
+so `cam_mul`, `pre_mul`, `rgb_cam` and `cam_xyz` have nothing to arrive
+through.
+
 ### What the linear stage does not do
 
 | Stage | Applied? |
@@ -321,6 +483,29 @@ gains are recorded as numbers, not as a label: given the same
 `LinearRAWMosaic`, the recorded provenance contains the exact gains required to
 reproduce the white-balance transformation. The provenance does not contain the
 source pixels, so it reproduces the *transformation*, not the image on its own.
+
+### What the demosaicing stage does not do
+
+| Stage | Applied? |
+| --- | --- |
+| Bilinear Bayer interpolation | **yes** |
+| Clamping / clipping | no |
+| Range normalisation of any kind | no |
+| G1/G2 reconciliation | no |
+| White balance | no — upstream |
+| Camera colour matrix | no |
+| Colour-space conversion | no |
+| Gamma / transfer function | no |
+| Exposure / tone | no |
+| Highlight reconstruction | no |
+| Sharpening / noise reduction / false-colour suppression | no |
+| Orientation | no |
+
+Each is recorded on `RAWDemosaicProcessing`, alongside the algorithm and the
+discovered Bayer phase. Upstream facts — black subtraction, normalisation, the
+white level, the gains and their source — are read through the
+`RAWWhiteBalanceProcessing` it carries rather than copied, so two records of
+the same history cannot disagree.
 
 ### The two metadata snapshots
 
@@ -372,7 +557,8 @@ These terms are distinct and must not be used interchangeably.
 | **White / saturation level** | The value a normalisation stage treats as full scale. | `RAWMetadata.Levels.maximum` / `linearMaximum` |
 | **Black-corrected sample** | The above, minus the effective black level. | An intermediate inside `RAWMosaicNormalizer`; never a stored representation. |
 | **Normalised sample** | Black-corrected and rescaled against the saturation level, as `Float32`. Not clamped. | `LinearRAWMosaic.values` |
-| **Demosaiced camera RGB** | Three channels per pixel, camera-native primaries, no matrix applied. | `RAWImage` (produced by LibRaw, on the reference path only) |
+| **Linear camera-native RGB** | Three `Float32` per pixel — the sensor's own filter responses, interpolated. No camera matrix, no gamma, no colour space. Not clamped. | `DemosaicedRAWRGBImage.values` |
+| **Decoder-processed RGB** | LibRaw's own full pipeline output: its demosaic, its black/white handling, a camera matrix and gamma. | `RAWImage` (legacy reference path only) |
 | **Working representation** | The project's defined internal processing space. | Not defined. Requires ADR 0002. |
 
 ### Unpacked samples are not ADC values
@@ -650,6 +836,47 @@ Estimating over this patch takes about 0.6 ms in a **debug** build. No
 optimised-build measurement has been taken, and no performance claim is made
 from this number.
 
+### After bilinear Bayer demosaicing
+
+> These numbers are **diagnostic**. No camera colour matrix has been applied at
+> this stage, so they are linear camera-native sensor responses and say nothing
+> about whether the image is colour-correct. The gains they were produced under
+> are the diagnostic estimate above, not a calibration.
+
+Input: the white-balanced 4056 × 3040 mosaic above, balanced with the estimated
+gains. Discovered Bayer phase: `RGGB`, resolved from the file's own
+`colorDescription "RGBG"` and `colorCount 3`.
+
+| | |
+| --- | --- |
+| Output dimensions | 4056 × 3040, unchanged — every CFA location yields one pixel |
+| Output values | 36 990 720 `Float32` (12 330 240 pixels × 3) |
+| Owned payload | 147 962 880 bytes ≈ 148 MB, 4 bytes per `Float` |
+| Non-finite values | 0 |
+
+| Channel | Minimum | Maximum | Mean | < 0 | > 1 |
+| --- | --- | --- | --- | --- | --- |
+| R | 0.010667 | 0.526172 | 0.130020 | 0 | 0 |
+| G | 0.008960 | 0.760906 | 0.130518 | 0 | 0 |
+| B | −0.005062 | 0.658015 | 0.123163 | 11 | 0 |
+
+The 11 negative values are the same 11 sub-black samples the earlier tables
+track, still negative and still unclamped. No value exceeds 1 in this frame
+because the largest balanced sample does not — a fact about this exposure and
+these gains, not a clamp; the synthetic suite proves values above 1 survive.
+
+Demosaicing the full frame takes roughly 25 s in a **debug** build (`-Onone`,
+bounds checks on, up to eight neighbour lookups per pixel through a throwing
+nested function). No optimised-build measurement has been taken, and no
+performance claim is made from this number.
+
+Memory, stated precisely: 148 MB is this buffer's **own payload**, not process
+RSS. The pipeline additionally retains the white-balanced and normalised
+mosaics — about 49 MB each — so gains, estimates and algorithm can be changed
+without decoding the file again. That retention is a deliberate tradeoff at
+this architecture stage, to be revisited by measurement once interactive
+editing exists, not by dropping buffers to make a number smaller.
+
 ## Decoder warnings by stage
 
 LibRaw accumulates `process_warnings` with `|=` and never clears it outside
@@ -671,7 +898,23 @@ can.
 
 ## Not yet decided
 
-- The working colour space, which is downstream of demosaicing.
+Demosaicing itself is no longer on this list. One application-owned reference
+algorithm is decided and implemented, and the representation it produces is
+stable enough for a second algorithm to target. What remains open is
+everything downstream of it, plus image quality:
+
+- The **working colour space**, which is downstream of demosaicing. Nothing
+  converts `DemosaicedRAWRGBImage` into one yet, and it must not be treated as
+  sRGB or anything else in the meantime.
+- The **camera colour transform** — including whether a visible-light matrix is
+  ever valid for infrared capture.
+- **Tone mapping, exposure and display encoding.**
+- The **final production-quality Bayer algorithm**. `.bilinearBayer` is a
+  correctness reference, not an image-quality answer.
+- An **X-Trans algorithm**. The layout is recognised and explicitly refused
+  today.
+- Whether any of this belongs on the **GPU**. The current implementation is a
+  CPU reference and no optimised-build measurement has been taken.
 - How infrared white-balance gains should be chosen *without* a user-selected
   region. ADR 0003 records how gains are applied and ADR 0004 how they are
   estimated from a selected patch; automatic estimation, robust statistics and
