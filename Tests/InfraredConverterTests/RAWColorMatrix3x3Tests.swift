@@ -4,6 +4,10 @@ import Foundation
 
 /// The fixed 3×3 matrix type: what it accepts, what it refuses, and the one
 /// multiplication convention the whole project reads it under.
+///
+/// The type is representation-neutral — the camera-to-working transform and
+/// the creative infrared channel mix both interpret it — so nothing here
+/// assumes an input is camera RGB or an output is working RGB.
 @Suite("RAWColorMatrix3x3")
 struct RAWColorMatrix3x3Tests {
 
@@ -21,11 +25,11 @@ struct RAWColorMatrix3x3Tests {
 
     // MARK: - Convention
 
-    @Test("Rows are output channels and columns are input camera channels")
+    @Test("Rows are output channels and columns are input channels")
     func rowsAreOutputsColumnsAreInputs() throws {
         let matrix = try Self.asymmetric()
 
-        // m12 is row 1 (working green), column 2 (camera blue).
+        // m12 is row 1 (output green), column 2 (input blue).
         #expect(matrix.m12 == -1.25)
         #expect(matrix.coefficient(row: 1, column: 2) == -1.25)
         #expect(matrix.rows[1][2] == -1.25)
@@ -90,7 +94,7 @@ struct RAWColorMatrix3x3Tests {
                 m20: 0, m21: 0, m22: 1
             )
         } throws: { error in
-            guard case .invalidWorkingColorMatrix(let row, let column, let value) =
+            guard case .invalidColorMatrix3x3(let row, let column, let value) =
                     error as? RAWProcessingError else { return false }
             return row == 1 && column == 1 && value.isNaN
         }
@@ -102,7 +106,7 @@ struct RAWColorMatrix3x3Tests {
                 m20: 0, m21: 0, m22: 1
             )
         } throws: { error in
-            guard case .invalidWorkingColorMatrix(let row, let column, let value) =
+            guard case .invalidColorMatrix3x3(let row, let column, let value) =
                     error as? RAWProcessingError else { return false }
             return row == 0 && column == 0 && value == .infinity
         }
@@ -114,7 +118,7 @@ struct RAWColorMatrix3x3Tests {
                 m20: 0, m21: 0, m22: -.infinity
             )
         } throws: { error in
-            guard case .invalidWorkingColorMatrix(let row, let column, let value) =
+            guard case .invalidColorMatrix3x3(let row, let column, let value) =
                     error as? RAWProcessingError else { return false }
             return row == 2 && column == 2 && value == -.infinity
         }

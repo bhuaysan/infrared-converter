@@ -3,30 +3,51 @@ import Foundation
 /// A fixed 3×3 colour matrix: nine finite `Double` coefficients, immutable,
 /// with one documented multiplication convention.
 ///
-/// ## The convention, stated once
+/// ## A shared mathematical primitive, not one stage's type
 ///
-/// **Column-vector semantics.** The input is a column of camera-native
-/// channels and the matrix multiplies it from the left:
+/// This type is **representation-neutral**. It describes a linear map from one
+/// RGB triple to another and says nothing about what either triple means. Two
+/// different stages interpret it, and the interpretation is theirs, not the
+/// matrix's:
 ///
 /// ```text
-///              ⎡ m00 m01 m02 ⎤   ⎡ cameraR ⎤
-/// workingRGB = ⎢ m10 m11 m12 ⎥ × ⎢ cameraG ⎥
-///              ⎣ m20 m21 m22 ⎦   ⎣ cameraB ⎦
+/// RAWCameraToWorkingColorTransform   camera-native RGB → working RGB
+/// IRChannelMix                       working RGB → working RGB (creative)
+/// ```
+///
+/// Those are different semantic operations — one places sensor responses into
+/// a defined coordinate system, the other creatively remixes coordinates
+/// already in it — and they stay separate types with separate provenance. What
+/// they share is the arithmetic, so they share this.
+///
+/// ## The convention, stated once
+///
+/// **Column-vector semantics.** The input is a column of RGB values and the
+/// matrix multiplies it from the left:
+///
+/// ```text
+///             ⎡ m00 m01 m02 ⎤   ⎡ inputR ⎤
+/// outputRGB = ⎢ m10 m11 m12 ⎥ × ⎢ inputG ⎥
+///             ⎣ m20 m21 m22 ⎦   ⎣ inputB ⎦
 /// ```
 ///
 /// which written out is:
 ///
 /// ```text
-/// workingR = m00*cameraR + m01*cameraG + m02*cameraB
-/// workingG = m10*cameraR + m11*cameraG + m12*cameraB
-/// workingB = m20*cameraR + m21*cameraG + m22*cameraB
+/// outputR = m00*inputR + m01*inputG + m02*inputB
+/// outputG = m10*inputR + m11*inputG + m12*inputB
+/// outputB = m20*inputR + m21*inputG + m22*inputB
 /// ```
 ///
-/// So **rows are output channels and columns are input camera channels**:
-/// `m12` is how much camera *blue* (column 2) contributes to working *green*
-/// (row 1). Every consumer in the project uses this convention, and the tests
-/// use deliberately non-symmetric matrices so a transposed implementation
-/// cannot pass by coincidence.
+/// So **rows are output channels and columns are input channels**: `m12` is
+/// how much input *blue* (column 2) contributes to output *green* (row 1).
+/// Every consumer in the project uses this convention, and the tests use
+/// deliberately non-symmetric matrices so a transposed implementation cannot
+/// pass by coincidence.
+///
+/// There is no constant term. This is a linear map, `output = M × input`, not
+/// an affine one — a Photoshop-style channel-mixer constant shifts black and
+/// is a different operation, decided separately if it is ever needed.
 ///
 /// ## Nine scalars, not nested arrays
 ///
@@ -40,7 +61,8 @@ import Foundation
 /// Coefficients are `Double`; there are nine of them, so their memory cost is
 /// irrelevant, and carrying them at higher precision keeps the per-pixel dot
 /// products from losing bits to the matrix itself. Image storage stays
-/// `Float32` — see `RAWWorkingColorConverter` for how the arithmetic narrows.
+/// `Float32` — see `RAWWorkingColorConverter` and `IRChannelMixer` for how the
+/// arithmetic narrows.
 ///
 /// ## What is validated, and what deliberately is not
 ///
@@ -67,23 +89,23 @@ public struct RAWColorMatrix3x3: Equatable, Sendable {
     /// Rows and columns of the fixed shape. Always `3`.
     public static let dimension = 3
 
-    /// Row 0 (working red), column 0 (camera red).
+    /// Row 0 (output red), column 0 (input red).
     public let m00: Double
-    /// Row 0 (working red), column 1 (camera green).
+    /// Row 0 (output red), column 1 (input green).
     public let m01: Double
-    /// Row 0 (working red), column 2 (camera blue).
+    /// Row 0 (output red), column 2 (input blue).
     public let m02: Double
-    /// Row 1 (working green), column 0 (camera red).
+    /// Row 1 (output green), column 0 (input red).
     public let m10: Double
-    /// Row 1 (working green), column 1 (camera green).
+    /// Row 1 (output green), column 1 (input green).
     public let m11: Double
-    /// Row 1 (working green), column 2 (camera blue).
+    /// Row 1 (output green), column 2 (input blue).
     public let m12: Double
-    /// Row 2 (working blue), column 0 (camera red).
+    /// Row 2 (output blue), column 0 (input red).
     public let m20: Double
-    /// Row 2 (working blue), column 1 (camera green).
+    /// Row 2 (output blue), column 1 (input green).
     public let m21: Double
-    /// Row 2 (working blue), column 2 (camera blue).
+    /// Row 2 (output blue), column 2 (input blue).
     public let m22: Double
 
     /// Builds a matrix without checking its coefficients.
@@ -111,9 +133,9 @@ public struct RAWColorMatrix3x3: Equatable, Sendable {
     /// Builds a matrix from nine coefficients in row-major order, rejecting
     /// any that is not finite.
     ///
-    /// - Throws: `RAWProcessingError.invalidWorkingColorMatrix`, carrying the
-    ///   row, the column and the offending value — reported at construction so
-    ///   a matrix that cannot describe a transform never reaches a pixel.
+    /// - Throws: `RAWProcessingError.invalidColorMatrix3x3`, carrying the row,
+    ///   the column and the offending value — reported at construction so a
+    ///   matrix that cannot describe a transform never reaches a pixel.
     public init(
         m00: Double, m01: Double, m02: Double,
         m10: Double, m11: Double, m12: Double,
@@ -125,7 +147,7 @@ public struct RAWColorMatrix3x3: Equatable, Sendable {
             (2, 0, m20), (2, 1, m21), (2, 2, m22),
         ]
         for (row, column, value) in coefficients where !value.isFinite {
-            throw RAWProcessingError.invalidWorkingColorMatrix(
+            throw RAWProcessingError.invalidColorMatrix3x3(
                 row: row, column: column, value: value
             )
         }
@@ -145,10 +167,11 @@ public struct RAWColorMatrix3x3: Equatable, Sendable {
     /// ```
     ///
     /// As a *matrix* this is arithmetically neutral and nothing more. What it
-    /// means as a camera-to-working transform — that sensor responses are
-    /// being assigned to working-space axes deliberately, without a colour
-    /// calibration — is a separate statement, made by
-    /// `RAWCameraToWorkingColorTransform.sensorRGBIdentityFalseColor`.
+    /// means in a given stage is a separate statement, made by that stage:
+    /// `RAWCameraToWorkingColorTransform.sensorRGBIdentityFalseColor` says
+    /// sensor responses are being assigned to working-space axes deliberately
+    /// and without a colour calibration, while `IRChannelMix.identity` says a
+    /// creative channel mix was traversed and asked for no remapping.
     public static let identity = RAWColorMatrix3x3(
         unchecked: 1, 0, 0,
         0, 1, 0,
@@ -161,7 +184,7 @@ public struct RAWColorMatrix3x3: Equatable, Sendable {
     /// is deliberate: `-0.0` and `+0.0` differ only in the sign of a zero
     /// contribution, and the bit-preserving identity path a match selects is
     /// the more faithful of the two treatments — see
-    /// `RAWWorkingColorConverter`.
+    /// `RAWWorkingColorConverter` and `IRChannelMixer`.
     public var isIdentity: Bool { self == .identity }
 
     /// One coefficient by position, or `nil` when either index is outside
@@ -192,7 +215,7 @@ public struct RAWColorMatrix3x3: Equatable, Sendable {
     ///
     /// Nothing in the project requires it to be non-zero: a singular matrix is
     /// a legitimate transform — collapsing three channels to a monochrome
-    /// working image is exactly that — and this stage never inverts anything.
+    /// result is exactly that — and no stage inverts anything.
     public var determinant: Double {
         m00 * (m11 * m22 - m12 * m21)
             - m01 * (m10 * m22 - m12 * m20)

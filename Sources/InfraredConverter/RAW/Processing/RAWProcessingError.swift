@@ -147,16 +147,20 @@ public enum RAWProcessingError: Error, Equatable {
     /// which cannot overflow `Float32` — and checked anyway, because the
     /// alternative to checking is trusting.
     case nonFiniteDemosaicResult(row: Int, column: Int, channel: RAWLinearRGBChannel)
-    /// A colour-matrix coefficient is NaN or infinite, so the matrix cannot
-    /// describe any transform. Reported at construction, before a matrix can
-    /// reach a pixel. Zero, negative, greater-than-one and singular
+    /// A `RAWColorMatrix3x3` coefficient is NaN or infinite, so the matrix
+    /// cannot describe any transform. Reported at construction, before a
+    /// matrix can reach a pixel. Zero, negative, greater-than-one and singular
     /// coefficients are all legitimate and are not reported here; see
     /// `RAWColorMatrix3x3`.
+    ///
+    /// Deliberately named for the primitive rather than for a stage: the same
+    /// matrix type carries the camera-to-working transform and the creative
+    /// infrared channel mix, and its validation belongs to neither.
     ///
     /// Note that `==` on this case is `false` when `value` is NaN, since
     /// `Double` comparison says so; match the case rather than comparing
     /// whole errors when the offending value may be NaN.
-    case invalidWorkingColorMatrix(row: Int, column: Int, value: Double)
+    case invalidColorMatrix3x3(row: Int, column: Int, value: Double)
     /// The visible-light metadata transform was requested for a file whose
     /// metadata carries no `rgbFromCamera` matrix. Reported rather than
     /// substituted: there is no default camera matrix in this project, and
@@ -234,7 +238,7 @@ extension RAWProcessingError: LocalizedError {
             return "The image is too small for every pixel to receive all three colours."
         case .nonFiniteDemosaicResult:
             return "Demosaicing produced a value that is not a finite number."
-        case .invalidWorkingColorMatrix:
+        case .invalidColorMatrix3x3:
             return "A colour-matrix coefficient is not a finite number."
         case .missingVisibleLightCameraMatrix:
             return "This file carries no visible-light camera colour matrix."
@@ -315,7 +319,7 @@ extension RAWProcessingError: LocalizedError {
                 The interpolated \(channel) channel at row \(row), column \(column) is not \
                 finite.
                 """
-        case .invalidWorkingColorMatrix(let row, let column, let value):
+        case .invalidColorMatrix3x3(let row, let column, let value):
             return """
                 Colour-matrix coefficient \(value) at row \(row), column \(column) is not \
                 finite.
