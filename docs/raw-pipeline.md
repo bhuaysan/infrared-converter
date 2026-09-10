@@ -1352,10 +1352,12 @@ Coordinates below zero and above one are retained, not clamped — which is what
 the extended range is for. Five fixed pixel coordinates are additionally
 checked against arithmetic written out in the test, within one `Float` ULP.
 
-In a **debug** build (`-Onone`, bounds checks on) the three paths take roughly
-1.0 s, 1.1 s and 1.2 s respectively over the full frame — validate-and-share,
-validate-and-reorder, and nine multiplications with six additions per pixel. No
-optimised-build measurement has been taken and no performance claim is made.
+In a **debug** build (`-Onone`, bounds checks on), with this suite run on its
+own, the three paths take roughly 1.0 s, 1.1 s and 1.2 s respectively over the
+full frame — validate-and-share, validate-and-reorder, and nine multiplications
+with six additions per pixel. Inside the fully parallel test run they are
+roughly twice that, which is contention rather than cost. No optimised-build
+measurement has been taken and no performance claim is made.
 
 ## Decoder warnings by stage
 
