@@ -147,6 +147,56 @@ public enum RAWProcessingError: Error, Equatable {
     /// which cannot overflow `Float32` — and checked anyway, because the
     /// alternative to checking is trusting.
     case nonFiniteDemosaicResult(row: Int, column: Int, channel: RAWLinearRGBChannel)
+    /// A colour-matrix coefficient is NaN or infinite, so the matrix cannot
+    /// describe any transform. Reported at construction, before a matrix can
+    /// reach a pixel. Zero, negative, greater-than-one and singular
+    /// coefficients are all legitimate and are not reported here; see
+    /// `RAWColorMatrix3x3`.
+    ///
+    /// Note that `==` on this case is `false` when `value` is NaN, since
+    /// `Double` comparison says so; match the case rather than comparing
+    /// whole errors when the offending value may be NaN.
+    case invalidWorkingColorMatrix(row: Int, column: Int, value: Double)
+    /// The visible-light metadata transform was requested for a file whose
+    /// metadata carries no `rgbFromCamera` matrix. Reported rather than
+    /// substituted: there is no default camera matrix in this project, and
+    /// synthesising one from `cameraFromXYZ` or from the white-balance
+    /// multipliers would be inventing a calibration.
+    case missingVisibleLightCameraMatrix
+    /// The file's `rgbFromCamera` is structurally unusable: the wrong number
+    /// of rows, a row with the wrong number of coefficients, or a coefficient
+    /// that is not finite. Reported rather than read past its bounds or
+    /// padded into shape.
+    case malformedVisibleLightCameraMatrix(reason: String)
+    /// The file's `rgbFromCamera` is well-formed but has a non-zero fourth
+    /// column, so it describes a contribution from a fourth camera colour
+    /// plane that the application-owned three-channel camera-native image
+    /// cannot supply.
+    ///
+    /// Reported rather than truncated: dropping a non-zero fourth coefficient
+    /// would silently change the transform and still call the result a
+    /// metadata transform. There is deliberately no epsilon — the fourth
+    /// channel contributes exactly zero, or the matrix is not representable
+    /// here.
+    case incompatibleVisibleLightCameraMatrix(row: Int, value: Float)
+    /// A camera-native RGB input value was NaN or infinite. The demosaicing
+    /// stage cannot produce either, so this means a hand-constructed or
+    /// otherwise unvalidated image reached the working-colour stage; it is
+    /// reported rather than multiplied and propagated silently.
+    case nonFiniteWorkingColorInput(
+        row: Int,
+        column: Int,
+        channel: RAWLinearRGBChannel,
+        value: Float
+    )
+    /// A camera-to-working dot product did not produce a finite `Float32`:
+    /// either the `Double` accumulation itself was not finite, or a finite
+    /// `Double` result overflowed on the single narrowing to `Float`.
+    ///
+    /// Reported rather than clamped to `Float.greatestFiniteMagnitude`, for
+    /// the same reason `nonFiniteWhiteBalanceResult` is: an image carrying a
+    /// silently invented value is worse than a failed stage.
+    case nonFiniteWorkingColorResult(row: Int, column: Int, channel: RAWLinearRGBChannel)
 }
 
 extension RAWProcessingError: LocalizedError {
@@ -184,6 +234,21 @@ extension RAWProcessingError: LocalizedError {
             return "The image is too small for every pixel to receive all three colours."
         case .nonFiniteDemosaicResult:
             return "Demosaicing produced a value that is not a finite number."
+        case .invalidWorkingColorMatrix:
+            return "A colour-matrix coefficient is not a finite number."
+        case .missingVisibleLightCameraMatrix:
+            return "This file carries no visible-light camera colour matrix."
+        case .malformedVisibleLightCameraMatrix:
+            return "This file's visible-light camera colour matrix is not the expected shape."
+        case .incompatibleVisibleLightCameraMatrix:
+            return """
+                This file's visible-light camera colour matrix uses a fourth colour channel \
+                that the demosaiced image does not have.
+                """
+        case .nonFiniteWorkingColorInput:
+            return "The image data contains a value that is not a finite number."
+        case .nonFiniteWorkingColorResult:
+            return "This colour transform produces values too large to represent."
         }
     }
 
@@ -249,6 +314,34 @@ extension RAWProcessingError: LocalizedError {
             return """
                 The interpolated \(channel) channel at row \(row), column \(column) is not \
                 finite.
+                """
+        case .invalidWorkingColorMatrix(let row, let column, let value):
+            return """
+                Colour-matrix coefficient \(value) at row \(row), column \(column) is not \
+                finite.
+                """
+        case .missingVisibleLightCameraMatrix:
+            return """
+                The metadata carries no rgbFromCamera matrix, and this project has no default \
+                camera matrix to fall back to.
+                """
+        case .malformedVisibleLightCameraMatrix(let reason):
+            return reason
+        case .incompatibleVisibleLightCameraMatrix(let row, let value):
+            return """
+                rgbFromCamera row \(row) has fourth-column coefficient \(value), which is not \
+                zero. The camera-native RGB image has three input channels, so dropping that \
+                coefficient would change the transform.
+                """
+        case .nonFiniteWorkingColorInput(let row, let column, let channel, let value):
+            return """
+                Camera-native \(channel) value \(value) at row \(row), column \(column) is \
+                not finite.
+                """
+        case .nonFiniteWorkingColorResult(let row, let column, let channel):
+            return """
+                The working-space \(channel) coordinate at row \(row), column \(column) is \
+                not a finite Float32.
                 """
         }
     }
