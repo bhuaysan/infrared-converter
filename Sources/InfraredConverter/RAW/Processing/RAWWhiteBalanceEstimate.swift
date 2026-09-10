@@ -36,9 +36,17 @@ public enum RAWWhiteBalanceEstimationScalePolicy: Equatable, Sendable {
 /// `mean` is `nil` exactly when `sampleCount` is `0`: a mean of no samples is
 /// not a number, and recording `0` for it would be indistinguishable from a
 /// plane that genuinely measured zero.
+///
+/// ## An observation, not a parameter
+///
+/// This is a record of a measurement that already happened. Its properties are
+/// `let` and its initialiser is module-internal: outside the module it can be
+/// read in full but neither edited nor forged. Editing a historical
+/// measurement is not a use case — it is how provenance comes to describe
+/// numbers it did not produce.
 public struct RAWColorPlaneStatistics: Equatable, Sendable {
     /// How many samples of this colour plane the patch contained.
-    public var sampleCount: Int
+    public let sampleCount: Int
     /// The arithmetic mean of those samples, accumulated in `Double`, or
     /// `nil` when there were none.
     ///
@@ -46,9 +54,12 @@ public struct RAWColorPlaneStatistics: Equatable, Sendable {
     /// is clamped, rejected, offset or made absolute first. Negative values
     /// are legitimate black-subtracted sensor noise and lower this mean, as
     /// they should.
-    public var mean: Double?
+    public let mean: Double?
 
-    public init(sampleCount: Int, mean: Double?) {
+    /// Module-internal: only `RAWWhiteBalanceEstimator` produces these
+    /// records. See the type's own note on why they are not forgeable from
+    /// outside.
+    init(sampleCount: Int, mean: Double?) {
         self.sampleCount = sampleCount
         self.mean = mean
     }
@@ -73,21 +84,25 @@ public struct RAWColorPlaneStatistics: Equatable, Sendable {
 /// slot!.sampleCount == 0           → plane exists, patch missed it    → error
 /// slot!.sampleCount  > 0           → measured                         → gain from mean
 /// ```
+///
+/// As with `RAWColorPlaneStatistics`, this is an observation: `let`
+/// properties, module-internal initialiser, fully readable from anywhere.
 public struct RAWNeutralPatchStatistics: Equatable, Sendable {
     /// Statistics for CFA colour plane `0`, or `nil` when the layout has no
     /// such plane.
-    public var plane0: RAWColorPlaneStatistics?
+    public let plane0: RAWColorPlaneStatistics?
     /// Statistics for CFA colour plane `1` — the first green on an RGBG
     /// layout. Independent of `plane3`.
-    public var plane1: RAWColorPlaneStatistics?
+    public let plane1: RAWColorPlaneStatistics?
     /// Statistics for CFA colour plane `2`.
-    public var plane2: RAWColorPlaneStatistics?
+    public let plane2: RAWColorPlaneStatistics?
     /// Statistics for CFA colour plane `3` — the second green on an RGBG
     /// layout, a real plane even when `colorCount == 3`, and measured
     /// independently of `plane1`.
-    public var plane3: RAWColorPlaneStatistics?
+    public let plane3: RAWColorPlaneStatistics?
 
-    public init(
+    /// Module-internal: only `RAWWhiteBalanceEstimator` produces these.
+    init(
         plane0: RAWColorPlaneStatistics?,
         plane1: RAWColorPlaneStatistics?,
         plane2: RAWColorPlaneStatistics?,
@@ -140,17 +155,27 @@ public struct RAWNeutralPatchStatistics: Equatable, Sendable {
 /// `RAWWhiteBalanceProcessing.gains`, and two copies of the same numbers can
 /// disagree. This record explains how those numbers were arrived at — from
 /// which samples, under which policy, against which target.
+///
+/// ## Not forgeable from outside the module
+///
+/// Every property is `let` and the initialiser is module-internal, so
+/// `RAWWhiteBalanceEstimator` is the only thing that can mint one. External
+/// consumers need to *inspect* provenance — read the region, the policy, the
+/// statistics, the target — not to author an estimator result. That
+/// restriction is also what stops a caller from attaching a plausible-looking
+/// `.neutralPatch` provenance to gains no measurement produced.
 public struct RAWNeutralPatchWhiteBalanceSource: Equatable, Sendable {
     /// The active-image rectangle the statistics were measured over.
-    public var region: RAWActiveAreaRegion
+    public let region: RAWActiveAreaRegion
     /// The policy that turned the statistics into gains.
-    public var scalePolicy: RAWWhiteBalanceEstimationScalePolicy
+    public let scalePolicy: RAWWhiteBalanceEstimationScalePolicy
     /// What each CFA colour plane measured inside `region`.
-    public var statistics: RAWNeutralPatchStatistics
+    public let statistics: RAWNeutralPatchStatistics
     /// The plane mean every measured plane was scaled to.
-    public var targetMean: Double
+    public let targetMean: Double
 
-    public init(
+    /// Module-internal: only `RAWWhiteBalanceEstimator` produces these.
+    init(
         region: RAWActiveAreaRegion,
         scalePolicy: RAWWhiteBalanceEstimationScalePolicy,
         statistics: RAWNeutralPatchStatistics,
@@ -174,14 +199,34 @@ public struct RAWNeutralPatchWhiteBalanceSource: Equatable, Sendable {
 /// `RAWWhiteBalancer.apply(to:estimate:)` is what applies it, and that
 /// overload takes the gains and the provenance from the *same* estimate so
 /// the two cannot be mismatched.
+///
+/// ## The two halves cannot be separated or swapped
+///
+/// This is enforced by the type, not by call-site discipline:
+///
+/// - both properties are `let`, so neither half can be replaced after the
+///   estimator paired them;
+/// - the initialiser is module-internal, so an estimate cannot be minted
+///   outside the module with gains and provenance that never met;
+/// - `RAWWhiteBalancer` exposes no public way to supply a
+///   `RAWWhiteBalanceSource` alongside gains — an apply either takes bare
+///   gains and records `.explicit`, or takes a whole estimate and records
+///   *that estimate's* provenance.
+///
+/// Together those make "gains of `[2, 3, 4, 5]`, obtained by measuring a
+/// patch that produced `[1, 1.44, 6.8, 1.43]`" unrepresentable rather than
+/// merely discouraged.
 public struct RAWWhiteBalanceEstimate: Equatable, Sendable {
     /// The estimated multipliers, indexed by CFA colour plane. Slots for
     /// planes the sensor layout does not produce are exactly `1`.
-    public var gains: RAWWhiteBalanceGains
+    public let gains: RAWWhiteBalanceGains
     /// How `gains` was obtained.
-    public var provenance: RAWNeutralPatchWhiteBalanceSource
+    public let provenance: RAWNeutralPatchWhiteBalanceSource
 
-    public init(gains: RAWWhiteBalanceGains, provenance: RAWNeutralPatchWhiteBalanceSource) {
+    /// Module-internal, deliberately: see the type's note above. Only
+    /// `RAWWhiteBalanceEstimator` pairs gains with the measurement that
+    /// produced them.
+    init(gains: RAWWhiteBalanceGains, provenance: RAWNeutralPatchWhiteBalanceSource) {
         self.gains = gains
         self.provenance = provenance
     }

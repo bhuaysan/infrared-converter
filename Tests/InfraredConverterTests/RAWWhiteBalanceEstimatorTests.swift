@@ -650,6 +650,97 @@ struct RAWWhiteBalanceEstimatorTests {
         #expect(balanced.processing.gainSource == .explicit)
     }
 
+    // MARK: - The estimate/provenance invariant
+
+    // These pin the shape of the public API, not just one call's behaviour.
+    // Two things are being asserted together:
+    //
+    //   1. every public apply either records `.explicit` or records the
+    //      provenance of the estimate it was handed — there is no third
+    //      possibility, because no public method accepts a
+    //      `RAWWhiteBalanceSource`;
+    //   2. an estimate's gains and its provenance always describe the same
+    //      measurement, because `RAWWhiteBalanceEstimate` is immutable and
+    //      only the estimator can mint one.
+    //
+    // The compile-time half — that `apply(to:gains:gainSource:)` no longer
+    // exists and that these records cannot be constructed outside the module
+    // — cannot be expressed as a passing test, since these tests are inside
+    // the module. It is enforced by the access levels themselves.
+
+    @Test("Every explicit-gain overload records .explicit, on all three shapes")
+    func explicitOverloadsAlwaysRecordExplicit() throws {
+        let processed = try RAWWhiteBalanceReprocessingTests.processed()
+        let gains = RAWWhiteBalanceGains(plane0: 2, plane1: 3, plane2: 4, plane3: 5)
+        let balancer = RAWWhiteBalancer()
+
+        let bare = try balancer.apply(to: processed.mosaic, gains: gains)
+        #expect(bare.processing.gainSource == .explicit)
+
+        let wrapped = try balancer.apply(to: processed, gains: gains)
+        #expect(wrapped.processing.gainSource == .explicit)
+
+        let replaced = try balancer.apply(
+            gains: RAWWhiteBalanceGains(plane0: 5, plane1: 4, plane2: 3, plane3: 2),
+            replacing: wrapped
+        )
+        #expect(replaced.processing.gainSource == .explicit)
+    }
+
+    @Test("Every estimate overload records that same estimate's provenance")
+    func estimateOverloadsCarryTheirOwnProvenance() throws {
+        let processed = try RAWWhiteBalanceReprocessingTests.processed()
+        let estimator = RAWWhiteBalanceEstimator()
+        let balancer = RAWWhiteBalancer()
+        let region = RAWActiveAreaRegion(originRow: 0, originColumn: 0, width: 2, height: 2)
+        let estimate = try estimator.estimateNeutralPatch(in: processed.mosaic, region: region)
+
+        func check(_ processing: RAWWhiteBalanceProcessing) {
+            #expect(processing.gains == estimate.gains)
+            #expect(processing.gainSource == .neutralPatch(estimate.provenance))
+        }
+
+        check(try balancer.apply(to: processed.mosaic, estimate: estimate).processing)
+
+        let wrapped = try balancer.apply(to: processed, estimate: estimate)
+        check(wrapped.processing)
+        // The estimate overload on a processed mosaic must keep the
+        // normalised source reachable, exactly as the explicit one does.
+        #expect(wrapped.linearMosaic.values == processed.mosaic.values)
+
+        let replaced = try balancer.apply(estimate: estimate, replacing: wrapped)
+        check(replaced.processing)
+        #expect(replaced.linearMosaic.values == processed.mosaic.values)
+    }
+
+    @Test("Recorded neutral-patch provenance always explains the gains beside it")
+    func recordedProvenanceExplainsTheRecordedGains() throws {
+        let processed = try RAWWhiteBalanceReprocessingTests.processed()
+        let region = RAWActiveAreaRegion(originRow: 0, originColumn: 0, width: 2, height: 2)
+        let estimate = try RAWWhiteBalanceEstimator()
+            .estimateNeutralPatch(in: processed.mosaic, region: region)
+        let balanced = try RAWWhiteBalancer().apply(to: processed, estimate: estimate)
+
+        guard case .neutralPatch(let source) = balanced.processing.gainSource else {
+            Issue.record("expected a neutral-patch source")
+            return
+        }
+
+        // Recompute each gain from the provenance alone. The recorded
+        // measurement really is the one that produced the recorded numbers,
+        // rather than an unrelated measurement stapled to them.
+        for plane in 0..<RAWWhiteBalanceGains.planeCount {
+            let gain = try #require(balanced.processing.gains.gain(forColorPlane: plane))
+            guard let statistics = source.statistics.statistics(forColorPlane: plane),
+                  let mean = statistics.mean
+            else {
+                #expect(gain == 1)
+                continue
+            }
+            #expect(gain == Float(source.targetMean / mean))
+        }
+    }
+
     @Test("Estimation reads a pre-white-balance mosaic and produces no image")
     func estimationProducesNoImage() throws {
         let mosaic = Self.mosaic(width: 4, height: 4, planeValues: Self.rgbgPlaneValues)

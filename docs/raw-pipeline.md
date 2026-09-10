@@ -260,8 +260,25 @@ do.
 Provenance is `RAWWhiteBalanceSource.neutralPatch`, carrying the region, the
 policy, the per-plane sample counts and means, and the target mean. It does not
 repeat the gains — those already live on `RAWWhiteBalanceProcessing.gains`, and
-two copies could disagree. `RAWWhiteBalancer.apply(to:estimate:)` takes an
-estimate whole so the two halves cannot be mismatched.
+two copies could disagree.
+
+That gains and provenance describe the same measurement is enforced by the
+public API, not by call-site discipline. `RAWWhiteBalancer` exposes exactly two
+operations, and each determines its own provenance:
+
+```text
+apply(to:gains:)      → the caller's literal numbers → .explicit
+apply(to:estimate:)   → an estimate, whole           → that estimate's own provenance
+```
+
+No public method accepts a `RAWWhiteBalanceSource` beside a set of gains; the
+one helper that pairs them is private. `RAWWhiteBalanceEstimate` holds `let`
+properties behind a module-internal initialiser, as do
+`RAWNeutralPatchWhiteBalanceSource`, `RAWNeutralPatchStatistics` and
+`RAWColorPlaneStatistics` — all four are readable in full from anywhere, and
+mintable only by the estimator that measured them. So gains carrying a
+neutral-patch measurement that did not produce them are unrepresentable rather
+than merely discouraged.
 
 Cost is `O(samples in the region)` with constant auxiliary memory: four
 `Double` sums and four counters. See

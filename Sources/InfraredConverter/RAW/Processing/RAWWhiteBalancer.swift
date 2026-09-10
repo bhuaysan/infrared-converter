@@ -43,9 +43,26 @@ import Foundation
 ///
 /// `RAWWhiteBalanceEstimator` is the first such producer. Its scale policy is
 /// entirely resolved before this stage sees anything: what arrives here is
-/// four numbers, and they are multiplied as they are. The `estimate:`
-/// overloads below take an estimate whole so its gains and its provenance
-/// cannot be mismatched; they add no behaviour beyond that.
+/// four numbers, and they are multiplied as they are.
+///
+/// ## Two public operations, and provenance follows from which one you call
+///
+/// There is deliberately no public way to hand this stage a set of gains *and*
+/// a `RAWWhiteBalanceSource` for them. Only two things can be applied, and
+/// each determines its own provenance:
+///
+/// ```text
+/// apply(to:gains:)      → the caller's literal numbers → .explicit
+/// apply(to:estimate:)   → an estimate, whole           → .neutralPatch(that estimate's own provenance)
+/// ```
+///
+/// A third shape — gains here, provenance there — would let a caller record a
+/// neutral-patch measurement that did not produce the numbers being applied,
+/// which is a lie the archive would then carry forever. The private
+/// `apply(to:gains:source:)` helper below does take both, because the two
+/// public entry points have to reach a single implementation; it is not
+/// public, so the mismatch is unrepresentable from outside rather than merely
+/// discouraged.
 ///
 /// ## Gains are literal
 ///
@@ -86,22 +103,39 @@ import Foundation
 public struct RAWWhiteBalancer: Sendable {
     public init() {}
 
-    /// Applies explicit per-CFA-plane gains to a normalised mosaic.
+    /// Applies explicit per-CFA-plane gains to a normalised mosaic, recording
+    /// `.explicit` provenance.
     ///
     /// The gains are validated in full before any pixel is touched, so an
     /// invalid gain fails immediately rather than partway through a
     /// 12-megapixel buffer.
     ///
+    /// Use `apply(to:estimate:)` for gains an estimator produced: it carries
+    /// that estimate's own measurement into provenance, which this overload
+    /// cannot and must not do.
+    ///
     /// - Parameters:
     ///   - mosaic: the normalised, pre-white-balance mosaic.
     ///   - gains: the literal multipliers, indexed by CFA colour plane.
-    ///   - gainSource: how those gains were arrived at, recorded in
-    ///     provenance. Only `.explicit` exists today.
     /// - Throws: `RAWProcessingError`.
     public func apply(
         to mosaic: LinearRAWMosaic,
+        gains: RAWWhiteBalanceGains
+    ) throws -> WhiteBalancedRAWMosaic {
+        try apply(to: mosaic, gains: gains, source: .explicit)
+    }
+
+    /// The single implementation both public entry points reach.
+    ///
+    /// Private, and it must stay private: it is the one signature in this
+    /// file that can pair arbitrary gains with arbitrary provenance. Its two
+    /// callers below each supply a `source` that is true of the `gains`
+    /// beside it — `.explicit` for the caller's own numbers, and an estimate's
+    /// own provenance for that same estimate's gains.
+    private func apply(
+        to mosaic: LinearRAWMosaic,
         gains: RAWWhiteBalanceGains,
-        gainSource: RAWWhiteBalanceSource = .explicit
+        source: RAWWhiteBalanceSource
     ) throws -> WhiteBalancedRAWMosaic {
         try gains.validate()
 
@@ -208,24 +242,24 @@ public struct RAWWhiteBalancer: Sendable {
             sensorColorLayout: layout,
             processing: RAWWhiteBalanceProcessing(
                 gains: gains,
-                gainSource: gainSource,
+                gainSource: source,
                 linearProcessing: mosaic.processing
             )
         )
     }
 
-    /// Applies gains to a normalised result, keeping that whole pre-white-
-    /// balance state reachable on the returned value's `source`.
+    /// Applies explicit gains to a normalised result, keeping that whole
+    /// pre-white-balance state reachable on the returned value's `source`.
+    /// Provenance is `.explicit`.
     ///
     /// Use this rather than the bare-mosaic overload whenever the caller may
     /// want to change the gains later: the result carries everything needed
     /// to re-balance from the normalised source.
     public func apply(
         to processed: ProcessedRAWMosaic,
-        gains: RAWWhiteBalanceGains,
-        gainSource: RAWWhiteBalanceSource = .explicit
+        gains: RAWWhiteBalanceGains
     ) throws -> WhiteBalancedProcessedRAWMosaic {
-        let balanced = try apply(to: processed.mosaic, gains: gains, gainSource: gainSource)
+        let balanced = try apply(to: processed.mosaic, gains: gains, source: .explicit)
         return WhiteBalancedProcessedRAWMosaic(source: processed, mosaic: balanced)
     }
 
@@ -238,10 +272,9 @@ public struct RAWWhiteBalancer: Sendable {
     /// black subtraction and normalisation are not re-run.
     public func apply(
         gains: RAWWhiteBalanceGains,
-        replacing previous: WhiteBalancedProcessedRAWMosaic,
-        gainSource: RAWWhiteBalanceSource = .explicit
+        replacing previous: WhiteBalancedProcessedRAWMosaic
     ) throws -> WhiteBalancedProcessedRAWMosaic {
-        try apply(to: previous.source, gains: gains, gainSource: gainSource)
+        try apply(to: previous.source, gains: gains)
     }
 
     // MARK: - Applying an estimate
@@ -249,9 +282,14 @@ public struct RAWWhiteBalancer: Sendable {
     // These overloads take an estimate whole. They exist because the gains
     // and the provenance that explains them are two halves of one result, and
     // splitting them by hand at every call site is an easy way to record a
-    // measurement that did not produce the numbers that were applied. Passing
-    // the estimate makes that mismatch unrepresentable rather than merely
-    // discouraged.
+    // measurement that did not produce the numbers that were applied.
+    //
+    // Passing the estimate is not merely the tidy way to do this — it is the
+    // only way. `RAWWhiteBalanceEstimate`'s two properties are `let` and its
+    // initialiser is module-internal, so an estimate always holds the gains
+    // its own provenance produced; and no public method here accepts a
+    // `RAWWhiteBalanceSource`, so `.neutralPatch` provenance cannot reach a
+    // result any other way.
     //
     // Nothing about the apply stage changes here. The gains are still
     // multiplied literally, and the estimator's scale policy has already been
@@ -264,7 +302,7 @@ public struct RAWWhiteBalancer: Sendable {
         to mosaic: LinearRAWMosaic,
         estimate: RAWWhiteBalanceEstimate
     ) throws -> WhiteBalancedRAWMosaic {
-        try apply(to: mosaic, gains: estimate.gains, gainSource: estimate.source)
+        try apply(to: mosaic, gains: estimate.gains, source: estimate.source)
     }
 
     /// Applies an estimate to a normalised result, keeping that whole
@@ -274,7 +312,10 @@ public struct RAWWhiteBalancer: Sendable {
         to processed: ProcessedRAWMosaic,
         estimate: RAWWhiteBalanceEstimate
     ) throws -> WhiteBalancedProcessedRAWMosaic {
-        try apply(to: processed, gains: estimate.gains, gainSource: estimate.source)
+        let balanced = try apply(
+            to: processed.mosaic, gains: estimate.gains, source: estimate.source
+        )
+        return WhiteBalancedProcessedRAWMosaic(source: processed, mosaic: balanced)
     }
 
     /// Re-balances an already-balanced result from a new estimate, starting
