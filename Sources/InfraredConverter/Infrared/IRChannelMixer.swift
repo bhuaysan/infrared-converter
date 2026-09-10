@@ -82,12 +82,19 @@ import Foundation
 ///
 /// ## Two exact paths, chosen by the matrix
 ///
-/// - **Identity** performs no arithmetic at all: every `Float` bit pattern
-///   survives, `-0.0` included.
+/// - **Identity** performs no arithmetic at all: every accepted value's
+///   `Float` bit pattern survives, `-0.0` included.
 /// - **The red/blue permutation** copies channels rather than computing three
 ///   dot products, which is both cheaper and *more exact*: `0*R + 0*G + 1*B`
 ///   is mathematically right but can change a signed zero's sign, and a
 ///   permutation should not alter a single bit.
+///
+/// "Accepted" is the operative word on both. The stage's input contract is
+/// **finite** `Float32`, and both paths enforce it before they preserve
+/// anything: a NaN or an infinity is refused with its coordinate and channel,
+/// on every path, not copied through. So the guarantee is that no finite value
+/// this stage accepts is altered by an identity or a permutation — not that
+/// every `Float32` bit pattern reaches the output.
 ///
 /// The execution path is decided by the **matrix value**; the provenance is
 /// decided by how the `IRChannelMix` was constructed. An
@@ -230,9 +237,10 @@ public struct IRChannelMixer: Sendable {
     /// Written as copies rather than three dot products. `0*R + 0*G + 1*B` is
     /// mathematically the same number but not necessarily the same *bits*: it
     /// turns a `-0.0` blue into `+0.0`. A permutation moves values, so this
-    /// moves them, and every source bit pattern survives — signed zeros,
-    /// negatives, values above `1`, and the largest and smallest finite
-    /// magnitudes alike.
+    /// moves them, and every accepted source value's bit pattern survives —
+    /// signed zeros, negatives, values above `1`, and the largest and smallest
+    /// finite magnitudes alike. Non-finite samples are refused below rather
+    /// than moved, so the surviving set is exactly the finite one.
     ///
     /// One owned output buffer is allocated, because the values genuinely have
     /// to be reordered; copy-on-write cannot help when the contents change.

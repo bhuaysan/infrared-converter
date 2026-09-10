@@ -74,7 +74,10 @@ struct IRChannelMixerTests {
         Float.leastNonzeroMagnitude, -Float.leastNonzeroMagnitude,
     ]
 
-    @Test("The identity mix preserves every bit pattern")
+    /// Every value here is finite, which is the stage's input contract. That
+    /// the non-finite ones are *refused* rather than preserved is
+    /// `IRChannelMixerErrorTests`; the two together are the whole policy.
+    @Test("The identity mix preserves the bit pattern of every accepted value")
     func identityPreservesBits() throws {
         let input = Self.image(width: 2, height: 2, values: Self.awkwardValues)
         let output = try IRChannelMixer().apply(to: input, mix: .identity)
@@ -167,7 +170,7 @@ struct IRChannelMixerTests {
     /// The numerical path is decided by the matrix; the provenance by how the
     /// mix was made. An explicit identity matrix gets the fast path and keeps
     /// `.explicit`.
-    @Test("An explicit identity matrix is bit-preserving and still .explicit")
+    @Test("An explicit identity matrix preserves accepted bits and stays .explicit")
     func explicitIdentityKeepsItsProvenance() throws {
         let input = Self.image(width: 2, height: 2, values: Self.awkwardValues)
         let mix = IRChannelMix.explicit(matrix: .identity)

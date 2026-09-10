@@ -687,8 +687,8 @@ the source cannot be mismatched. Three origins exist:
 
 | Factory | Provenance | What it is |
 | --- | --- | --- |
-| `.identity` | `.identity` | A creative **no-op**: no remapping was requested and the stage was traversed anyway. Bit-preserving. |
-| `.redBlueSwap` | `.redBlueSwap` | `outputR = inputB`, `outputG = inputG`, `outputB = inputR`. The canonical first infrared creative operation. Bit-preserving. |
+| `.identity` | `.identity` | A creative **no-op**: no remapping was requested and the stage was traversed anyway. Bit-preserving for accepted values. |
+| `.redBlueSwap` | `.redBlueSwap` | `outputR = inputB`, `outputG = inputG`, `outputB = inputR`. The canonical first infrared creative operation. Bit-preserving for accepted values. |
 | `.explicit(matrix:)` | `.explicit` | A matrix the caller decided on. The project makes no claim about it. |
 
 There is **no default mix** on any entry point. An explicit matrix that happens
@@ -719,6 +719,18 @@ not alter a bit. A general matrix accumulates each output channel in `Double`
 and narrows to `Float` exactly once, for the reason the working-colour stage
 gives. Non-finite inputs and results fail with the coordinate and channel,
 reported as `IRProcessingError`.
+
+Those two facts sit together deliberately, and "bit-preserving" has to be read
+against the second one:
+
+```text
+finite input value      identity / permutation preserve its bit pattern exactly
+NaN or infinity         refused with its coordinate and channel — never copied
+```
+
+The identity and permutation paths validate before they preserve. What survives
+untouched is every value the stage **accepts**; what does not survive is not
+altered either, it is rejected.
 
 #### Output
 

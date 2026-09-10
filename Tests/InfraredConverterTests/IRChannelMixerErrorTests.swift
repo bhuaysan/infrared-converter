@@ -10,6 +10,12 @@ import Foundation
 /// defends it: the identity path, the red/blue permutation and the general
 /// matrix all report the coordinate and channel of the first value they cannot
 /// use, rather than clamping it or letting it through.
+///
+/// This is the other half of the bit-preservation claim `IRChannelMixerTests`
+/// makes. Identity and the permutation preserve the bit pattern of every value
+/// the stage **accepts**; the values it does not accept — NaN and infinity —
+/// are refused here, on those same two paths. Neither statement is true
+/// without the other.
 @Suite("IRChannelMixer errors")
 struct IRChannelMixerErrorTests {
 

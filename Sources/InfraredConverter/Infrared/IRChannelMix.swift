@@ -158,7 +158,11 @@ public struct IRChannelMix: Equatable, Sendable {
     ///
     /// It is not a camera transform and not a colour conversion; nothing about
     /// the coordinates changes. `IRChannelMixer` gives it a path that performs
-    /// no arithmetic at all, so every `Float` bit pattern survives.
+    /// no arithmetic at all, so every **accepted** value's `Float` bit pattern
+    /// survives — `-0.0` included. Accepted means finite: the stage refuses
+    /// NaN and infinity on this path exactly as on the others, so bit
+    /// preservation is a promise about the values it lets through, not about
+    /// every `Float` there is.
     public static let identity = IRChannelMix(
         workingColorSpace: .extendedLinearSRGB,
         matrix: .identity,
@@ -190,11 +194,13 @@ public struct IRChannelMix: Equatable, Sendable {
     /// primaries change, no chromatic adaptation happens, and nothing is
     /// measured.
     ///
-    /// ## Bit-exact
+    /// ## Bit-exact for the values it accepts
     ///
     /// Because it is a permutation rather than arithmetic, `IRChannelMixer`
-    /// copies the channels directly, preserving every `Float` bit pattern
-    /// including `-0.0`.
+    /// copies the channels directly, preserving the `Float` bit pattern of
+    /// every finite value — `-0.0` included. Non-finite inputs are not
+    /// preserved and not passed through: they are refused, with their
+    /// coordinate and channel.
     public static let redBlueSwap = IRChannelMix(
         workingColorSpace: .extendedLinearSRGB,
         matrix: redBlueSwapMatrix,

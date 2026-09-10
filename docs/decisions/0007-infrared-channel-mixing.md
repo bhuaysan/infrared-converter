@@ -171,12 +171,18 @@ traversed anyway*. A rendering that went through the creative stage and asked
 for nothing is a different fact from one that never reached it, and the
 provenance chain records which.
 
-## Decision 16 — Identity preserves `Float` bit patterns
+## Decision 16 — Identity preserves the bit pattern of every value it accepts
 
 A dedicated path performs no arithmetic: `-0.0`, negatives, values above `1`,
 `greatestFiniteMagnitude` and `leastNonzeroMagnitude` all survive unchanged.
 The values are handed back as the same immutable array, so `Array`'s
 copy-on-write makes the path free in memory as well as in arithmetic.
+
+The set this promise covers is the **finite** values, which is the stage's
+input contract. NaN and infinity are refused on this path exactly as on the
+others (Decision 26) — they are not preserved and not passed through. So the
+claim is "no accepted value is altered", never "every `Float32` bit pattern
+reaches the output": the two differ precisely on the values the stage rejects.
 
 ## Decision 17 — Red/blue swap is the canonical first IR creative operation
 
@@ -193,7 +199,11 @@ a working-space transform, and not a physical model of any filter.
 
 `0*R + 0*G + 1*B` is mathematically right and can still change a signed zero's
 sign. A permutation moves values, so the implementation moves them: one
-reordered output buffer, every source bit pattern intact.
+reordered output buffer, every accepted source value's bit pattern intact.
+
+The same qualification as Decision 16 applies, and for the same reason: the
+values moved are the finite ones, because the non-finite ones are refused
+before anything is moved.
 
 ## Decision 19 — An explicit matrix equal to a built-in stays `.explicit`
 
