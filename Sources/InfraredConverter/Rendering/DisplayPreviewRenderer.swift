@@ -112,7 +112,12 @@ public struct DisplayPreviewRenderer: Sendable {
         }
 
         let scale = settings.exposureScale
-        guard scale.isFinite else {
+        // Both halves are checked. `2^EV` is finite for a NaN EV in neither
+        // direction, but it *is* finite for `−infinity`: `exp2(−infinity)` is
+        // `0`, a perfectly usable-looking scale that would silently render a
+        // black frame from a nonsense exposure. The EV itself has to be finite
+        // too, which is why this is not a check on the scale alone.
+        guard settings.exposureEV.isFinite, scale.isFinite else {
             throw DisplayRenderingError.nonFiniteExposure(
                 exposureEV: settings.exposureEV, scale: scale
             )

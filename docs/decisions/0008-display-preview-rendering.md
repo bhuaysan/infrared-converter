@@ -142,6 +142,11 @@ The first two share one case, because both mean "this exposure cannot be
 applied" and both are fully diagnosed by reporting the EV and the scale it
 produced.
 
+Both the EV **and** its scale are checked, not just the scale. `exp2(−infinity)`
+is `0` — a perfectly finite-looking multiplier that would render a black frame
+from a nonsense exposure without a word. A scale-only check would let exactly
+that through.
+
 Refusing the third rather than letting the clip absorb it is the point. A
 sample that overflowed to infinity would clip to `1` and reach the screen as a
 perfectly ordinary white pixel, and nothing downstream could ever tell it apart

@@ -4,8 +4,9 @@ import Foundation
 
 /// The processed-state wrappers — `ProcessedRAWMosaic`,
 /// `WhiteBalancedProcessedRAWMosaic`, `DemosaicedProcessedRAWImage`,
-/// `WorkingColorProcessedRAWImage` and `IRChannelMixedProcessedRAWImage` — are
-/// pairings a stage minted, not pairings a caller assembled.
+/// `WorkingColorProcessedRAWImage`, `IRChannelMixedProcessedRAWImage` and
+/// `DisplayPreviewProcessedRAWImage` — are pairings a stage minted, not
+/// pairings a caller assembled.
 ///
 /// Their initialisers are module-internal, so outside the module a source
 /// from one processing run cannot be attached to a result from another. Swift
@@ -98,7 +99,24 @@ struct ProcessedWrapperProvenanceTests {
         #expect(mixed.source.source.source.source.source.mosaic == decoded.mosaic)
         #expect(mixed.url == decoded.url)
 
-        // The provenance record reaches back through all five stages.
+        // Stage 6 mints DisplayPreviewProcessedRAWImage over that.
+        let preview = try DisplayPreviewRenderer().render(
+            mixed,
+            settings: DisplayRenderSettings(
+                exposureEV: 0, rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
+            )
+        )
+        #expect(preview.channelMixedImage == mixed.image)
+        #expect(preview.workingColorImage == working.image)
+        #expect(preview.source.source.source.source.source.source.mosaic == decoded.mosaic)
+        #expect(preview.url == decoded.url)
+
+        // The provenance record reaches back through all five stages upstream
+        // of the display one, and the display record reaches through it.
+        #expect(preview.processing.mixSource == .redBlueSwap)
+        #expect(preview.processing.whiteBalanceGains == gains)
+        #expect(preview.processing.exposureEV == 0)
+
         let processing = mixed.processing
         #expect(processing.mixSource == .redBlueSwap)
         #expect(processing.cameraToWorkingTransformSource == .sensorRGBIdentityFalseColor)

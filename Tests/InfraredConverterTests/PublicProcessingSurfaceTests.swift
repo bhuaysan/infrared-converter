@@ -11,9 +11,9 @@ import InfraredConverter
 ///
 /// Every processed-state wrapper has a module-internal initialiser, so outside
 /// the module a `ProcessedRAWMosaic`, a `WhiteBalancedProcessedRAWMosaic`, a
-/// `DemosaicedProcessedRAWImage`, a `WorkingColorProcessedRAWImage` or an
-/// `IRChannelMixedProcessedRAWImage` can only be obtained from the stage that
-/// produced it. Swift has no way to
+/// `DemosaicedProcessedRAWImage`, a `WorkingColorProcessedRAWImage`, an
+/// `IRChannelMixedProcessedRAWImage` or a `DisplayPreviewProcessedRAWImage`
+/// can only be obtained from the stage that produced it. Swift has no way to
 /// assert that a given line *fails* to compile, so absence cannot be tested
 /// directly. What can be pinned, and is pinned here, is the consequence that
 /// matters: with only the public surface available, the whole chain is still
@@ -151,13 +151,49 @@ struct PublicProcessingSurfaceTests {
         _ = mixed.metadata
         #expect(mixed.url == decoded.url)
 
+        // The settings are spelled out here, because there is no default on
+        // the public API to fall back on — which is the point.
+        let settings = DisplayRenderSettings(
+            exposureEV: 0,
+            rangePolicy: .hardClipToDisplayRange,
+            encoding: .sRGB
+        )
+        let preview: DisplayPreviewProcessedRAWImage = try DisplayPreviewRenderer()
+            .render(mixed, settings: settings)
+        _ = preview.source
+        _ = preview.image
+        _ = preview.channelMixedImage
+        _ = preview.workingColorImage
+        _ = preview.demosaicedImage
+        _ = preview.whiteBalancedMosaic
+        _ = preview.linearMosaic
+        _ = preview.processing
+        _ = preview.settings
+        _ = preview.mix
+        _ = preview.cameraToWorkingTransform
+        _ = preview.metadata
+        #expect(preview.url == decoded.url)
+
         // The whole chain is readable from the last wrapper alone.
-        #expect(mixed.source.source.source.source.source.mosaic == decoded.mosaic)
+        #expect(preview.source.source.source.source.source.source.mosaic == decoded.mosaic)
         #expect(mixed.image.isGeometryConsistent)
         #expect(mixed.processing.whiteBalanceApplied)
         #expect(mixed.processing.channelMixApplied)
         #expect(mixed.processing.mixSource == .redBlueSwap)
         #expect(demosaiced.image.isGeometryConsistent)
+
+        // And the preview's own record is fully readable externally.
+        #expect(preview.image.isGeometryConsistent)
+        #expect(preview.processing.exposureEV == 0)
+        #expect(preview.processing.rangePolicy == .hardClipToDisplayRange)
+        #expect(preview.processing.encoding == .sRGB)
+        #expect(preview.processing.displayRangeClippingApplied)
+        #expect(!preview.processing.sceneLinear)
+        #expect(!preview.processing.toneMappingApplied)
+        #expect(preview.processing.mixSource == .redBlueSwap)
+        #expect(preview.processing.clippedSampleCount
+            == preview.processing.clippedLowSampleCount
+                + preview.processing.clippedHighSampleCount)
     }
 
     @Test("The bare value types remain publicly constructible")
@@ -190,5 +226,41 @@ struct PublicProcessingSurfaceTests {
             )
         )
         #expect(balanced.isGeometryConsistent)
+
+        // The display representation is a data type too, for the same reason.
+        let preview = DisplayEncodedPreviewImage(
+            width: 2,
+            height: 2,
+            bytes: Data(count: 12),
+            processing: DisplayPreviewProcessing(
+                settings: DisplayRenderSettings(
+                    exposureEV: 0, rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
+                ),
+                channelMixProcessing: IRChannelMixProcessing(
+                    mix: .identity,
+                    workingColorProcessing: RAWWorkingColorProcessing(
+                        transform: .sensorRGBIdentityFalseColor,
+                        demosaicProcessing: RAWDemosaicProcessing(
+                            algorithm: .bilinearBayer,
+                            sourcePattern: RAWBayerCellPattern(
+                                topLeft: .red,
+                                topRight: .green,
+                                bottomLeft: .green,
+                                bottomRight: .blue
+                            ),
+                            whiteBalanceProcessing: RAWWhiteBalanceProcessing(
+                                gains: .identity,
+                                gainSource: .explicit,
+                                linearProcessing: linearProcessing
+                            )
+                        )
+                    )
+                ),
+                clippedLowSampleCount: 0,
+                clippedHighSampleCount: 0
+            )
+        )
+        #expect(preview.isGeometryConsistent)
+        #expect(preview.bytesPerRow == 6)
     }
 }
