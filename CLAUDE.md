@@ -512,11 +512,15 @@ Do not assume the working representation is automatically a conventional visible
 
 The working representation must be deliberately defined before production IR color transforms depend on it.
 
-Record that decision in an ADR such as:
+That decision is recorded in:
 
 ```text
-docs/decisions/0002-working-color-space.md
+docs/decisions/0006-working-color-space.md
 ```
+
+The working representation is **extended linear sRGB**: sRGB primaries, the sRGB D65 white point, a linear transfer function, Float32 storage, and no clipping to `0...1`.
+
+Choosing that space defines only the coordinate system. How camera-native sensor RGB is mapped into it is a separate decision, carried explicitly by a camera/IR color transform with its own provenance. Do not conflate the two, and do not treat a defined working space as a claim of colorimetric accuracy for an infrared capture.
 
 Never rely on accidental/default ColorSync or framework behavior for major processing decisions.
 
@@ -1007,11 +1011,13 @@ Examples:
 
 ```text
 docs/decisions/0001-use-libraw.md
-docs/decisions/0002-working-color-space.md
-docs/decisions/0003-metal-render-pipeline.md
+docs/decisions/0006-working-color-space.md
+docs/decisions/0007-metal-render-pipeline.md
 ```
 
-The working-representation decision must be recorded before production IR color transforms depend on it.
+The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`.
+
+ADR numbers are assigned in the order decisions are actually made; do not reuse a number that is already taken.
 
 If implementation evidence invalidates a design hypothesis in this file, do not silently work around the contradiction. Update the relevant documentation and deliberately update `CLAUDE.md` if an invariant itself changes.
 

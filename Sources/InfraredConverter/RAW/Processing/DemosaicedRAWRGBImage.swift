@@ -91,9 +91,13 @@ public struct RAWDemosaicProcessing: Equatable, Sendable {
 /// The labels `R`, `G` and `B` identify **which colour filter on this sensor**
 /// produced the response, resolved through the layout's `colorDescription`.
 /// Two cameras' `red` values are not comparable, and writing this buffer to a
-/// file tagged sRGB would be wrong. Converting camera-native RGB into a
-/// defined working representation is a later, explicit stage that does not
-/// exist yet; the working colour space is still undecided (ADR 0002).
+/// file tagged sRGB would be wrong.
+///
+/// Converting camera-native RGB into a defined working representation is a
+/// later, explicit stage: `RAWWorkingColorConverter`, which needs a
+/// `RAWCameraToWorkingColorTransform` chosen by the caller and produces a
+/// `WorkingColorRGBImage` in extended linear sRGB (ADR 0006). Until that stage
+/// has run, these values are in no colour space at all.
 ///
 /// It is also **not clamped**, not gamma-encoded, not oriented, and not a
 /// preview.

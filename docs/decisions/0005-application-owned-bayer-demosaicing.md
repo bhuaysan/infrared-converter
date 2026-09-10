@@ -277,8 +277,10 @@ metadata at all. No gamma or other transfer function is applied. No orientation
 transform is applied.
 
 Converting camera-native RGB into a defined working representation is a later,
-explicit stage. The working colour space remains undecided; ADR 0002 is still
-outstanding on that point.
+explicit stage. That stage now exists: the working colour space is extended
+linear sRGB, reached through an explicit camera-to-working transform — see
+[ADR 0006](0006-working-color-space.md), decided after this one. Nothing about
+it changes the representation this ADR defines, which remains camera-native.
 
 ## Decision 15 — X-Trans is recognised and explicitly unsupported
 
@@ -324,10 +326,12 @@ smaller.
 - The **final production-quality Bayer algorithm**. Bilinear is a reference
   implementation and this ADR says so.
 - The **X-Trans algorithm**.
-- The **working colour space**. Still open; ADR 0002 is outstanding.
+- The **working colour space**. Open at the time of this ADR; decided
+  afterwards in [ADR 0006](0006-working-color-space.md).
 - The **camera colour transform** — including whether a visible-light matrix is
   ever valid for infrared capture, which `CLAUDE.md` already flags as an open
-  question.
+  question. [ADR 0006](0006-working-color-space.md) later made every such
+  transform explicit and opt-in without answering that question.
 - **Tone mapping**, exposure and highlight handling.
 - **Preview / display encoding.**
 - A **GPU implementation**. This is a CPU reference implementation; no

@@ -3,10 +3,11 @@
 Status: accepted
 Date: 2026-09-09
 
-> Numbering note: `CLAUDE.md` names `0002-working-color-space.md` as an
-> expected ADR. That decision is downstream of demosaicing and is still
-> undecided; it will take the next free number when it is made. This ADR took
-> `0002` because it is the decision that actually had to be recorded first.
+> Numbering note: `CLAUDE.md` originally named `0002-working-color-space.md` as
+> an expected ADR. This ADR took `0002` because it is the decision that
+> actually had to be recorded first, and the working-colour-space decision took
+> the next free number when it was made:
+> [ADR 0006](0006-working-color-space.md). `CLAUDE.md` now points there.
 
 ## Context
 

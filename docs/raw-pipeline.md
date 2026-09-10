@@ -3,16 +3,40 @@
 This document defines what a sample *is* at each stage of the RAW path, and
 which stages have and have not run.
 
-It now covers two domains. The **mosaic domain** runs from LibRaw's unpacked
-samples to a white-balanced CFA mosaic: one value per sensor location, colour
-known only through the sensor layout. The **camera-native RGB domain** begins
-at demosaicing: three values per pixel, still linear, still camera-native, and
-still not in any colour space.
+It now covers three domains.
 
-Demosaicing itself is decided — one application-owned reference algorithm, see
-`docs/decisions/0005-application-owned-bayer-demosaicing.md`. What comes after
-it is not: the working colour space, the camera colour transform, tone mapping
-and display encoding all remain undecided.
+```text
+MOSAIC DOMAIN               one value per CFA location; colour only via the layout
+    LinearRAWMosaic
+    WhiteBalancedRAWMosaic
+
+CAMERA-NATIVE RGB DOMAIN    three Float32 per pixel; linear; NOT a colour space
+    DemosaicedRAWRGBImage
+
+WORKING-COLOUR RGB DOMAIN   three Float32 per pixel; linear; extended linear sRGB
+    WorkingColorRGBImage
+```
+
+The **mosaic domain** runs from LibRaw's unpacked samples to a white-balanced
+CFA mosaic. The **camera-native RGB domain** begins at demosaicing: three
+values per pixel, still linear, still the sensor's own filter responses, and
+still not in any colour space. The **working-colour RGB domain** begins at an
+explicit camera-to-working transform: the same layout, the same linearity, but
+the values are now coordinates in a defined space.
+
+Those last two are the pair most easily confused, so they are named apart
+everywhere:
+
+```text
+linear camera-native RGB      what THIS SENSOR's filters responded with
+extended linear sRGB working  coordinates in sRGB primaries at D65, linear
+```
+
+Demosaicing is decided — one application-owned reference algorithm, see
+`docs/decisions/0005-application-owned-bayer-demosaicing.md` — and so is the
+working colour space, see `docs/decisions/0006-working-color-space.md`. What
+comes after them is not: the infrared creative channel transform, exposure,
+tone mapping and display encoding all remain undecided.
 
 `CLAUDE.md` holds the project invariants; this file records the concrete
 implementation as it currently stands.
@@ -87,15 +111,30 @@ LinearRAWMosaic (Float32, unclamped)
 three Float32 per pixel; linear; NOT a colour space
 
                   ↓
-       [FUTURE: camera-native RGB → working colour space]
+       explicit RAWCameraToWorkingColorTransform   ┐
+                  ↓                                ├ RAWWorkingColorConverter
+       WorkingColorRGBImage                        ┘
+
+═══════════ WORKING-COLOUR RGB DOMAIN ══════════════════
+extended linear sRGB; unclamped Float32; still linear
+
                   ↓
-       [FUTURE: exposure / tone / display encoding]
+       [FUTURE: IR channel mixer / false-colour creative transform]
                   ↓
-       [FUTURE: preview / export]
+       [FUTURE: exposure / tone]
+                  ↓
+       [FUTURE: display encoding / preview]
+                  ↓
+       [FUTURE: export]
 ```
 
 `DemosaicedRAWRGBImage` is **not** sRGB, and must not be labelled as such. No
 camera colour matrix has been applied to it; see "Demosaicing" below.
+
+`WorkingColorRGBImage` **is** in extended linear sRGB coordinates — and that is
+a statement about the coordinate system, not about colour accuracy. How the
+sensor responses were mapped into it is a separate fact carried by the
+transform's provenance; see "Camera-native RGB → working colour space".
 
 Estimation is **not** a stage downstream of white balance. It reads the
 pre-white-balance `LinearRAWMosaic`, produces a `RAWWhiteBalanceGains`, and
@@ -121,6 +160,12 @@ produced them. It never multiplies a sample or allocates an image-sized buffer.
 keeps the white-balanced mosaic reachable on `.source` — and the normalised one
 below that — so changing the gains, re-estimating them or switching algorithm
 all restart from the right earlier representation.
+
+`RAWWorkingColorConverter` takes a `DemosaicedProcessedRAWImage` (or a bare
+`DemosaicedRAWRGBImage`) **and an explicit transform** and returns a
+`WorkingColorProcessedRAWImage`, which keeps the camera-native image reachable
+on `.source` so the transform can be changed without demosaicing again. It
+receives no `RAWMetadata` and there is no default transform.
 
 **Automatic estimation does not exist yet.** The caller still chooses which
 samples to measure; nothing decides that on its own, and no filter profile or
@@ -446,6 +491,122 @@ the enforcement is structural: the demosaicer receives no `RAWMetadata` at all,
 so `cam_mul`, `pre_mul`, `rgb_cam` and `cam_xyz` have nothing to arrive
 through.
 
+### Camera-native RGB → working colour space
+
+`RAWWorkingColorConverter` is the second RGB-domain stage. It takes a
+camera-native image and **one explicit transform**, and produces coordinates in
+a defined space.
+
+#### Two decisions, kept apart
+
+```text
+a working colour space   defines the COORDINATE SYSTEM the numbers live in
+a camera / IR transform  decides HOW sensor-native RGB is MAPPED into it
+```
+
+Saying "the working space is extended linear sRGB" settles the first and says
+nothing about the second. For an infrared-modified camera the second has no
+conventional answer, which is why the mapping is always explicit and always
+carries provenance. See `docs/decisions/0006-working-color-space.md`.
+
+#### The working space
+
+`.extendedLinearSRGB`: sRGB primaries, the sRGB D65 white point, a **linear**
+transfer function, `Float32` storage, and no clipping. Finite values below `0`,
+inside `0...1` and above `1` are all legal and all preserved. The nonlinear
+sRGB transfer function is not applied, and neither is any gamma, tone mapping
+or display encoding.
+
+#### The transform
+
+`RAWCameraToWorkingColorTransform` carries the space, a `RAWColorMatrix3x3` and
+the provenance together, and its initialiser is module-internal so the matrix
+and the source cannot be mismatched. Three origins exist:
+
+| Factory | Provenance | What it is |
+| --- | --- | --- |
+| `.sensorRGBIdentityFalseColor` | `.sensorRGBIdentityFalseColor` | Sensor R, G and B assigned to the working axes unchanged. A **deliberate false-colour axis assignment**, not a camera calibration. |
+| `.explicit(matrix:)` | `.explicit` | A matrix the caller decided on. The project makes no claim about it. |
+| `.visibleLightMetadata(from:)` | `.visibleLightMetadataRGBFromCamera` | The file's own `rgbFromCamera`, which is **visible-light calibrated**. Opt-in, diagnostic. |
+
+There is **no default transform** on any entry point, no API that discovers a
+matrix for itself, and no fallback that reaches for metadata when something
+else is missing. That policy does not exist.
+
+#### Identity false colour
+
+The matrix is exactly the identity, and the stage takes a dedicated path that
+performs no arithmetic: every `Float` bit pattern survives, `-0.0` included,
+and copy-on-write means the values are not copied at all. What changes is the
+semantic state and the provenance, not a single number.
+
+It is the assumption-minimal way to put an infrared capture into a defined
+coordinate system. It is **not** a camera calibration, not "correct colour" and
+not "accurate sRGB".
+
+#### The visible-light metadata adapter, and why it is opt-in
+
+`RAWMetadata.ColorMetadata.rgbFromCamera` is a Camera-RGB → sRGB matrix
+calibrated by the vendor or decoder **for visible light**. An
+infrared-converted body shooting through an IR filter is precisely the case it
+does not describe, so every result derived from it is labelled a *visible-light
+metadata transform, diagnostic only for this IR capture* — not an IR camera
+calibration, not a camera-model IR profile, not a filter profile, not a
+recommendation and not a claim of colourimetric accuracy.
+
+Its matrix is 3×4 and the camera-native image has three input channels, so it
+is representable only when the fourth column is exactly zero:
+
+```text
+⎡ r0 r1 r2 0 ⎤        ⎡ r0 r1 r2 ⎤
+⎢ g0 g1 g2 0 ⎥   →    ⎢ g0 g1 g2 ⎥
+⎣ b0 b1 b2 0 ⎦        ⎣ b0 b1 b2 ⎦
+```
+
+`+0.0` and `-0.0` both count as zero and there is no epsilon. A non-zero fourth
+coefficient is refused, never dropped. A missing matrix, a wrong row count, a
+row that is not four coefficients long and a non-finite coefficient are each
+their own typed error.
+
+The adapter reads `rgbFromCamera` and nothing else: `cameraMultipliers` and
+`daylightMultipliers` are not reapplied — white balance already happened in the
+mosaic domain — and `cameraFromXYZ` is neither read nor inverted.
+
+#### The matrix convention
+
+```text
+             ⎡ m00 m01 m02 ⎤   ⎡ cameraR ⎤
+workingRGB = ⎢ m10 m11 m12 ⎥ × ⎢ cameraG ⎥
+             ⎣ m20 m21 m22 ⎦   ⎣ cameraB ⎦
+```
+
+Rows are output channels, columns are input camera channels. Coefficients are
+nine `Double` values in a fixed shape; only non-finite ones are refused, so
+zero, negative, greater-than-one, non-normalised and singular matrices are all
+accepted — infrared false-colour work legitimately uses them.
+
+#### Arithmetic
+
+Each output channel is one dot product accumulated in `Double` and narrowed to
+`Float` exactly once. `Float32` intermediates can overflow where the result
+cannot: `2 × greatestFiniteMagnitude − greatestFiniteMagnitude` is infinity in
+`Float` and exact in `Double`. There is no `Double` image buffer. Non-finite
+inputs, and results that do not survive the narrowing, fail with the
+coordinate and channel rather than being clamped.
+
+#### Output
+
+`WorkingColorRGBImage` uses the same storage contract as the camera-native
+image — tightly packed, row-major, interleaved, three `Float32` per pixel —
+and the same geometry. The shared layout is a coincidence of storage, not a
+shared meaning, which is why the two are separate types.
+
+#### Reprocessing
+
+`WorkingColorProcessedRAWImage` retains the demosaiced source, and
+`convert(using:replacing:)` reaches through it. Transforms never compose:
+replacing `M1` with `M2` gives `M2 × cameraRGB`, not `M2 × (M1 × cameraRGB)`.
+
 ### What the linear stage does not do
 
 | Stage | Applied? |
@@ -507,6 +668,32 @@ white level, the gains and their source — are read through the
 `RAWWhiteBalanceProcessing` it carries rather than copied, so two records of
 the same history cannot disagree.
 
+### What the working-colour stage does not do
+
+| Stage | Applied? |
+| --- | --- |
+| Explicit camera → working 3×3 transform | **yes** |
+| Working colour representation established | **yes** |
+| Clamping / clipping | no |
+| Gamma / transfer function | no |
+| Tone mapping / auto exposure / gamut mapping | no |
+| Display encoding / 8-bit quantisation | no |
+| White balance | no — upstream, in the mosaic domain |
+| Camera or daylight WB multipliers | no — never reapplied |
+| `cameraFromXYZ` inversion | no |
+| Automatic metadata transform selection | no — there is no such policy |
+| Highlight reconstruction | no |
+| Sharpening / noise reduction | no |
+| Orientation | no |
+
+Each is recorded on `RAWWorkingColorProcessing`. The working space, the matrix
+and the transform source are read through the `RAWCameraToWorkingColorTransform`
+it carries, and the upstream chain through the `RAWDemosaicProcessing`, rather
+than copied — so no record of this history can disagree with another.
+
+`isValidatedInfraredCalibration` is `false` for every transform source this
+milestone can produce. A defined coordinate system is not a calibration claim.
+
 ### The two metadata snapshots
 
 Both paths snapshot metadata before any *processing*, but they snapshot
@@ -558,8 +745,9 @@ These terms are distinct and must not be used interchangeably.
 | **Black-corrected sample** | The above, minus the effective black level. | An intermediate inside `RAWMosaicNormalizer`; never a stored representation. |
 | **Normalised sample** | Black-corrected and rescaled against the saturation level, as `Float32`. Not clamped. | `LinearRAWMosaic.values` |
 | **Linear camera-native RGB** | Three `Float32` per pixel — the sensor's own filter responses, interpolated. No camera matrix, no gamma, no colour space. Not clamped. | `DemosaicedRAWRGBImage.values` |
+| **Extended linear sRGB working RGB** | Three `Float32` per pixel — coordinates in sRGB primaries at D65 with a linear transfer function, after one explicit camera → working transform. Not clamped, not gamma encoded. **Not the same thing as the row above.** | `WorkingColorRGBImage.values` |
 | **Decoder-processed RGB** | LibRaw's own full pipeline output: its demosaic, its black/white handling, a camera matrix and gamma. | `RAWImage` (legacy reference path only) |
-| **Working representation** | The project's defined internal processing space. | Not defined. Requires ADR 0002. |
+| **Working representation** | The project's defined internal processing space. | Extended linear sRGB; see ADR 0006. |
 
 ### Unpacked samples are not ADC values
 
@@ -877,6 +1065,67 @@ without decoding the file again. That retention is a deliberate tradeoff at
 this architecture stage, to be revisited by measurement once interactive
 editing exists, not by dropping buffers to make a number smaller.
 
+### After working-colour conversion
+
+> These numbers are **diagnostic**. The identity transform is a deliberate
+> false-colour axis assignment into extended linear sRGB, not a camera
+> calibration of this infrared-converted body, and nothing here validates
+> colour.
+
+Input: the demosaiced camera-native image above.
+
+**Identity false colour** (`.sensorRGBIdentityFalseColor`):
+
+| | |
+| --- | --- |
+| Output dimensions | 4056 × 3040, unchanged |
+| Output values | 36 990 720 `Float32` |
+| Logical payload | 147 962 880 bytes ≈ 148 MB |
+| Whole-buffer bit identity with the camera-native source | yes, 0 mismatches |
+| Non-finite values | 0 |
+
+Every per-channel statistic is identical to the camera-native table above,
+because the identity path changes no numbers — R minimum 0.010667, G maximum
+0.760906, B 11 values below zero, and so on.
+
+Memory, stated precisely: the 148 MB is the buffer's **logical payload**. For
+the identity path it is *not* incremental physical allocation — `Array`'s
+copy-on-write means the working image shares its immutable source's storage.
+Neither figure is process RSS. A non-identity matrix does allocate one new
+output buffer of that size.
+
+In a **debug** build the identity conversion takes roughly 1.4 s and a general
+3×3 matrix roughly 1.6 s over the full frame (`-Onone`, bounds checks on). No
+optimised-build measurement has been taken and no performance claim is made.
+
+**The file's own `rgbFromCamera`**, read rather than assumed:
+
+```text
+row 0:  1.7544682   -0.5938559   -0.16061233   0.0
+row 1: -0.25168633   1.8621225   -0.61043614   0.0
+row 2:  0.05752118  -0.69685745   1.6393362    0.0
+```
+
+The fourth column is exactly zero, so this matrix **is** representable as a 3×3
+camera-native transform, and the adapter derives its first three columns
+unchanged (determinant ≈ 4.374). Running it gives:
+
+| Channel | Minimum | Maximum | Mean | < 0 | > 1 |
+| --- | --- | --- | --- | --- | --- |
+| R | −0.071603 | 0.543874 | 0.130825 | 2 | 0 |
+| G | −0.247599 | 1.135580 | 0.135133 | 28 | 2 |
+| B | −0.037440 | 0.932444 | 0.118433 | 592 | 0 |
+
+The negative and above-one coordinates are retained, not clamped — which is
+what the extended range is for, and exactly what a matrix with negative
+coefficients produces.
+
+> This result is a **visible-light metadata transform, diagnostic only for this
+> IR capture**. It is not an IR camera calibration, not an E-PL3 IR profile,
+> not a filter profile, not a recommendation, and not a claim of colourimetric
+> accuracy. That the matrix maps into the chosen working space does not
+> establish that it is physically appropriate after infrared conversion.
+
 ## Decoder warnings by stage
 
 LibRaw accumulates `process_warnings` with `|=` and never clears it outside
@@ -898,16 +1147,18 @@ can.
 
 ## Not yet decided
 
-Demosaicing itself is no longer on this list. One application-owned reference
-algorithm is decided and implemented, and the representation it produces is
-stable enough for a second algorithm to target. What remains open is
-everything downstream of it, plus image quality:
+Neither demosaicing nor the working colour space is on this list any more. One
+application-owned reference algorithm is decided and implemented, and the
+working representation is extended linear sRGB (ADR 0006), reached through an
+explicit, provenance-carrying transform. What remains open is everything
+downstream of that, plus image quality:
 
-- The **working colour space**, which is downstream of demosaicing. Nothing
-  converts `DemosaicedRAWRGBImage` into one yet, and it must not be treated as
-  sRGB or anything else in the meantime.
-- The **camera colour transform** — including whether a visible-light matrix is
-  ever valid for infrared capture.
+- The **infrared creative colour transform** — channel mixing, false-colour
+  rendering, hue remapping — which belongs *after* the working-space boundary
+  and is deliberately not folded into the camera-to-working transform.
+- Whether a **visible-light matrix is ever appropriate for infrared capture**.
+  The adapter exists as an opt-in diagnostic; that is not an endorsement, and
+  no IR calibration methodology has been decided.
 - **Tone mapping, exposure and display encoding.**
 - The **final production-quality Bayer algorithm**. `.bilinearBayer` is a
   correctness reference, not an image-quality answer.

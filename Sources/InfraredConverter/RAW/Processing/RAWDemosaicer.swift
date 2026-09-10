@@ -15,7 +15,9 @@ import Foundation
 ///       ↓
 /// DemosaicedRAWRGBImage           ← linear camera-native RGB
 ///       ↓
-/// [FUTURE: camera-native RGB → working colour space]
+/// RAWWorkingColorConverter        ← needs an explicit camera → working transform
+///       ↓
+/// WorkingColorRGBImage            ← extended linear sRGB
 /// ```
 ///
 /// ## LibRaw is not involved
