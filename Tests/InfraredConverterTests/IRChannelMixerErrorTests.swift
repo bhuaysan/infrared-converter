@@ -111,10 +111,13 @@ struct IRChannelMixerErrorTests {
         }
     }
 
-    /// The `Double` accumulation itself going non-finite: two very large
-    /// coefficients on very large inputs exceed even `Double`'s range.
-    @Test("A Double accumulation that is not finite is refused")
-    func doubleOverflowIsRefused() throws {
+    /// A single `coefficient x input` product leaving `Double`'s range.
+    ///
+    /// This is the easier half of the accumulation contract: one term is
+    /// already infinite before anything is added to it. The harder half — a
+    /// sum of terms that are each finite — is the test below.
+    @Test("A single Double product that is not finite is refused")
+    func doubleProductOverflowIsRefused() throws {
         let matrix = try RAWColorMatrix3x3(
             m00: .greatestFiniteMagnitude, m01: .greatestFiniteMagnitude, m02: 0,
             m10: 0, m11: 1, m12: 0,
@@ -128,6 +131,49 @@ struct IRChannelMixerErrorTests {
             guard case .nonFiniteChannelMixResult(let row, let column, let channel) =
                     error as? IRProcessingError else { return false }
             return row == 0 && column == 0 && channel == .red
+        }
+    }
+
+    /// The genuine accumulation overflow: nothing about any single term is out
+    /// of range, and only their **sum** leaves `Double`.
+    ///
+    /// ```text
+    /// coefficients   0.75 x Double.greatestFiniteMagnitude   finite
+    /// inputs         1                                       finite
+    /// each product   0.75 x Double.greatestFiniteMagnitude   finite
+    /// their sum      1.5  x Double.greatestFiniteMagnitude   NOT finite
+    /// ```
+    ///
+    /// Two terms of `0.75 x greatestFiniteMagnitude` overflow whichever order
+    /// the additions happen in, so this does not depend on the implementation
+    /// associating the dot product left to right. It is the case that
+    /// distinguishes checking each product from checking the accumulator, and
+    /// it is why the accumulator is what the mixer checks.
+    @Test("A Double sum of finite products that is not finite is refused")
+    func doubleAccumulationOverflowIsRefused() throws {
+        let large = 0.75 * Double.greatestFiniteMagnitude
+        // Stated rather than assumed: every coefficient and every product here
+        // is finite, and only the sum is not.
+        #expect(large.isFinite)
+        #expect((large + large).isFinite == false)
+
+        let matrix = try RAWColorMatrix3x3(
+            m00: 1, m01: 0, m02: 0,
+            // Output green takes finite contributions from input red and input
+            // green whose sum cannot be represented.
+            m10: large, m11: large, m12: 0,
+            m20: 0, m21: 0, m22: 1
+        )
+        let input = IRChannelMixerTests.pixel(1, 1, 0.5)
+        #expect((matrix.m10 * 1.0).isFinite)
+        #expect((matrix.m11 * 1.0).isFinite)
+
+        #expect {
+            _ = try IRChannelMixer().apply(to: input, mix: .explicit(matrix: matrix))
+        } throws: { error in
+            guard case .nonFiniteChannelMixResult(let row, let column, let channel) =
+                    error as? IRProcessingError else { return false }
+            return row == 0 && column == 0 && channel == .green
         }
     }
 
