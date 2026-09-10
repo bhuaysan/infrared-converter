@@ -103,9 +103,9 @@ public struct RAWBayerCellPattern: Equatable, Sendable {
     ///    plane;
     /// 4. every named plane index is addressable in `colorDescription`;
     /// 5. every letter is `R`, `G` or `B`;
-    /// 6. rows 2 through 7 repeat the first two rows exactly, so the mosaic
-    ///    genuinely repeats every 2×2 and is not an 8-row pattern that merely
-    ///    fits in a Bayer-shaped field;
+    /// 6. rows 2 through 7 repeat the first two rows' **colours** exactly, so
+    ///    the mosaic genuinely repeats every 2×2 and is not a taller pattern
+    ///    that merely fits in a Bayer-shaped field;
     /// 7. the 2×2 cell holds exactly one red, exactly one blue and exactly
     ///    two greens.
     ///
@@ -113,6 +113,13 @@ public struct RAWBayerCellPattern: Equatable, Sendable {
     /// four- or eight-row CFA demosaiced as 2×2 would produce a plausible
     /// image with systematically wrong colour, rather than an obvious
     /// failure.
+    ///
+    /// It compares colours rather than plane indices, deliberately. A cell
+    /// whose lower rows swap *which green plane* sits in which corner still
+    /// repeats every 2×2 as far as this stage is concerned: the two green
+    /// planes were already told apart by white balance, upstream, and each
+    /// green sample is copied into output green wherever it sits. A cell
+    /// whose lower rows put a different *colour* somewhere is refused.
     ///
     /// Nothing here re-derives LibRaw's CFA decoding. The layout's own
     /// `colorPlaneIndex(row:column:)` is the single implementation of that,
