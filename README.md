@@ -36,33 +36,59 @@ committed, so the fixture-backed suites skip themselves there.
 
 ## Current status
 
-Implemented: the RAW decoding boundary, and direct access to LibRaw's
-unpacked sensor mosaic.
+Implemented: the RAW decoding boundary, and an application-owned processing
+pipeline that runs from LibRaw's unpacked sensor mosaic to a defined
+working-colour representation.
 
-- Open a RAW file, decode it with LibRaw, and inspect metadata and pixel data
-  through a Swift API that never exposes LibRaw.
-- The workspace shows camera, dimensions, sensor layout, exposure, camera
-  white-balance multipliers, and exactly what the decoder did — plus a
-  display-only preview.
+```text
+LibRaw unpack                    RAWMosaic (UInt16, active area)
+   ↓                             RAWMosaicNormalizer
+black subtraction, normalisation LinearRAWMosaic (Float32, unclamped)
+   ↓                             RAWWhiteBalanceEstimator / RAWWhiteBalancer
+infrared white balance           WhiteBalancedRAWMosaic
+   ↓                             RAWDemosaicer
+bilinear Bayer demosaic          DemosaicedRAWRGBImage (camera-native RGB)
+   ↓                             RAWWorkingColorConverter
+explicit camera → working 3×3    WorkingColorRGBImage (extended linear sRGB)
+```
+
+Every stage is application-owned, non-destructive and provenance-carrying:
+each result keeps the state it was produced from, so gains, algorithm or
+transform can be changed without decoding again, and each records what it did
+and explicitly did not do. Nothing is clamped; values below `0` and above `1`
+survive to the end of the chain.
+
+- **White balance** is per CFA plane in the mosaic domain, with no Kelvin
+  limits. Gains are supplied explicitly or estimated from a caller-selected
+  neutral patch.
+- **Demosaicing** is `bilinearBayer` — the current **correctness / reference
+  algorithm**, not an image-quality answer. X-Trans is recognised and
+  explicitly refused.
+- **Camera → working conversion** always takes an explicit,
+  provenance-carrying transform. There is no default and no automatic use of
+  the file's visible-light colour matrix.
+
+Not implemented yet: exposure, tone, gamma and display encoding; a
+**preview or export UI** for the owned pipeline; profiles, recipes and
+presets; Metal rendering. The workspace's on-screen image is still the legacy
+LibRaw processed-RGB path, kept as a diagnostic reference.
 
 There are two decode paths, and they are not interchangeable:
 
 - **`decodeMosaic(at:)`** — `open → unpack → RAW-state metadata snapshot →
   RAWMosaic`. `dcraw_process` is never called. One LibRaw-unpacked sample per
   sensor mosaic location, active area only. This is the foundation for the
-  application-owned pipeline.
+  application-owned pipeline above.
 - **`decode(at:options:)`** — the existing processed-RGB path, kept as the
   workspace preview and as a diagnostic reference. LibRaw does the demosaicing
   and the black/white handling here, which is exactly why it is not the
   foundation.
 
-Not implemented yet: everything infrared, and every RAW stage after unpack. No
-black subtraction, normalisation, white balance, channel mixing, false colour,
-curves, exposure, profiles, recipes, Metal rendering, or export.
-
 The RAW-stage contract — what a sample is at each stage, what has and has not
-been applied, and the geometry and coordinate rules — is
-[docs/raw-pipeline.md](docs/raw-pipeline.md).
+been applied, the geometry and coordinate rules, and the reference numbers for
+the E-PL3 fixture — is [docs/raw-pipeline.md](docs/raw-pipeline.md). The
+decisions behind it are recorded as ADRs in
+[docs/decisions/](docs/decisions/).
 
 ### Tested formats
 
@@ -118,10 +144,10 @@ demosaicing, colour matrix, gamma, orientation — is recorded on
 `RAWMosaicProcessing` as explicitly not applied, and those facts are `let`
 constants rather than parameters a caller could set wrongly.
 
-Black levels stay metadata-only at this stage. The mosaic deliberately still
-contains the black offset; subtracting it is the next milestone, and it will
-use LibRaw's post-unpack black-level model — including any level LibRaw derived
-from masked pixels during `unpack()`. The mosaic does not expose the
+Black levels stay metadata-only at this stage: the mosaic deliberately still
+contains the black offset, and `RAWMosaicNormalizer` is what subtracts it,
+using LibRaw's post-unpack black-level model — including any level LibRaw
+derived from masked pixels during `unpack()`. The mosaic does not expose the
 optical-black border, and the app does not estimate black independently.
 
 The mosaic path's metadata is snapshotted **after** `unpack()`, from
@@ -299,9 +325,14 @@ See [RAW/README.md](RAW/README.md).
 
 ## Known limitations
 
-- Only the mosaic is owned so far. Black subtraction, normalisation and
-  demosaicing are still LibRaw's on the reference path, and unimplemented on
-  the mosaic path.
+- `bilinearBayer` is a correctness reference, not a production demosaicer, and
+  no X-Trans algorithm exists.
+- Nothing downstream of the working-colour representation exists: no exposure,
+  tone, gamma, display encoding or export, so a `WorkingColorRGBImage` cannot
+  yet be shown or written to a file.
+- No transform in the project is a validated infrared colour calibration. The
+  file's own `rgbFromCamera` is visible-light data and is opt-in and
+  diagnostic only.
 - The mosaic path supports only single-channel `raw_image` storage; no
   three/four-channel, float, Foveon or `filters == 1` file has a mosaic path.
 - The mosaic excludes the optical-black border, so the black level cannot be
@@ -314,15 +345,14 @@ See [RAW/README.md](RAW/README.md).
 - The preview is display-only: the camera-native linear samples are interpreted
   as linear sRGB with no white balance, so a visible-light frame shows the
   sensor's native channel imbalance. That is expected.
-- The workspace decodes at half resolution for the preview; there is no
-  full-resolution render or cache yet.
-- No infrared processing, no develop controls, no export.
+- The workspace decodes at half resolution for the preview through the legacy
+  LibRaw path; the owned pipeline has no preview or cache yet.
+- Infrared white balance exists; no other infrared processing, no develop
+  controls, no export.
 - LibRaw's optional back-ends are not enabled: no libjpeg (lossy DNG, JPEG
   thumbnails), no zlib (deflate-compressed DNG), no LittleCMS, no DNG SDK, no
   RawSpeed, no OpenMP.
 - Aperture, focal length and capture date come back `nil` for the E-PL3
   fixture. Not investigated yet; it is a metadata-extraction gap, not a
   pipeline one.
-- The black-level model is carried across the boundary and used by the mosaic
-  diagnostics, but nothing subtracts it yet. That is the next milestone.
 - `filters == 1` (LibRaw's 16×16 layout) is reported as an unknown pattern.
