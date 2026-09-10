@@ -1,12 +1,20 @@
 import Foundation
 @testable import InfraredConverter
 
-/// Per-channel statistics over a `DemosaicedRAWRGBImage`, computed over the
-/// whole interleaved buffer rather than sampled.
+/// Per-channel statistics over an interleaved `R G B` Float32 buffer,
+/// computed over the whole buffer rather than sampled.
 ///
-/// Diagnostic only. Nothing here says anything about whether the image is
-/// *colour-correct* — no camera matrix has been applied at this stage, so
-/// there is no colour to be correct about yet.
+/// Serves both RGB-domain representations: `DemosaicedRAWRGBImage`, whose
+/// values are linear camera-native sensor responses, and
+/// `WorkingColorRGBImage`, whose values are extended-linear-sRGB coordinates.
+/// They share a storage layout and nothing else, so which one a table
+/// describes has to be said by the caller.
+///
+/// Diagnostic only. Nothing here says anything about whether an image is
+/// *colour-correct*. For the camera-native image there is no colour to be
+/// correct about yet; for the working-colour image the coordinates are defined
+/// but their meaning depends entirely on the transform's provenance, and no
+/// transform in this project is a validated infrared calibration.
 struct RGBImageStatistics {
     struct Channel {
         let minimum: Float
@@ -21,6 +29,14 @@ struct RGBImageStatistics {
     let valueCount: Int
 
     init(image: DemosaicedRAWRGBImage) {
+        self.init(values: image.values)
+    }
+
+    init(image: WorkingColorRGBImage) {
+        self.init(values: image.values)
+    }
+
+    private init(values allValues: [Float]) {
         var minimum = [Float](repeating: .greatestFiniteMagnitude, count: 3)
         var maximum = [Float](repeating: -.greatestFiniteMagnitude, count: 3)
         var total = [Double](repeating: 0, count: 3)
@@ -29,7 +45,7 @@ struct RGBImageStatistics {
         var aboveOne = [Int](repeating: 0, count: 3)
         var nonFinite = 0
 
-        image.values.withUnsafeBufferPointer { buffer in
+        allValues.withUnsafeBufferPointer { buffer in
             for index in 0..<buffer.count {
                 let channel = index % 3
                 let value = buffer[index]
@@ -59,7 +75,7 @@ struct RGBImageStatistics {
         }
         self.channels = result
         self.nonFiniteCount = nonFinite
-        self.valueCount = image.values.count
+        self.valueCount = allValues.count
     }
 
     subscript(channel: RAWLinearRGBChannel) -> Channel {
