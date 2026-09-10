@@ -119,7 +119,14 @@ three Float32 per pixel; linear; NOT a colour space
 extended linear sRGB; unclamped Float32; still linear
 
                   ↓
-       [FUTURE: IR channel mixer / false-colour creative transform]
+       explicit IRChannelMix                       ┐
+                  ↓                                ├ IRChannelMixer
+       IRChannelMixedRGBImage                      ┘
+
+═══════════ CREATIVE IR WORKING RGB DOMAIN ═════════════
+the SAME extended linear sRGB; unclamped Float32; linear
+a different PROCESSING STATE, not a different space
+
                   ↓
        [FUTURE: exposure / tone]
                   ↓
@@ -127,6 +134,30 @@ extended linear sRGB; unclamped Float32; still linear
                   ↓
        [FUTURE: export]
 ```
+
+Four semantic states, in two colour situations:
+
+```text
+MOSAIC                     LinearRAWMosaic
+                           WhiteBalancedRAWMosaic
+                           one value per CFA location; no colour space
+
+CAMERA-NATIVE RGB          DemosaicedRAWRGBImage
+                           three channels; sensor responses; NOT a space
+
+WORKING RGB                WorkingColorRGBImage
+                           extended linear sRGB, before creative mixing
+
+CREATIVE IR WORKING RGB    IRChannelMixedRGBImage
+                           extended linear sRGB, after creative mixing
+```
+
+The last two are in the **same colour space**. What separates them is
+processing state, not colour-space identity: one holds coordinates as the
+camera-to-working transform placed them, the other holds those coordinates
+after a creative remix. They are two types so that a function signature can
+tell them apart — a shared layout and a shared space are not a shared
+meaning.
 
 `DemosaicedRAWRGBImage` is **not** sRGB, and must not be labelled as such. No
 camera colour matrix has been applied to it; see "Demosaicing" below.
@@ -141,7 +172,7 @@ pre-white-balance `LinearRAWMosaic`, produces a `RAWWhiteBalanceGains`, and
 that value is what `RAWWhiteBalancer` then applies to the same mosaic. The two
 halves meet at the gains, not at the image.
 
-All four stages are application-owned and none imports `CLibRaw`.
+All six stages are application-owned and none imports `CLibRaw`.
 
 `RAWMosaicNormalizer` takes a `DecodedRAWMosaic` (or a bare `RAWMosaic` plus
 level metadata) and returns a `ProcessedRAWMosaic`, which keeps the original
@@ -166,6 +197,12 @@ all restart from the right earlier representation.
 `WorkingColorProcessedRAWImage`, which keeps the camera-native image reachable
 on `.source` so the transform can be changed without demosaicing again. It
 receives no `RAWMetadata` and there is no default transform.
+
+`IRChannelMixer` takes a `WorkingColorProcessedRAWImage` (or a bare
+`WorkingColorRGBImage`) **and an explicit mix** and returns an
+`IRChannelMixedProcessedRAWImage`, which keeps the pre-mix working image
+reachable on `.source` so the mix can be changed without converting again. It
+receives no `RAWMetadata` either, and there is no default mix.
 
 **Automatic estimation does not exist yet.** The caller still chooses which
 samples to measure; nothing decides that on its own, and no filter profile or
@@ -607,6 +644,96 @@ shared meaning, which is why the two are separate types.
 `convert(using:replacing:)` reaches through it. Transforms never compose:
 replacing `M1` with `M2` gives `M2 × cameraRGB`, not `M2 × (M1 × cameraRGB)`.
 
+### Working RGB → creative infrared RGB
+
+`IRChannelMixer` is the first explicitly **creative** stage. It takes a
+working-colour image and **one explicit mix**, and returns coordinates in the
+same space, remixed.
+
+#### A different question from the camera transform
+
+```text
+RAWCameraToWorkingColorTransform
+    How do camera-native sensor responses enter our working colour space?
+
+IRChannelMix
+    Once we are already in that space, how do we creatively remix RGB
+    for infrared rendering?
+```
+
+Both are 3×3 matrices over the same `RAWColorMatrix3x3` primitive, and they are
+still different operations with different provenance types. They are never
+merged, and a future profile that decides both will carry them as two values,
+not one composed matrix. See
+`docs/decisions/0007-infrared-channel-mixing.md`.
+
+#### What channel mixing does and does not do
+
+```text
+does:       a linear RGB remix inside one working colour space
+
+does not:   camera calibration
+            white balance
+            colour-space conversion
+            exposure / tone
+            gamma / display encoding
+```
+
+#### The mix
+
+`IRChannelMix` carries the working space, a `RAWColorMatrix3x3` and the
+provenance together, and its initialiser is module-internal so the matrix and
+the source cannot be mismatched. Three origins exist:
+
+| Factory | Provenance | What it is |
+| --- | --- | --- |
+| `.identity` | `.identity` | A creative **no-op**: no remapping was requested and the stage was traversed anyway. Bit-preserving. |
+| `.redBlueSwap` | `.redBlueSwap` | `outputR = inputB`, `outputG = inputG`, `outputB = inputR`. The canonical first infrared creative operation. Bit-preserving. |
+| `.explicit(matrix:)` | `.explicit` | A matrix the caller decided on. The project makes no claim about it. |
+
+There is **no default mix** on any entry point. An explicit matrix that happens
+to equal a built-in's takes the same optimised path and keeps `.explicit`
+provenance: the execution path is decided by the matrix's value, the provenance
+by how the mix was constructed.
+
+A mix records the working space it was authored for, because coefficients mean
+something only relative to the RGB axes they were written for. A mismatch is
+refused, never converted. Exactly one space exists today, so that check cannot
+currently fire; it stays for the day a second one does.
+
+#### Coefficients
+
+Only non-finite ones are refused, so zero, negative, greater-than-one,
+non-normalised and singular matrices are all accepted — infrared creative work
+legitimately uses every one of them. Rows are not normalised, coefficients are
+not percentages, and row sums need not be `1`. There is **no constant or offset
+term**: the operation is `output = M × input`, never affine.
+
+#### Arithmetic
+
+Identity performs no arithmetic and hands the same immutable array back, so
+copy-on-write means nothing is copied. The exact red/blue matrix copies
+channels rather than computing three dot products — `0*R + 0*G + 1*B` is
+mathematically right but can turn a `-0.0` positive, and a permutation should
+not alter a bit. A general matrix accumulates each output channel in `Double`
+and narrows to `Float` exactly once, for the reason the working-colour stage
+gives. Non-finite inputs and results fail with the coordinate and channel,
+reported as `IRProcessingError`.
+
+#### Output
+
+`IRChannelMixedRGBImage` uses the same storage contract as every RGB
+representation upstream — tightly packed, row-major, interleaved, three
+`Float32` per pixel — and the same geometry. Mixing is strictly per-pixel: no
+crop, no resize, no orientation, no resampling.
+
+#### Reprocessing
+
+`IRChannelMixedProcessedRAWImage` retains the pre-mix working-colour state, and
+`apply(mix:replacing:)` reaches through it. Mixes never compose: replacing `M1`
+with `M2` gives `M2 × workingRGB`, not `M2 × (M1 × workingRGB)`. Two red/blue
+swaps in a row would otherwise cancel.
+
 ### What the linear stage does not do
 
 | Stage | Applied? |
@@ -693,6 +820,35 @@ than copied — so no record of this history can disagree with another.
 
 `isValidatedInfraredCalibration` is `false` for every transform source this
 milestone can produce. A defined coordinate system is not a calibration claim.
+
+### What the channel-mix stage does not do
+
+| Stage | Applied? |
+| --- | --- |
+| Creative linear 3×3 RGB channel mix | **yes** |
+| Clamping / clipping | no |
+| Row normalisation of any kind | no |
+| Constant / offset term | no |
+| Colour-space conversion | no — the space is unchanged |
+| Chromatic adaptation | no |
+| Camera → working transform | no — upstream, and not reapplied |
+| White balance | no — upstream, in the mosaic domain |
+| Camera colour metadata of any kind | no — none reaches this stage |
+| Gamma / transfer function | no |
+| Tone mapping / exposure / gamut mapping | no |
+| Display encoding / 8-bit quantisation | no |
+| Highlight reconstruction | no |
+| Sharpening / noise reduction | no |
+| Orientation / crop / resampling | no |
+
+Each is recorded on `IRChannelMixProcessing`. The working space, the matrix and
+the mix source are read through the `IRChannelMix` it carries, and the whole
+upstream chain through the `RAWWorkingColorProcessing`, rather than copied — so
+no record of this history can disagree with another.
+
+A creative mix never makes anything a calibration:
+`isValidatedInfraredCalibration` is still `false`, and still forwarded from the
+upstream transform rather than restated here.
 
 ### The two metadata snapshots
 
@@ -1126,6 +1282,81 @@ coefficients produces.
 > accuracy. That the matrix maps into the chosen working space does not
 > establish that it is physically appropriate after infrared conversion.
 
+### After infrared channel mixing
+
+> These numbers are **diagnostic**. A channel mix is creative intent, not a
+> measurement: a red/blue-swapped frame is the exact red/blue swap of its
+> input, and calling it "correct infrared colour" would be a claim nothing in
+> this project supports.
+
+Input: the identity false-colour `WorkingColorRGBImage` above — deliberately,
+so the creative stage's numbers do not depend on the file's visible-light
+matrix.
+
+**Identity** (`IRChannelMix.identity`):
+
+| | |
+| --- | --- |
+| Output dimensions | 4056 × 3040, unchanged |
+| Output values | 36 990 720 `Float32` |
+| Logical payload | 147 962 880 bytes ≈ 148 MB |
+| Whole-buffer bit identity with the pre-mix image | yes, 0 mismatches |
+| Non-finite values | 0 |
+
+Every per-channel statistic is identical to the working-colour table above,
+because the identity path changes no numbers. As there, the 148 MB is the
+buffer's **logical payload** and not incremental physical allocation: the
+identity path shares its source's storage by copy-on-write.
+
+**Red/blue swap** (`IRChannelMix.redBlueSwap`), checked over the whole frame
+rather than sampled, since the expected result is trivial and independent:
+
+| | |
+| --- | --- |
+| Output R bit-identical to input B | yes, 0 mismatches |
+| Output G bit-identical to input G | yes, 0 mismatches |
+| Output B bit-identical to input R | yes, 0 mismatches |
+| Non-finite values | 0 |
+
+| Channel | Minimum | Maximum | Mean | < 0 | > 1 | equals |
+| --- | --- | --- | --- | --- | --- | --- |
+| R | −0.005062 | 0.658015 | 0.123163 | 11 | 0 | input B |
+| G | 0.008960 | 0.760906 | 0.130518 | 0 | 0 | input G |
+| B | 0.010667 | 0.526172 | 0.130020 | 0 | 0 | input R |
+
+The 11 sub-black values the earlier tables track are now in the red channel,
+still negative and still unclamped. This is a strong check on channel order:
+a swap that lost or reordered a channel could not reproduce the input's
+statistics exactly, counts included. One new output buffer is allocated here —
+the values are reordered, so copy-on-write cannot help.
+
+**One explicit general matrix**, for coverage of the arithmetic path:
+
+```text
+ 0.25  -0.5    1.75
+ 1.125  0.375 -0.25
+-0.625  2.0    0.5
+```
+
+> Deterministic **test** coefficients, chosen so a transposition, a
+> channel-order mistake, the wrong source buffer or an accidental clamp would
+> change the answer. Not a recommended look and not a colour recommendation.
+
+| Channel | Minimum | Maximum | Mean | < 0 | > 1 |
+| --- | --- | --- | --- | --- | --- |
+| R | −0.014558 | 1.082239 | 0.182782 | 51 | 2 |
+| G | −0.032571 | 0.697013 | 0.164425 | 2 | 0 |
+| B | 0.016206 | 1.479655 | 0.241355 | 0 | 10 |
+
+Coordinates below zero and above one are retained, not clamped — which is what
+the extended range is for. Five fixed pixel coordinates are additionally
+checked against arithmetic written out in the test, within one `Float` ULP.
+
+In a **debug** build (`-Onone`, bounds checks on) the three paths take roughly
+1.0 s, 1.1 s and 1.2 s respectively over the full frame — validate-and-share,
+validate-and-reorder, and nine multiplications with six additions per pixel. No
+optimised-build measurement has been taken and no performance claim is made.
+
 ## Decoder warnings by stage
 
 LibRaw accumulates `process_warnings` with `|=` and never clears it outside
@@ -1147,15 +1378,19 @@ can.
 
 ## Not yet decided
 
-Neither demosaicing nor the working colour space is on this list any more. One
-application-owned reference algorithm is decided and implemented, and the
-working representation is extended linear sRGB (ADR 0006), reached through an
-explicit, provenance-carrying transform. What remains open is everything
-downstream of that, plus image quality:
+Demosaicing, the working colour space and creative channel mixing are no longer
+on this list. One application-owned reference demosaic algorithm is decided and
+implemented, the working representation is extended linear sRGB (ADR 0006)
+reached through an explicit provenance-carrying transform, and a linear 3×3
+creative channel mix sits after that boundary (ADR 0007). What remains open is
+everything downstream, plus image quality:
 
-- The **infrared creative colour transform** — channel mixing, false-colour
-  rendering, hue remapping — which belongs *after* the working-space boundary
-  and is deliberately not folded into the camera-to-working transform.
+- **The rest of the infrared creative colour transform** — false-colour
+  mapping, hue remapping, LUT-based finishing. Channel mixing is decided; these
+  are separate operations that ADR 0007 does not cover.
+- **Filter and capture profiles, and recipes** — what would decide a mix and a
+  transform for a given camera, conversion and filter, and how that is
+  persisted and versioned.
 - Whether a **visible-light matrix is ever appropriate for infrared capture**.
   The adapter exists as an opt-in diagnostic; that is not an endorsement, and
   no IR calibration methodology has been decided.

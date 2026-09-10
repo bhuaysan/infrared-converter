@@ -325,11 +325,11 @@ Demosaicing
         ↓
 Camera / Sensor Interpretation
         ↓
+Defined Working Representation
+        ↓
 IR Capture-Profile Adjustment
         ↓
 Infrared Channel / Color Transform
-        ↓
-Defined Working Representation
         ↓
 Develop Adjustments
         ↓
@@ -339,6 +339,8 @@ Preview / Export
 ```
 
 Individual stages must remain independently testable and movable where technically necessary.
+
+The working representation is established **before** the infrared channel/color transform, not after it. That ordering was originally hypothesised the other way round; implementation showed that a creative channel mix is only meaningful once the RGB axes it remixes are defined, so the stage operates inside the working representation and leaves it unchanged. See `docs/decisions/0006-working-color-space.md` and `docs/decisions/0007-infrared-channel-mixing.md`.
 
 Whenever processing order changes, document:
 
@@ -521,6 +523,8 @@ docs/decisions/0006-working-color-space.md
 The working representation is **extended linear sRGB**: sRGB primaries, the sRGB D65 white point, a linear transfer function, Float32 storage, and no clipping to `0...1`.
 
 Choosing that space defines only the coordinate system. How camera-native sensor RGB is mapped into it is a separate decision, carried explicitly by a camera/IR color transform with its own provenance. Do not conflate the two, and do not treat a defined working space as a claim of colorimetric accuracy for an infrared capture.
+
+Creative infrared channel mixing is a **third** decision, distinct from both. It operates inside the working representation, leaves the color space unchanged, and carries its own provenance as creative intent — never as camera calibration, white balance, working-space establishment or filter calibration. That decision is recorded in `docs/decisions/0007-infrared-channel-mixing.md`.
 
 Never rely on accidental/default ColorSync or framework behavior for major processing decisions.
 
@@ -1012,10 +1016,10 @@ Examples:
 ```text
 docs/decisions/0001-use-libraw.md
 docs/decisions/0006-working-color-space.md
-docs/decisions/0007-metal-render-pipeline.md
+docs/decisions/0008-metal-render-pipeline.md
 ```
 
-The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`.
+The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`. The creative channel-mix stage that depends on it is `docs/decisions/0007-infrared-channel-mixing.md`.
 
 ADR numbers are assigned in the order decisions are actually made; do not reuse a number that is already taken.
 

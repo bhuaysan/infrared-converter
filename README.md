@@ -37,8 +37,8 @@ committed, so the fixture-backed suites skip themselves there.
 ## Current status
 
 Implemented: the RAW decoding boundary, and an application-owned processing
-pipeline that runs from LibRaw's unpacked sensor mosaic to a defined
-working-colour representation.
+pipeline that runs from LibRaw's unpacked sensor mosaic through a defined
+working-colour representation to the first creative infrared stage.
 
 ```text
 LibRaw unpack                    RAWMosaic (UInt16, active area)
@@ -50,6 +50,8 @@ infrared white balance           WhiteBalancedRAWMosaic
 bilinear Bayer demosaic          DemosaicedRAWRGBImage (camera-native RGB)
    ↓                             RAWWorkingColorConverter
 explicit camera → working 3×3    WorkingColorRGBImage (extended linear sRGB)
+   ↓                             IRChannelMixer
+IR channel mixing                IRChannelMixedRGBImage (same space, remixed)
 ```
 
 Every stage is application-owned, non-destructive and provenance-carrying:
@@ -67,11 +69,16 @@ survive to the end of the chain.
 - **Camera → working conversion** always takes an explicit,
   provenance-carrying transform. There is no default and no automatic use of
   the file's visible-light colour matrix.
+- **Infrared channel mixing** is the first explicitly creative stage: a linear
+  3×3 remix inside the working colour space, with identity, red/blue swap and
+  explicit-matrix mixes. It changes no colour space and is recorded as creative
+  intent, never as a calibration.
 
 Not implemented yet: exposure, tone, gamma and display encoding; a
-**preview or export UI** for the owned pipeline; profiles, recipes and
-presets; Metal rendering. The workspace's on-screen image is still the legacy
-LibRaw processed-RGB path, kept as a diagnostic reference.
+**preview or export UI** for the owned pipeline; profiles, recipes and presets
+beyond the two built-in mixes; Metal rendering. The workspace's on-screen
+image is still the legacy LibRaw processed-RGB path, kept as a diagnostic
+reference.
 
 There are two decode paths, and they are not interchangeable:
 
@@ -327,9 +334,9 @@ See [RAW/README.md](RAW/README.md).
 
 - `bilinearBayer` is a correctness reference, not a production demosaicer, and
   no X-Trans algorithm exists.
-- Nothing downstream of the working-colour representation exists: no exposure,
-  tone, gamma, display encoding or export, so a `WorkingColorRGBImage` cannot
-  yet be shown or written to a file.
+- Nothing downstream of the channel-mix stage exists: no exposure, tone,
+  gamma, display encoding or export, so neither a `WorkingColorRGBImage` nor an
+  `IRChannelMixedRGBImage` can yet be shown or written to a file.
 - No transform in the project is a validated infrared colour calibration. The
   file's own `rgbFromCamera` is visible-light data and is opt-in and
   diagnostic only.
@@ -347,8 +354,8 @@ See [RAW/README.md](RAW/README.md).
   sensor's native channel imbalance. That is expected.
 - The workspace decodes at half resolution for the preview through the legacy
   LibRaw path; the owned pipeline has no preview or cache yet.
-- Infrared white balance exists; no other infrared processing, no develop
-  controls, no export.
+- Infrared white balance and channel mixing exist; no false-colour mapping,
+  hue remapping, filter profiles or recipes, no develop controls, no export.
 - LibRaw's optional back-ends are not enabled: no libjpeg (lossy DNG, JPEG
   thumbnails), no zlib (deflate-compressed DNG), no LittleCMS, no DNG SDK, no
   RawSpeed, no OpenMP.
