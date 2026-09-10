@@ -42,7 +42,7 @@ struct ContentView: View {
 
         case .decoded(let loaded):
             HSplitView {
-                RAWPreviewView(preview: loaded.preview)
+                OwnedPreviewView(owned: loaded.owned)
                     .frame(minWidth: 320)
                 RAWInspectorView(loaded: loaded)
                     .frame(minWidth: 280, idealWidth: 320, maxWidth: 420)
@@ -93,22 +93,39 @@ struct ContentView: View {
     }
 }
 
-/// Shows the decoder's display-only preview.
-private struct RAWPreviewView: View {
-    let preview: CGImage?
+/// Shows the **application-owned** pipeline's pixels, or says why there are
+/// none.
+///
+/// A failure is reported here rather than replaced by the legacy LibRaw image.
+/// Falling back would put a visually plausible picture from a different
+/// pipeline in the place where this one's result belongs, and nothing on
+/// screen would say so.
+private struct OwnedPreviewView: View {
+    let owned: DocumentState.OwnedPreview
 
     var body: some View {
         ZStack {
             Color(nsColor: .underPageBackgroundColor)
 
-            if let preview {
-                Image(decorative: preview, scale: 1)
+            switch owned {
+            case .rendered(let preview):
+                Image(decorative: preview.image, scale: 1)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .padding(12)
-            } else {
-                Text("No preview available")
-                    .foregroundStyle(.secondary)
+
+            case .unavailable(let reason):
+                VStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.largeTitle)
+                        .foregroundStyle(.secondary)
+                    Text("The preview could not be rendered")
+                        .font(.headline)
+                    Text(reason)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(40)
             }
         }
     }
@@ -137,8 +154,9 @@ private struct RAWInspectorView: View {
                     row("Full image", "\(geometry.outputWidth) × \(geometry.outputHeight)")
                     row("Active area", "\(geometry.visibleWidth) × \(geometry.visibleHeight)")
                     row("Sensor readout", "\(geometry.rawWidth) × \(geometry.rawHeight)")
-                    row("Preview", "\(loaded.decoded.image.width) × \(loaded.decoded.image.height)")
                 }
+
+                ownedPreviewSection
 
                 section("Sensor") {
                     row("Layout", layoutDescription)
@@ -167,8 +185,21 @@ private struct RAWInspectorView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                section("Decoder") {
+                section("LibRaw reference (diagnostic)") {
                     let processing = loaded.decoded.processing
+                    Text("""
+                        A separate, LibRaw-processed decode. It is not what the workspace \
+                        shows, and it is not a colour reference.
+                        """)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let legacyPreview = loaded.legacyPreview {
+                        Image(decorative: legacyPreview, scale: 1)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .frame(maxHeight: 120)
+                    }
+                    row("Size", "\(loaded.decoded.image.width) × \(loaded.decoded.image.height)")
                     row("Decoder", processing.decoderIdentifier)
                     row("Pixel format", "\(loaded.decoded.image.channelCount) × "
                         + "\(loaded.decoded.image.bitsPerChannel) bit, interleaved RGB")
@@ -181,6 +212,71 @@ private struct RAWInspectorView: View {
             }
             .padding(16)
         }
+    }
+
+    /// What the application-owned pipeline did, in the order it did it.
+    ///
+    /// Every line here is read back from the preview's own provenance record,
+    /// so the panel cannot describe a rendering the renderer did not perform.
+    @ViewBuilder
+    private var ownedPreviewSection: some View {
+        section("Owned preview") {
+            switch loaded.owned {
+            case .rendered(let preview):
+                let processing = preview.processing
+                row("Size", "\(preview.pixelWidth) × \(preview.pixelHeight)")
+                row("White balance", "Neutral patch, \(Self.regionDescription(preview.neutralPatch))")
+                row("Camera → working", Self.transformDescription(
+                    processing.cameraToWorkingTransformSource
+                ))
+                row("Channel mix", Self.mixDescription(processing.mixSource))
+                row("Exposure", String(format: "%+.2f EV", processing.exposureEV))
+                row("Out-of-range", Self.clippingDescription(processing))
+                row("Encoding", "sRGB, 8 bit, no alpha")
+                Text("""
+                    Displayable, not colour-validated: no transform in this pipeline is a \
+                    validated infrared calibration.
+                    """)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+            case .unavailable(let reason):
+                row("Status", "Failed")
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private static func regionDescription(_ region: RAWActiveAreaRegion) -> String {
+        "\(region.width) × \(region.height) at (\(region.originRow), \(region.originColumn))"
+    }
+
+    private static func transformDescription(
+        _ source: RAWCameraToWorkingColorTransformSource
+    ) -> String {
+        switch source {
+        case .sensorRGBIdentityFalseColor: return "Identity false colour"
+        case .explicit: return "Explicit matrix"
+        case .visibleLightMetadataRGBFromCamera: return "File's visible-light matrix"
+        }
+    }
+
+    private static func mixDescription(_ source: IRChannelMixSource) -> String {
+        switch source {
+        case .identity: return "Identity (no remap)"
+        case .redBlueSwap: return "Red/blue swap"
+        case .explicit: return "Explicit matrix"
+        }
+    }
+
+    /// How much the display-range clipping destroyed, as a count rather than
+    /// an impression.
+    private static func clippingDescription(_ processing: DisplayPreviewProcessing) -> String {
+        guard processing.clippedSampleCount > 0 else { return "None clipped" }
+        return "\(processing.clippedLowSampleCount) low, "
+            + "\(processing.clippedHighSampleCount) high (clipped)"
     }
 
     private var layoutDescription: String {
