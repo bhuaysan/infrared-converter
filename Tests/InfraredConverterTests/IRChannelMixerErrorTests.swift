@@ -183,6 +183,34 @@ struct IRChannelMixerErrorTests {
         }
     }
 
+    /// A result that is **NaN** rather than merely unrepresentable.
+    ///
+    /// Two coefficients of opposing sign and equal magnitude, on inputs large
+    /// enough that each term saturates, give `(+infinity) + (-infinity)` — not
+    /// a number, rather than a number too large to write down. The same case
+    /// covers both, which is why it is named for finiteness and why its
+    /// description must not say "too large".
+    @Test("A NaN accumulation reaches the same non-finite-result case")
+    func nanAccumulationIsRefused() throws {
+        let matrix = try RAWColorMatrix3x3(
+            m00: .greatestFiniteMagnitude, m01: -.greatestFiniteMagnitude, m02: 0,
+            m10: 0, m11: 1, m12: 0,
+            m20: 0, m21: 0, m22: 1
+        )
+        // Stated rather than assumed: this really is NaN, not an overflow.
+        let terms = matrix.m00 * 2.0 + matrix.m01 * 2.0
+        #expect(terms.isNaN)
+
+        let input = IRChannelMixerTests.pixel(2, 2, 0.5)
+        #expect {
+            _ = try IRChannelMixer().apply(to: input, mix: .explicit(matrix: matrix))
+        } throws: { error in
+            guard case .nonFiniteChannelMixResult(let row, let column, let channel) =
+                    error as? IRProcessingError else { return false }
+            return row == 0 && column == 0 && channel == .red
+        }
+    }
+
     @Test("A refused image produces no partial result")
     func failureProducesNoImage() throws {
         let input = Self.imagePoisoned(row: 0, column: 0, channel: .red, with: .nan)
@@ -240,5 +268,19 @@ struct IRChannelMixerErrorTests {
         }
         #expect(errors[2].failureReason?.contains("row 3, column 4") == true)
         #expect(errors[3].failureReason?.contains("row 5, column 6") == true)
+    }
+
+    /// A non-finite result can be NaN as well as an overflow, so the sentence
+    /// a user sees must not describe every one of them as a magnitude problem.
+    @Test("The non-finite-result description covers NaN, not only overflow")
+    func theResultDescriptionCoversEveryNonFiniteOutcome() {
+        let error = IRProcessingError.nonFiniteChannelMixResult(
+            row: 0, column: 0, channel: .red
+        )
+        let description = try? #require(error.errorDescription)
+        #expect(description?.localizedCaseInsensitiveContains("too large") == false)
+        #expect(description?.localizedCaseInsensitiveContains("finite") == true)
+        // The detail keeps saying which coordinate, in the same terms.
+        #expect(error.failureReason?.contains("not a finite Float32") == true)
     }
 }

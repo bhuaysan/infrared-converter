@@ -251,10 +251,22 @@ no `Double` image buffer; the widening lives in three local accumulators.
 ## Decision 26 — Non-finite inputs and results are errors
 
 NaN and infinity in the input are refused with the coordinate and channel, on
-every path. A `Double` accumulation that leaves `Double`'s range, and a finite
-`Double` that overflows on narrowing to `Float`, are both refused too — never
-clamped to `greatestFiniteMagnitude` and never replaced with zero. The bare
-image types are publicly constructible, so this is a real boundary.
+every path. On the output side three arithmetic outcomes are refused, not two:
+
+```text
+infinite Double accumulation   the magnitude left Double's range
+NaN Double accumulation        (+infinity) + (-infinity) from opposing terms
+Float32 narrowing overflow     finite in Double, infinite as Float32
+```
+
+None is clamped to `greatestFiniteMagnitude` and none is replaced with zero.
+They share one case, `nonFiniteChannelMixResult`, because the property that
+matters to a caller is the same for all three — the number is not usable — and
+because splitting them would name an implementation detail in a user-visible
+message. For the same reason the case is named for **finiteness** rather than
+for magnitude, and its description says so: a NaN result is not a value too
+large to represent, and describing it that way would be false. The bare image
+types are publicly constructible, so this is a real boundary.
 
 `IRProcessingError` is a separate type from `RAWProcessingError`: this stage
 has no sensor data left to interpret, and reporting its input as a

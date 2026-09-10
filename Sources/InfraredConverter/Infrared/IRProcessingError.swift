@@ -53,9 +53,21 @@ public enum IRProcessingError: Error, Equatable {
         channel: RAWLinearRGBChannel,
         value: Float
     )
-    /// A channel-mix dot product did not produce a finite `Float32`: either
-    /// the `Double` accumulation itself was not finite, or a finite `Double`
-    /// result overflowed on the single narrowing to `Float`.
+    /// A channel-mix dot product did not produce a finite `Float32`.
+    ///
+    /// Three arithmetic outcomes reach this case, and they are not all
+    /// "too large":
+    ///
+    /// ```text
+    /// infinite Double accumulation   magnitude left Double's range
+    /// NaN Double accumulation        e.g. (+inf) + (-inf) from opposing terms
+    /// Float32 narrowing overflow     finite in Double, infinite as Float32
+    /// ```
+    ///
+    /// The middle one is why the case is named for finiteness rather than for
+    /// magnitude: a matrix with large coefficients of opposing sign, applied
+    /// to large inputs, can produce a result that is not a number at all
+    /// rather than one that is merely unrepresentable.
     ///
     /// Reported rather than clamped to `Float.greatestFiniteMagnitude` or
     /// replaced with zero: an image carrying a silently invented value is
@@ -73,7 +85,7 @@ extension IRProcessingError: LocalizedError {
         case .nonFiniteChannelMixInput:
             return "The image data contains a value that is not a finite number."
         case .nonFiniteChannelMixResult:
-            return "This channel mix produces values too large to represent."
+            return "This channel mix produces values that are not finite numbers."
         }
     }
 

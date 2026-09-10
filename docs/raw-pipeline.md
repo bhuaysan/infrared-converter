@@ -718,7 +718,11 @@ mathematically right but can turn a `-0.0` positive, and a permutation should
 not alter a bit. A general matrix accumulates each output channel in `Double`
 and narrows to `Float` exactly once, for the reason the working-colour stage
 gives. Non-finite inputs and results fail with the coordinate and channel,
-reported as `IRProcessingError`.
+reported as `IRProcessingError`. A result fails for any of three reasons — an
+infinite accumulation, a NaN accumulation from terms of opposing sign, or a
+finite `Double` that overflows the single narrowing to `Float32` — and they
+share one case, named and worded for *finiteness* rather than magnitude,
+because a NaN is not a number that is merely too large.
 
 Those two facts sit together deliberately, and "bit-preserving" has to be read
 against the second one:
