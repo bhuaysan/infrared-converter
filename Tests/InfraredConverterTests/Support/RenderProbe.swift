@@ -40,9 +40,18 @@ final class RenderProbe: @unchecked Sendable {
     /// code under test — reported as an error so it fails rather than hangs.
     struct Stalled: Error {}
 
-    /// Long enough that no amount of machine load explains it, short enough
-    /// that a run does not appear to hang.
-    static let waitLimit = DispatchTimeInterval.seconds(30)
+    /// A hang guard, not a timing the tests depend on.
+    ///
+    /// It has to clear the longest a `@MainActor` suite in this package can
+    /// hold the main actor, because these tests need it to make their next
+    /// request. `EPL3OrientationCorrectionTests` renders the full fixture on
+    /// the main actor and takes minutes, so a short bound reports a starved
+    /// test as a broken scheduler — which it did, at thirty seconds.
+    ///
+    /// Ten minutes is therefore deliberately far longer than anything healthy,
+    /// and exists only so that a genuine deadlock fails the run instead of
+    /// hanging it.
+    static let waitLimit = DispatchTimeInterval.seconds(600)
 
     private let lock = NSLock()
     private var started = 0

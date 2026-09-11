@@ -38,7 +38,10 @@ struct CoalescingPreviewRendererTests {
     /// Waits for the render slot to empty, bounded so a scheduling mistake
     /// fails the test instead of hanging the run.
     static func waitUntilIdle(_ renderer: CoalescingPreviewRenderer) async throws {
-        for _ in 0..<10_000 {
+        // Yields rather than sleeps, and is bounded generously for the same
+        // reason `RenderProbe.waitLimit` is: another suite can hold the main
+        // actor for minutes, and a starved test is not a broken scheduler.
+        for _ in 0..<1_000_000 {
             guard renderer.isRendering else { return }
             await Task.yield()
         }
