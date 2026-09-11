@@ -173,7 +173,12 @@ struct DocumentStateTests {
             return
         }
 
-        // The pixels are the owned pipeline's, at the mosaic's own geometry.
+        // The pixels are the owned pipeline's, at the mosaic's own geometry —
+        // which is also the oriented geometry here, because this stub's
+        // metadata records `flip 0`.
+        #expect(preview.orientation == .upright)
+        #expect(preview.sourcePixelWidth == 8)
+        #expect(preview.sourcePixelHeight == 8)
         #expect(preview.pixelWidth == 8)
         #expect(preview.pixelHeight == 8)
         #expect(preview.image.width == 8)
@@ -190,7 +195,12 @@ struct DocumentStateTests {
         #expect(preview.processing.demosaicAlgorithm == .bilinearBayer)
         #expect(preview.processing.whiteBalanceApplied)
         #expect(!preview.processing.isValidatedInfraredCalibration)
-        #expect(!preview.processing.orientationApplied)
+
+        // The orientation stage ran, and the orientation it applied is the
+        // one the file's metadata named.
+        #expect(preview.processing.orientationApplied)
+        #expect(preview.processing.appliedOrientation == .upright)
+        #expect(!preview.processing.orientationSwappedDimensions)
     }
 
     private static func waitUntilSettled(_ state: DocumentState) async throws {
