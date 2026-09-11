@@ -171,6 +171,12 @@ struct WorkspacePreviewPipeline {
     /// LibRaw's processed-RGB path is not involved: this calls `decodeMosaic`,
     /// and every stage after it is ours.
     ///
+    /// It is **not** cooperatively cancellable. None of the stages it calls
+    /// polls a cancellation signal yet, so it is abandoned only at the task
+    /// boundary, after the pass. That is deliberate scope: the half a user can
+    /// re-trigger by holding a button down is the orientation/display half,
+    /// and that is the half `render(_:adjustments:cancellation:)` can stop.
+    ///
     /// - Throws: whatever the stage that failed reports —
     ///   `RAWDecodingError`, `RAWProcessingError` or `IRProcessingError`.
     ///   Nothing is caught and turned into a plausible-looking picture here.
@@ -202,19 +208,30 @@ struct WorkspacePreviewPipeline {
     /// permuted exactly once, by the effective orientation, from the same
     /// buffer every time.
     ///
-    /// - Throws: `OrientationError` or `DisplayRenderingError`.
+    /// Both stages poll `cancellation`, so a superseded re-render stops inside
+    /// the pass rather than at the end of it. A cancelled call throws
+    /// `CancellationError` and produces no preview; it is the caller's job to
+    /// tell that apart from a stage refusing the image.
+    ///
+    /// - Throws: `OrientationError`, `DisplayRenderingError`, or
+    ///   `CancellationError`.
     func render(
         _ source: Source,
-        adjustments: ImageAdjustments
+        adjustments: ImageAdjustments,
+        cancellation: ProcessingCancellation = .none
     ) throws -> WorkspacePreview {
         let orientation = try Self.effectiveOrientation(
             for: source.metadata, adjustments: adjustments
         )
-        let oriented = try ImageOrienter()
-            .apply(to: source.channelMixed, orientation: orientation.applied)
+        let oriented = try ImageOrienter().apply(
+            to: source.channelMixed,
+            orientation: orientation.applied,
+            cancellation: cancellation
+        )
 
-        let preview = try DisplayPreviewRenderer()
-            .render(oriented, settings: Self.initialSettings)
+        let preview = try DisplayPreviewRenderer().render(
+            oriented, settings: Self.initialSettings, cancellation: cancellation
+        )
 
         return WorkspacePreview(
             image: try DisplayPreviewCGImageAdapter.makeCGImage(from: preview.image),
@@ -237,9 +254,14 @@ struct WorkspacePreviewPipeline {
     func render(
         decoding url: URL,
         using decoder: RAWDecoder,
-        adjustments: ImageAdjustments = .none
+        adjustments: ImageAdjustments = .none,
+        cancellation: ProcessingCancellation = .none
     ) throws -> WorkspacePreview {
-        try render(prepare(decoding: url, using: decoder), adjustments: adjustments)
+        try render(
+            prepare(decoding: url, using: decoder),
+            adjustments: adjustments,
+            cancellation: cancellation
+        )
     }
 }
 

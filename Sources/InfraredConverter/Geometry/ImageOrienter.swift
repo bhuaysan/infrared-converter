@@ -75,6 +75,18 @@ import Foundation
 /// which axis each attaches to, and a 2×3 affine abstraction makes that
 /// harder, not easier.
 ///
+/// ## Cancellation
+///
+/// The permutation is one synchronous pass over every pixel, so a caller that
+/// has superseded it needs a way to stop it rather than merely discard it.
+/// `apply` takes a `ProcessingCancellation` and polls it **once before any
+/// work, and once more before each destination row**. A stated granularity is
+/// the point: a test can predict the poll count exactly, which is how
+/// abandoning the work early is proven rather than assumed.
+///
+/// A cancelled call throws `CancellationError` and returns no image at all.
+/// It is not an `OrientationError`: nothing about the image was wrong.
+///
 /// ## Cost
 ///
 /// `O(pixel count)`: one owned output buffer the same size as the input, one
@@ -101,10 +113,15 @@ public struct ImageOrienter: Sendable {
     ///     in any way.
     ///   - orientation: which of the eight arrangements to apply. Required —
     ///     there is deliberately no default.
-    /// - Throws: `OrientationError`.
+    ///   - cancellation: polled once here and once per destination row.
+    ///     Defaults to never cancelling.
+    /// - Throws: `OrientationError`, or `CancellationError` when the work was
+    ///   superseded. The two are deliberately distinct types: one says the
+    ///   image could not be oriented, the other says nobody wants it.
     public func apply(
         to image: IRChannelMixedRGBImage,
-        orientation: RAWImageOrientation
+        orientation: RAWImageOrientation,
+        cancellation: ProcessingCancellation = .none
     ) throws -> OrientedSceneLinearRGBImage {
         guard image.isGeometryConsistent else {
             throw OrientationError.invalidGeometry(
@@ -115,6 +132,10 @@ public struct ImageOrienter: Sendable {
                     """
             )
         }
+
+        // Before anything is allocated: a caller that has already superseded
+        // this call gets nothing built for it at all.
+        try cancellation.check()
 
         let output = orientation.outputDimensions(
             sourceWidth: image.width, sourceHeight: image.height
@@ -148,7 +169,12 @@ public struct ImageOrienter: Sendable {
             height: output.height,
             values: orientation.isIdentity
                 ? image.values
-                : Self.permutedValues(image, orientation: orientation, output: output),
+                : try Self.permutedValues(
+                    image,
+                    orientation: orientation,
+                    output: output,
+                    cancellation: cancellation
+                ),
             processing: processing
         )
     }
@@ -162,9 +188,12 @@ public struct ImageOrienter: Sendable {
     /// converting, demosaicing or decoding again.
     public func apply(
         to processed: IRChannelMixedProcessedRAWImage,
-        orientation: RAWImageOrientation
+        orientation: RAWImageOrientation,
+        cancellation: ProcessingCancellation = .none
     ) throws -> OrientedProcessedRAWImage {
-        let image = try apply(to: processed.image, orientation: orientation)
+        let image = try apply(
+            to: processed.image, orientation: orientation, cancellation: cancellation
+        )
         return OrientedProcessedRAWImage(source: processed, image: image)
     }
 
@@ -186,9 +215,12 @@ public struct ImageOrienter: Sendable {
     /// demosaic, no white balance, no decode.
     public func apply(
         orientation newOrientation: RAWImageOrientation,
-        replacing previous: OrientedProcessedRAWImage
+        replacing previous: OrientedProcessedRAWImage,
+        cancellation: ProcessingCancellation = .none
     ) throws -> OrientedProcessedRAWImage {
-        try apply(to: previous.source, orientation: newOrientation)
+        try apply(
+            to: previous.source, orientation: newOrientation, cancellation: cancellation
+        )
     }
 
     // MARK: - The permutation
@@ -207,17 +239,28 @@ public struct ImageOrienter: Sendable {
     private static func permutedValues(
         _ image: IRChannelMixedRGBImage,
         orientation: RAWImageOrientation,
-        output: (width: Int, height: Int)
-    ) -> [Float] {
+        output: (width: Int, height: Int),
+        cancellation: ProcessingCancellation
+    ) throws -> [Float] {
         let sourceWidth = image.width
         let sourceHeight = image.height
         let channels = OrientedSceneLinearRGBImage.channelCount
         let outputCount = image.values.count
 
-        return [Float](unsafeUninitializedCapacity: outputCount) { buffer, initializedCount in
-            image.values.withUnsafeBufferPointer { input in
+        return try [Float](unsafeUninitializedCapacity: outputCount) { buffer, initializedCount in
+            try image.values.withUnsafeBufferPointer { input in
                 var destination = 0
                 for row in 0..<output.height {
+                    // One poll per destination row. Throwing here abandons the
+                    // whole array — the caller gets `CancellationError`, never
+                    // an image with some rows written and the rest not.
+                    if cancellation.isCancelled {
+                        // `Float` is trivial, so nothing needs destroying;
+                        // the count is kept honest anyway rather than left
+                        // stale for a future element type to trip over.
+                        initializedCount = destination
+                        throw CancellationError()
+                    }
                     for column in 0..<output.width {
                         let source = orientation.sourceCoordinate(
                             row: row,

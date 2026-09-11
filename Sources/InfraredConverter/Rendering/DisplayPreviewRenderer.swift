@@ -85,6 +85,18 @@ import Foundation
 /// Rotating inside a colour stage would make the one record meant to describe
 /// the pipeline describe it wrongly.
 ///
+/// ## Cancellation
+///
+/// The encode is one synchronous pass over every component, so a caller that
+/// has superseded it needs a way to stop it rather than merely discard it.
+/// `render` takes a `ProcessingCancellation` and polls it **once before any
+/// work, and once more before each row**. A stated granularity is the point: a
+/// test can predict the poll count exactly, which is how abandoning the work
+/// early is proven rather than assumed.
+///
+/// A cancelled call throws `CancellationError` and returns no image at all. It
+/// is not a `DisplayRenderingError`: nothing about the image was wrong.
+///
 /// ## Cost
 ///
 /// `O(component count)`: one read pass over the input, one owned output buffer
@@ -108,10 +120,15 @@ public struct DisplayPreviewRenderer: Sendable {
     ///     any way.
     ///   - settings: exposure, range policy and encoding. Required — there is
     ///     deliberately no default.
-    /// - Throws: `DisplayRenderingError`.
+    ///   - cancellation: polled once here and once per row. Defaults to never
+    ///     cancelling.
+    /// - Throws: `DisplayRenderingError`, or `CancellationError` when the work
+    ///   was superseded. The two are deliberately distinct types: one says the
+    ///   image could not be encoded, the other says nobody wants it.
     public func render(
         _ image: OrientedSceneLinearRGBImage,
-        settings: DisplayRenderSettings
+        settings: DisplayRenderSettings,
+        cancellation: ProcessingCancellation = .none
     ) throws -> DisplayEncodedPreviewImage {
         guard image.isGeometryConsistent else {
             throw DisplayRenderingError.invalidGeometry(
@@ -122,6 +139,10 @@ public struct DisplayPreviewRenderer: Sendable {
                     """
             )
         }
+
+        // Before anything is allocated: a caller that has already superseded
+        // this call gets nothing built for it at all.
+        try cancellation.check()
 
         let scale = settings.exposureScale
         // Both halves are checked. `2^EV` is finite for a NaN EV in neither
@@ -219,6 +240,11 @@ public struct DisplayPreviewRenderer: Sendable {
 
                 var base = 0
                 for row in 0..<image.height {
+                    // One poll per row. Throwing here abandons the whole
+                    // buffer — the caller gets `CancellationError`, never an
+                    // image with some rows encoded and the rest still zero,
+                    // which would look like a perfectly ordinary black band.
+                    try cancellation.check()
                     for column in 0..<image.width {
                         output[base] = try sample(base, row, column, .red)
                         output[base + 1] = try sample(base + 1, row, column, .green)
@@ -251,9 +277,12 @@ public struct DisplayPreviewRenderer: Sendable {
     /// converting, demosaicing or decoding again.
     public func render(
         _ processed: OrientedProcessedRAWImage,
-        settings: DisplayRenderSettings
+        settings: DisplayRenderSettings,
+        cancellation: ProcessingCancellation = .none
     ) throws -> DisplayPreviewProcessedRAWImage {
-        let image = try render(processed.image, settings: settings)
+        let image = try render(
+            processed.image, settings: settings, cancellation: cancellation
+        )
         return DisplayPreviewProcessedRAWImage(source: processed, image: image)
     }
 
@@ -271,9 +300,10 @@ public struct DisplayPreviewRenderer: Sendable {
     /// conversion, no demosaic, no white balance, no decode.
     public func render(
         settings newSettings: DisplayRenderSettings,
-        replacing previous: DisplayPreviewProcessedRAWImage
+        replacing previous: DisplayPreviewProcessedRAWImage,
+        cancellation: ProcessingCancellation = .none
     ) throws -> DisplayPreviewProcessedRAWImage {
-        try render(previous.source, settings: newSettings)
+        try render(previous.source, settings: newSettings, cancellation: cancellation)
     }
 
     // MARK: - The transfer function
