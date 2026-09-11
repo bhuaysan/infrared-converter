@@ -18,8 +18,10 @@ struct ContentView: View {
 
             Divider()
 
-            HStack {
+            HStack(spacing: 12) {
                 Button("Open RAW…", action: openRAW)
+                Divider().frame(height: 18)
+                OrientationControls(documentState: documentState)
                 Spacer()
             }
             .padding(12)
@@ -225,7 +227,9 @@ private struct RAWInspectorView: View {
             case .rendered(let preview):
                 let processing = preview.processing
                 row("Size", "\(preview.pixelWidth) × \(preview.pixelHeight)")
-                row("Orientation", Self.orientationDescription(preview))
+                row("Recorded orientation", Self.recordedOrientationDescription(preview))
+                row("Your correction", Self.userOrientationDescription(preview))
+                row("Orientation applied", Self.orientationDescription(preview))
                 row("White balance", "Neutral patch, \(Self.regionDescription(preview.neutralPatch))")
                 row("Camera → working", Self.transformDescription(
                     processing.cameraToWorkingTransformSource
@@ -258,14 +262,34 @@ private struct RAWInspectorView: View {
     /// this row says so rather than leaving the reader to wonder whether a
     /// stage was skipped.
     private static func orientationDescription(_ preview: WorkspacePreview) -> String {
-        let orientation = preview.orientation
+        let orientation = preview.effectiveOrientation
         let source = "\(preview.sourcePixelWidth) × \(preview.sourcePixelHeight) sensor"
         guard !orientation.isIdentity else {
-            return "Upright, as recorded (\(source))"
+            return "Upright (\(source))"
         }
         return orientation.diagnosticDescription.prefix(1).uppercased()
             + orientation.diagnosticDescription.dropFirst()
             + " (from \(source))"
+    }
+
+    /// What the file asked for, kept visibly separate from what the user did.
+    ///
+    /// The panel shows both terms and the result, so a reader can see why the
+    /// image has its geometry without having to guess which of the two
+    /// produced it.
+    private static func recordedOrientationDescription(
+        _ preview: WorkspacePreview
+    ) -> String {
+        let recorded = preview.sourceOrientation
+        return "EXIF \(recorded.exifOrientation) — \(recorded.diagnosticDescription)"
+    }
+
+    private static func userOrientationDescription(_ preview: WorkspacePreview) -> String {
+        let adjustment = preview.userOrientationAdjustment
+        return adjustment.isIdentity
+            ? "None"
+            : adjustment.diagnosticDescription.prefix(1).uppercased()
+                + adjustment.diagnosticDescription.dropFirst()
     }
 
     private static func regionDescription(_ region: RAWActiveAreaRegion) -> String {
@@ -365,5 +389,57 @@ private struct RAWInspectorView: View {
                 .textSelection(.enabled)
         }
         .font(.callout)
+    }
+}
+
+
+/// The orientation controls.
+///
+/// They operate on `DocumentState`'s adjustment record and nothing else. No
+/// view here touches a pixel buffer, a `CGImage`, a `CGAffineTransform` or a
+/// `rotationEffect`: pressing a button changes one canonical adjustment value,
+/// and the pipeline re-derives the effective orientation and permutes the
+/// retained scene-linear image once.
+///
+/// Deliberately absent, because they are a different problem that needs
+/// resampling: arbitrary-angle rotation, a free-form degree field,
+/// straightening and crop.
+private struct OrientationControls: View {
+    let documentState: DocumentState
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button(action: documentState.rotateOrientationLeft) {
+                Label("Rotate Left", systemImage: "rotate.left")
+            }
+            .help("Rotate the photograph 90° counter-clockwise")
+            .accessibilityLabel("Rotate left 90 degrees")
+
+            Button(action: documentState.rotateOrientationRight) {
+                Label("Rotate Right", systemImage: "rotate.right")
+            }
+            .help("Rotate the photograph 90° clockwise")
+            .accessibilityLabel("Rotate right 90 degrees")
+
+            Button(action: documentState.flipOrientationHorizontally) {
+                Label("Flip Horizontally", systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right")
+            }
+            .help("Exchange left and right")
+            .accessibilityLabel("Flip horizontally")
+
+            Button(action: documentState.flipOrientationVertically) {
+                Label("Flip Vertically", systemImage: "arrow.up.and.down.righttriangle.up.righttriangle.down")
+            }
+            .help("Exchange top and bottom")
+            .accessibilityLabel("Flip vertically")
+
+            Button("Reset", action: documentState.resetOrientation)
+                .help("Return to the orientation the file records — not necessarily upright")
+                .accessibilityLabel("Reset orientation to the file's own")
+                .disabled(documentState.orientationAdjustment.isIdentity)
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.bordered)
+        .disabled(!documentState.canAdjustOrientation)
     }
 }
