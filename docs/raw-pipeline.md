@@ -875,9 +875,10 @@ refuses with `OrientationError.unsupportedDecoderOrientation(flip:)`, reporting
 the value verbatim.
 
 What this cannot distinguish is a file that recorded upright from a file that
-recorded nothing: LibRaw's `identify()` substitutes `0` when neither a
-makernote nor EXIF tag 274 supplied an orientation, so both arrive as the same
-number.
+recorded nothing. LibRaw maps EXIF `1` to `0`, copies a `t_flip` into
+`tiff_flip` only when it is non-zero, and finally substitutes `0` when nothing
+supplied an orientation — so both arrive as the same number. Telling the two
+apart needs the file's own bytes, not the decoder.
 
 #### The coordinate mapping
 
@@ -1756,7 +1757,7 @@ metadata names.
 
 | | |
 | --- | --- |
-| EXIF tag 274 in the file | `1` |
+| EXIF tag 274 in the file | present in IFD0 — `SHORT`, count 1, value `1`, at file offset `118` |
 | LibRaw `flip` | `0` |
 | Application-owned orientation | `.upright` |
 | Swaps dimensions / mirrored | no / no |
@@ -1764,11 +1765,13 @@ metadata names.
 | Values | 36 990 720, bit-identical to the channel-mixed buffer |
 | Allocation | none — the `.upright` path shares the input array |
 
-**The fixture is stored sideways and records no rotation.** The photograph was
-taken with the camera turned and the body recorded nothing about it, so the
-correct response to the metadata is to display it as captured. Making it
-upright is a manual editing operation; a camera-model special case would make
-this one file look right and every correctly tagged E-PL3 file look wrong.
+**The fixture is stored sideways and records upright.** The photograph was
+taken with the camera turned and the body wrote tag 274 as `1` anyway — the tag
+is present, not missing, which a test asserts from the file's bytes rather than
+inferring from `flip == 0`. The correct response to that metadata is to display
+the frame as captured. Making it upright is a manual editing operation; a
+camera-model special case would make this one file look right and every
+correctly tagged E-PL3 file look wrong.
 
 That makes the fixture a strong test of the metadata path and a weak one for
 the coordinate arithmetic, so the same real 12-megapixel frame is also put
@@ -1895,7 +1898,7 @@ everything downstream of *that*, plus image quality:
   and need interpolation.
 - **A way to override a file's recorded orientation.** The workspace reads
   metadata and corrects nothing, so a photograph taken with the camera turned
-  by a body that recorded no orientation displays as captured.
+  by a body that recorded upright displays as captured.
 - **Preview resolution strategy, caching and cancellation.** The workspace
   renders the full frame every time it opens a file.
 - **Export**, which needs its own bit depth, its own colour decisions and its

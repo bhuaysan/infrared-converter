@@ -208,13 +208,25 @@ into a silent claim about the photograph.
 
 ### What this cannot distinguish
 
-LibRaw's `identify()` finishes by substituting `0` when neither a makernote nor
-EXIF tag 274 supplied an orientation (`src/metadata/identify.cpp`). So "the file
-recorded upright" and "nothing in the file recorded anything" arrive at this
-boundary as the same number and are genuinely indistinguishable here.
+"The file recorded upright" and "nothing in the file recorded anything" arrive
+at this boundary as the same number, and are genuinely indistinguishable
+through it.
 
-That is a fact about the decoder, not a defect in the mapping, and it has a
-visible consequence recorded in Decision 12.
+Two mechanisms in LibRaw 0.22.2 combine to produce that. `src/metadata/tiff.cpp`
+stores tag 274 as `"50132467"[exif & 7] - '0'`, which is `0` for EXIF `1`, and
+the directory sweep that follows copies a value into `tiff_flip` only when it
+is **non-zero**. `identify()` then substitutes `0` for an orientation nothing
+supplied (`src/metadata/identify.cpp`). Both routes end at `flip == 0`.
+
+This was verified empirically against the E-PL3 fixture, not only read: with
+tag 274 rewritten to `6` the decoder reports `flip 6`, to `8` it reports
+`flip 5`, and to `2` it reports `flip 1` — so the tag **is** read. With the
+tag's id rewritten so the entry is no longer tag 274, the decoder reports
+`flip 0`, exactly as it does for the untouched file.
+
+The consequence is that `flip == 0` is evidence of "upright", not evidence of
+"untagged". Determining which one a file actually is requires reading the
+file's own bytes; Decision 12 records what the fixture turned out to contain.
 
 ## Decision 9 — Width and height are exchanged for exactly four orientations
 
@@ -287,11 +299,20 @@ This has a consequence worth stating plainly, because it is the opposite of
 what a milestone about orientation might be expected to produce.
 
 **The Olympus E-PL3 reference fixture is stored sideways and records EXIF
-orientation 1.** Its TIFF tag 274 is `1`; LibRaw reports `flip 0`; macOS's own
-metadata agrees. The photograph was taken with the camera turned, and the body
-recorded nothing about it. The application therefore maps it to `.upright` and
-displays it exactly as captured — sideways — which is the correct response to
-the metadata that exists.
+orientation 1.** EXIF/TIFF tag 274 is physically present in the file's IFD0 —
+a `SHORT` of count 1, value `1`, at file offset `118` — and LibRaw reports
+`flip 0`. The tag is not missing: the photograph was taken with the camera
+turned and the body recorded **upright anyway**.
+
+An earlier draft of this ADR said the body "recorded nothing about it". That
+was wrong, and it was wrong in a way worth naming: it inferred absence from
+`flip == 0`, which is exactly the inference the section above says cannot be
+made. The tag's bytes are now read and pinned by
+`ImageOrienterFixtureTests.theFixtureCarriesExifTag274`.
+
+The application therefore maps the file to `.upright` and displays it exactly
+as captured — sideways — which is the correct response to the metadata the
+file actually contains.
 
 A camera-model special case that rotated E-PL3 files would make this one file
 look right and every correctly tagged E-PL3 file look wrong. Making that
@@ -334,8 +355,9 @@ export in sensor order.
 - **Crop, perspective correction, lens corrections** and every other geometric
   editing feature.
 - **A user-facing orientation control.** The workspace reads metadata; nothing
-  lets a person override it yet. That is the natural home for making an
-  untagged sideways photograph upright.
+  lets a person override it yet. That is the natural home for making a
+  sideways photograph upright, whatever its metadata says. Decided in
+  [ADR 0010](0010-user-owned-orientation-adjustment.md).
 - **Orientation for export.** Export has no stage at all yet and will need its
   own decisions.
 - **Whether orientation should move earlier for performance.** The four
@@ -353,8 +375,9 @@ export in sensor order.
   normalisation.
 - The display encoder's claim to be per-component and geometry-preserving is
   intact, and now provably so: it consumes geometry it did not produce.
-- A file recording a rotation is shown rotated. A file recording none is shown
-  as captured, including when the camera was plainly turned — and the reason is
-  a named, testable fact about the file rather than a missing feature.
+- A file recording a rotation is shown rotated. A file recording upright is
+  shown as captured, including when the camera was plainly turned — and the
+  reason is a named, testable fact about the file rather than a missing
+  feature.
 - Orientation is lossless. Nothing downstream has to treat an oriented image as
   degraded, which matters for the export path that does not exist yet.

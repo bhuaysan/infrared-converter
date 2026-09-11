@@ -14,11 +14,15 @@ import Foundation
 ///
 /// ## What this fixture's metadata actually says
 ///
-/// The file records **EXIF orientation 1**, which LibRaw reports as `flip 0`
-/// and this application maps to `.upright`. The photograph was taken with the
-/// camera turned, and the body recorded nothing about it — so the correct
-/// response to the metadata is to display it exactly as captured, and that is
-/// what the owned pipeline does.
+/// EXIF/TIFF tag 274 is **physically present** in the file's IFD0, as a
+/// `SHORT` of count 1 holding the value `1`. `theFixtureCarriesExifTag274`
+/// reads those bytes and pins them. LibRaw reports that as `flip 0`, and this
+/// application maps it to `.upright`.
+///
+/// So the photograph was taken with the camera turned and the body recorded
+/// **upright anyway** — it did not omit the tag. The correct response to that
+/// metadata is to display the frame exactly as captured, and that is what the
+/// owned pipeline does.
 ///
 /// That makes the fixture a genuine test of the metadata path and a weak one
 /// for the coordinate arithmetic, so this suite does both: it pins the upright
@@ -64,6 +68,43 @@ struct ImageOrienterFixtureTests {
     }
 
     // MARK: - What the file records
+
+    /// Reads the fixture's own bytes, because the decoder cannot answer this.
+    ///
+    /// LibRaw maps a **present** tag 274 whose value is `1` and an **absent**
+    /// tag 274 onto the same `flip == 0`: `src/metadata/tiff.cpp` stores
+    /// `"50132467"[exif & 7] - '0'`, which is `0` for EXIF `1`, and then only
+    /// copies a **non-zero** `t_flip` into `tiff_flip`; `identify()` finishes
+    /// by substituting `0` for an orientation nothing supplied. Both routes
+    /// arrive at `0`.
+    ///
+    /// So "the file recorded upright" is a claim about the file, and it has to
+    /// be evidenced from the file. This test is that evidence.
+    @Test("The fixture physically carries EXIF/TIFF tag 274 with value 1")
+    func theFixtureCarriesExifTag274() throws {
+        let url = try #require(RAWFixtures.olympusORF)
+        let directory = try TIFFTagReader.readIFD0(at: url)
+
+        // An Olympus ORF: TIFF-structured, little-endian, magic 0x4F52 ("RO")
+        // in place of TIFF's own 42.
+        #expect(directory.byteOrder == "II")
+        #expect(directory.magic == 0x4F52)
+        #expect(directory.firstIFDOffset == 8)
+
+        let entry = try #require(
+            directory.entries.first { $0.tag == 274 },
+            "EXIF/TIFF tag 274 is absent from IFD0"
+        )
+        #expect(entry.type == 3)       // SHORT
+        #expect(entry.count == 1)
+        #expect(entry.firstValue == 1) // EXIF 1 — upright
+        #expect(entry.fileOffset == 118)
+
+        // The value the tag carries is one this application models, and it is
+        // the one the decoder ends up reporting.
+        #expect(RAWImageOrientation(exifOrientation: 1) == .upright)
+        #expect(try LibRawDecoder().readMetadata(at: url).geometry.flip == 0)
+    }
 
     @Test("The fixture's recorded orientation maps to upright, and says so")
     func theFixtureRecordsAnUprightOrientation() throws {

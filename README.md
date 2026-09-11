@@ -165,10 +165,13 @@ identity false-colour transform, identity mix, `0 EV`:
 | Non-finite intermediates | 0 |
 
 The fixture photograph was taken with the camera turned, and the body recorded
-nothing about it — EXIF tag 274 is `1`. The application therefore displays it
-exactly as captured, sideways, which is the correct response to the metadata
-that exists. Making it upright is a manual editing operation, and a
-camera-model special case would make this one file look right and every
+**upright anyway**. EXIF/TIFF tag 274 is physically present in the file's IFD0
+— a `SHORT` of count 1, value `1`, at file offset `118` — and the bytes are
+read and pinned by a test, because LibRaw's `flip 0` alone cannot tell a
+present-and-upright tag from an absent one. The application therefore displays
+the frame exactly as captured, sideways, which is the correct response to the
+metadata the file contains. Making it upright is a manual editing operation,
+and a camera-model special case would make this one file look right and every
 correctly tagged E-PL3 file look wrong.
 
 Other formats LibRaw supports (ARW, NEF/NRW, CR2/CR3, RAF, RW2, …) should decode

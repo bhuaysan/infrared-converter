@@ -312,18 +312,22 @@ extension RAWMetadata.Geometry {
     ///
     /// ## What this cannot tell you
     ///
-    /// Whether the file **recorded** an orientation at all. LibRaw's
-    /// `identify()` finishes by substituting `0` when neither a makernote nor
-    /// EXIF tag 274 supplied one (`src/metadata/identify.cpp`), so "the file
-    /// said upright" and "nothing in the file said anything" arrive here as
-    /// the same number and are genuinely indistinguishable at this boundary.
+    /// Whether the file **recorded** an orientation at all. Two LibRaw
+    /// behaviours combine to hide that: `src/metadata/tiff.cpp` maps EXIF `1`
+    /// to `0` and then copies a value into `tiff_flip` only when it is
+    /// non-zero, and `identify()` finishes by substituting `0` when nothing
+    /// supplied one (`src/metadata/identify.cpp`). So "the file said upright"
+    /// and "nothing in the file said anything" arrive here as the same number
+    /// and are genuinely indistinguishable at this boundary. Answering the
+    /// question needs the file's own bytes.
     ///
     /// That is not a defect in this property; it is a fact about the decoder,
     /// and it has a visible consequence: a photograph taken with the camera
-    /// turned, by a body that recorded no orientation, is upright as far as
-    /// every layer above this is concerned. Displaying it as captured is the
-    /// correct response to the metadata. Correcting it is a manual editing
-    /// operation this milestone does not provide.
+    /// turned, by a body that recorded upright — or recorded nothing — is
+    /// upright as far as every layer above this is concerned. Displaying it as
+    /// captured is the correct response to the metadata. Correcting it is a
+    /// user adjustment, kept separate from this value; see
+    /// `UserOrientationAdjustment`.
     public var orientation: RAWImageOrientation? {
         RAWImageOrientation(decoderFlip: flip)
     }

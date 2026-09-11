@@ -58,9 +58,9 @@ import Foundation
 /// - **The orientation the file itself names.** Read from
 ///   `RAWMetadata.Geometry.orientation`, which is the decoder's `flip` mapped
 ///   once into an application-owned case. There is no camera-model table, no
-///   per-file override and no correction of any kind: if a body recorded no
-///   orientation, the photograph is shown as it was stored, because that is
-///   what the file says. A value the application does not model is a **typed
+///   per-file override and no correction of any kind: if the file records
+///   upright, the photograph is shown as it was stored, because that is what
+///   the file says. A value the application does not model is a **typed
 ///   failure**, not a silent `.upright`.
 ///
 /// None of this is a colour claim. The result is displayable, which is a
