@@ -322,15 +322,22 @@ struct WorkspaceOrientationAdjustmentTests {
         }
 
         guard case .decoded(let loaded) = state.status,
-              case .unavailable(let reason) = loaded.owned
+              case .unavailable(let failure) = loaded.owned
         else {
             Issue.record("Expected the owned preview to be unavailable")
             return
         }
-        #expect(!reason.isEmpty)
+        #expect(!failure.message.isEmpty)
+        #expect(failure.stage == .ownedRender)
+        #expect(failure.orientation == .unsupportedDecoderOrientation(flip: 9))
         // The prepare phase succeeded, so the source is retained — the
         // refusal is the orientation stage's, and only that.
         #expect(loaded.source != nil)
+        // Retained is not adjustable. Nothing can derive an effective
+        // orientation from a flip this application cannot read, so the
+        // controls stay inert rather than offering a button that must fail.
+        #expect(!loaded.isAdjustable)
+        #expect(!state.canAdjustOrientation)
         #expect(state.orientationAdjustment.isIdentity)
     }
 }

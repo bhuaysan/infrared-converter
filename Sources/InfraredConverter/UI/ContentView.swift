@@ -120,16 +120,24 @@ private struct OwnedPreviewView: View {
                     .aspectRatio(contentMode: .fit)
                     .padding(12)
 
-            case .unavailable(let reason):
+            case .unavailable(let failure):
                 VStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle")
                         .font(.largeTitle)
                         .foregroundStyle(.secondary)
                     Text("The preview could not be rendered")
                         .font(.headline)
-                    Text(reason)
+                    Text(failure.message)
                         .multilineTextAlignment(.center)
                         .foregroundStyle(.secondary)
+                    // The stage's own elaboration, where it has one. Free of
+                    // LibRaw's internal integer codes by construction.
+                    if let reason = failure.failureReason {
+                        Text(reason)
+                            .font(.caption)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.tertiary)
+                    }
                 }
                 .padding(40)
             }
@@ -269,9 +277,9 @@ private struct RAWInspectorView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-            case .unavailable(let reason):
+            case .unavailable(let failure):
                 row("Status", "Failed")
-                Text(reason)
+                Text(failure.message)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

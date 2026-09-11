@@ -1,46 +1,90 @@
 import Foundation
 
-/// Why one of the workspace's two RAW paths refused a file.
+/// Why one part of opening a file refused, and which part it was.
 ///
-/// Kept as a value rather than as a bare `Error` because the two paths'
-/// refusals are carried and reported together: the owned pipeline's stages
-/// throw several error types, the decoder throws one, and both have to survive
-/// into the same sentence without either being flattened into "failed".
-public struct RAWPathFailure: Error, Equatable {
-    /// The refusal as a decoder error, when the decoder was the stage that
-    /// refused. `nil` when a later stage did — a normalisation, a demosaic, a
-    /// colour conversion, an orientation.
-    public let decoding: RAWDecodingError?
+/// The refusal itself is **kept**, not flattened to a sentence. The stages
+/// throw four different error types between them — `RAWDecodingError`,
+/// `RAWProcessingError`, `IRProcessingError`, `OrientationError` — and a
+/// caller that has to ask "was this the orientation stage?" can only do so if
+/// the value survived. Strings are for readers; the error is for code.
+public struct RAWPathFailure: Error {
 
-    /// What the refusal says, for a reader.
-    public let message: String
+    /// Which part of the open refused.
+    ///
+    /// The two owned stages are kept apart because they mean different things.
+    /// A preparation failure means there is no scene-linear state at all. A
+    /// render failure means there is one and nothing can be shown from it —
+    /// which is what `DocumentState.Loaded.isAdjustable` turns on.
+    public enum Stage: Equatable {
+        /// The application-owned pipeline before it had a scene-linear state:
+        /// mosaic decode, normalise, estimate, balance, demosaic, convert,
+        /// mix.
+        case ownedPreparation
+        /// The application-owned pipeline's orientation and display stages,
+        /// with the scene-linear state already in hand.
+        case ownedRender
+        /// The LibRaw processed-RGB diagnostic decode.
+        case legacyReference
+    }
 
-    public init(_ error: Error) {
-        self.decoding = error as? RAWDecodingError
-        self.message = error.localizedDescription
+    public let stage: Stage
+
+    /// The refusal, exactly as the stage threw it.
+    public let underlying: any Error
+
+    public init(stage: Stage, _ error: any Error) {
+        self.stage = stage
+        self.underlying = error
+    }
+
+    /// The decoder's own error, when the decoder was the stage that refused.
+    public var decoding: RAWDecodingError? { underlying as? RAWDecodingError }
+
+    /// The geometry stage's own error, when orientation was what refused.
+    ///
+    /// This is the projection `isAdjustable` is decided from, and the reason
+    /// the underlying value is kept rather than described.
+    public var orientation: OrientationError? { underlying as? OrientationError }
+
+    /// What to show a reader. Free of LibRaw's internal integer codes: every
+    /// error type here is `LocalizedError`, and the decoder's own
+    /// `errorDescription` never carries the code.
+    public var message: String { underlying.localizedDescription }
+
+    /// The stage's own elaboration, where it has one. Also free of internal
+    /// codes — `RAWDecodingError.failureReason` reports a diagnostic through
+    /// `userFacingSummary`, which omits them.
+    public var failureReason: String? {
+        (underlying as? LocalizedError)?.failureReason
     }
 }
 
 /// Why the workspace could not open a file at all.
 ///
-/// Reached only when **both** paths refused it. Either path succeeding alone
-/// leaves the file open, which is the point of the type existing:
+/// Reached only when **neither** path produced an image. Either one producing
+/// one leaves the file open:
 ///
 /// ```text
-/// owned ok   / legacy ok    → workspace image + diagnostic reference
-/// owned ok   / legacy fails → workspace image, reference reported missing
-/// owned fails/ legacy ok    → the owned failure, reported; never a fallback
-/// owned fails/ legacy fails → this error
+/// owned prepared + rendered / legacy ok      → workspace image + reference
+/// owned prepared + rendered / legacy fails   → workspace image, reference missing
+/// owned fails at prepare    / legacy ok      → the owned failure; never a fallback
+/// owned fails at render     / legacy ok      → the owned failure; never a fallback
+/// owned fails at prepare    / legacy fails   → this error
+/// owned fails at render     / legacy fails   → this error
 /// ```
 ///
 /// The application-owned pipeline is the workspace image. The LibRaw
 /// processed-RGB decode is a diagnostic reference beside it. Neither is a gate
 /// on the other, and neither ever stands in for the other.
-public struct DocumentOpenError: Error, Equatable, LocalizedError {
+///
+/// The last row is the one this type gained: a prepared scene-linear state is
+/// not a photograph on screen, so "prepare succeeded" is not an open.
+public struct DocumentOpenError: Error, LocalizedError {
     public let url: URL
 
-    /// The application-owned pipeline's refusal. The one that matters: it is
-    /// the image the workspace would have shown.
+    /// The application-owned pipeline's refusal, and which of its two halves
+    /// produced it. The one that matters: it is the image the workspace would
+    /// have shown.
     public let owned: RAWPathFailure
 
     /// The legacy diagnostic decode's refusal, kept because a difference
@@ -60,8 +104,16 @@ public struct DocumentOpenError: Error, Equatable, LocalizedError {
 
     public var failureReason: String? {
         """
-        The image pipeline refused it: \(owned.message) \
-        The LibRaw diagnostic decode refused it too: \(legacy.message)
+        \(Self.label(for: owned.stage)) refused it: \(owned.message) \
+        \(Self.label(for: legacy.stage)) refused it too: \(legacy.message)
         """
+    }
+
+    private static func label(for stage: RAWPathFailure.Stage) -> String {
+        switch stage {
+        case .ownedPreparation: return "The image pipeline"
+        case .ownedRender: return "The image pipeline's render"
+        case .legacyReference: return "The LibRaw diagnostic decode"
+        }
     }
 }

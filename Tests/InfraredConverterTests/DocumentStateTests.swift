@@ -5,16 +5,19 @@ import Foundation
 /// The workspace's two RAW paths and the four ways they can end.
 ///
 /// ```text
-/// owned ok    / legacy ok      → workspace image + diagnostic reference
-/// owned ok    / legacy fails   → workspace image, reference reported missing
-/// owned fails / legacy ok      → the owned failure, reported; never a fallback
-/// owned fails / legacy fails   → a typed open error naming both refusals
+/// owned prepared + rendered / legacy ok      → workspace image + reference
+/// owned prepared + rendered / legacy fails   → workspace image, reference missing
+/// owned fails at prepare    / legacy ok      → the owned failure; no fallback
+/// owned fails at render     / legacy ok      → the owned failure; no fallback
+/// owned fails at prepare    / legacy fails   → a typed open error
+/// owned fails at render     / legacy fails   → a typed open error
 /// ```
 ///
-/// The second row is the one this suite exists for. The legacy
-/// processed-RGB decode used to run first and throw, which closed the file
-/// before the application-owned pipeline — the actual workspace image — was
-/// ever asked.
+/// The owned path is split into its two halves because the boundary turns on
+/// the difference. Preparing produces the expensive scene-linear state and
+/// proves nothing about whether an image can be shown; only a completed
+/// render does. An open used to succeed on a prepared source alone, which
+/// meant a file could be reported as open with no displayable image anywhere.
 @Suite
 @MainActor
 struct DocumentStateTests {
@@ -59,6 +62,24 @@ struct DocumentStateTests {
                     ? .success(RAWTestData.decodedRAW(url: url))
                     : .failure(.fileNotFound(url)),
                 mosaic: ownedSucceeds ? .success(stubMosaic(url: url)) : nil
+            )
+        )
+    }
+
+    /// A decoder whose mosaic prepares perfectly and whose metadata names an
+    /// orientation this application does not model.
+    ///
+    /// `flip 9` is not one of LibRaw's eight values, so every stage up to and
+    /// including the creative mix succeeds and the geometry stage refuses —
+    /// which is the only way to reach "prepared but unrenderable" without
+    /// inventing a broken stage.
+    private static func unrenderableState(legacySucceeds: Bool) -> DocumentState {
+        DocumentState(
+            decoder: StubDecoder(
+                result: legacySucceeds
+                    ? .success(RAWTestData.decodedRAW(url: url))
+                    : .failure(.fileNotFound(url)),
+                mosaic: .success(WorkspaceStubs.mosaic(url: url, flip: 9))
             )
         )
     }
@@ -170,8 +191,10 @@ struct DocumentStateTests {
         #expect(failure.decoding == .fileNotFound(Self.url))
         #expect(!failure.message.isEmpty)
 
-        // The file is fully usable: the correction controls work.
+        // The file is fully usable: the correction controls work, because the
+        // owned pipeline rendered this source rather than merely prepared it.
         #expect(loaded.isAdjustable)
+        #expect(loaded.adjustableSource != nil)
         #expect(state.canAdjustOrientation)
     }
 
@@ -201,11 +224,19 @@ struct DocumentStateTests {
         try await Self.waitUntilSettled(state)
 
         let loaded = try Self.decoded(state)
-        guard case .unavailable(let reason) = loaded.owned else {
+        guard case .unavailable(let failure) = loaded.owned else {
             Issue.record("Expected the owned preview to be unavailable")
             return
         }
-        #expect(!reason.isEmpty)
+        #expect(!failure.message.isEmpty)
+        // The refusal is the preparation half's, and says so.
+        #expect(failure.stage == .ownedPreparation)
+        #expect(
+            failure.decoding
+                == .unsupportedRawStorage(
+                    Self.url, reason: "StubDecoder does not implement decodeMosaic"
+                )
+        )
 
         // The legacy decode succeeded, and is deliberately not standing in for
         // the owned result.
@@ -215,6 +246,100 @@ struct DocumentStateTests {
         // Nothing to reprocess, and nothing pretending there is.
         #expect(loaded.source == nil)
         #expect(!loaded.isAdjustable)
+        #expect(loaded.adjustableSource == nil)
+        #expect(!state.canAdjustOrientation)
+    }
+
+    // MARK: - Prepare succeeds, the initial render fails
+
+    /// The case the open boundary used to get wrong in the other direction: a
+    /// prepared source is not an image, but the diagnostic reference is one,
+    /// so the file still opens.
+    @Test("A render failure with a working reference opens, reports, and never falls back")
+    func anInitialRenderFailureWithALegacyReference() async throws {
+        let state = Self.unrenderableState(legacySucceeds: true)
+        state.open(Self.url)
+        try await Self.waitUntilSettled(state)
+
+        let loaded = try Self.decoded(state)
+        guard case .unavailable(let failure) = loaded.owned else {
+            Issue.record("Expected the owned preview to be unavailable")
+            return
+        }
+
+        // The real render error, typed, not a sentence about it.
+        #expect(failure.stage == .ownedRender)
+        #expect(failure.orientation == .unsupportedDecoderOrientation(flip: 9))
+        #expect(!failure.message.isEmpty)
+
+        // The reference is available and is deliberately not the workspace
+        // image.
+        #expect(loaded.legacy.decoded != nil)
+        #expect(loaded.legacy.preview != nil)
+
+        // The expensive preparation is kept, because it is the most
+        // informative thing about this file...
+        #expect(loaded.source != nil)
+        // ...and it does not make the file adjustable. No correction can
+        // derive an effective orientation from a flip we cannot read, so every
+        // adjustment would refuse exactly as this one did.
+        #expect(!loaded.isAdjustable)
+        #expect(loaded.adjustableSource == nil)
+        #expect(!state.canAdjustOrientation)
+    }
+
+    @Test("Orientation controls do nothing on a file whose orientation cannot be read")
+    func adjustmentsAreInertWhenTheRenderCannotSucceed() async throws {
+        let state = Self.unrenderableState(legacySucceeds: true)
+        state.open(Self.url)
+        try await Self.waitUntilSettled(state)
+
+        state.rotateOrientationRight()
+        state.flipOrientationVertically()
+        state.resetOrientation()
+
+        // The record is untouched: a control that cannot work does not record
+        // an intent it will never honour.
+        #expect(state.orientationAdjustment == .identity)
+        let loaded = try Self.decoded(state)
+        #expect(loaded.adjustments.orientation == .identity)
+        guard case .unavailable = loaded.owned else {
+            Issue.record("Expected the owned preview to stay unavailable")
+            return
+        }
+    }
+
+    /// The case that was missing: everything expensive succeeded, and there is
+    /// still no image anywhere.
+    @Test("A render failure with no reference is a failed open, not a decoded one")
+    func anInitialRenderFailureWithNoReferenceFailsTheOpen() async throws {
+        let state = Self.unrenderableState(legacySucceeds: false)
+        state.open(Self.url)
+        try await Self.waitUntilSettled(state)
+
+        guard case .failed(let failedURL, let error) = state.status else {
+            Issue.record("Expected .failed, got \(state.status)")
+            return
+        }
+        #expect(failedURL == Self.url)
+        #expect(error.url == Self.url)
+
+        // The owned refusal is the render half's, with the geometry stage's
+        // own error intact.
+        #expect(error.owned.stage == .ownedRender)
+        #expect(error.owned.orientation == .unsupportedDecoderOrientation(flip: 9))
+
+        // The reference's refusal is kept separately, and is a different error
+        // from a different stage.
+        #expect(error.legacy.stage == .legacyReference)
+        #expect(error.legacy.decoding == .fileNotFound(Self.url))
+
+        #expect(error.errorDescription?.isEmpty == false)
+        let reason = try #require(error.failureReason)
+        #expect(reason.contains("render"))
+        #expect(reason.contains("LibRaw"))
+
+        // And nothing claims the file is open.
         #expect(!state.canAdjustOrientation)
     }
 
@@ -235,6 +360,7 @@ struct DocumentStateTests {
 
         // The owned pipeline's refusal is the one that matters, and it is the
         // decoder's own error rather than a flattened message.
+        #expect(error.owned.stage == .ownedPreparation)
         #expect(
             error.owned.decoding
                 == .unsupportedRawStorage(
@@ -243,6 +369,7 @@ struct DocumentStateTests {
         )
         // The reference's refusal is kept beside it: two different reasons are
         // themselves the diagnosis.
+        #expect(error.legacy.stage == .legacyReference)
         #expect(error.legacy.decoding == .fileNotFound(Self.url))
 
         #expect(error.errorDescription?.isEmpty == false)

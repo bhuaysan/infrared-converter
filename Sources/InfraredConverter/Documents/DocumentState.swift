@@ -87,7 +87,31 @@ final class DocumentState {
         /// the **unoriented** channel-mixed image, so a new adjustment is
         /// always applied to it rather than to whatever is currently on
         /// screen.
+        ///
+        /// It is retained even when the initial render refused it, because a
+        /// prepared source is genuinely useful for diagnosis — but its
+        /// presence is **not** what makes the file adjustable. See
+        /// `isAdjustable`.
         let source: WorkspacePreviewPipeline.Source?
+
+        /// Whether the workspace can reprocess this file with a different
+        /// adjustment.
+        ///
+        /// Established once, when the file was opened, and never revised.
+        ///
+        /// The rule is: **the owned pipeline rendered this source at least
+        /// once.** A retained source alone says only that the expensive
+        /// preparation exists; it says nothing about whether anything can be
+        /// shown. A file whose metadata names an orientation this application
+        /// does not model prepares perfectly well and then refuses at the
+        /// geometry stage — for every adjustment equally, because the
+        /// effective orientation cannot be derived at all — so offering
+        /// rotate and flip there would offer a button that cannot work.
+        ///
+        /// It is a stored fact rather than a reading of `owned` for a reason:
+        /// a render that fails *after* the file is open must not disable the
+        /// controls, or the user could not undo the adjustment that caused it.
+        let isAdjustable: Bool
 
         /// The user's editing decisions. In memory only; see the note on the
         /// type.
@@ -96,10 +120,11 @@ final class DocumentState {
         /// The application-owned pipeline's result, or the reason it failed.
         var owned: OwnedPreview
 
-        /// Whether the workspace can reprocess this file with a different
-        /// adjustment. False when the owned pipeline never produced a
-        /// scene-linear state to start from.
-        var isAdjustable: Bool { source != nil }
+        /// The retained source, but only when re-rendering from it can
+        /// actually work. The one thing a render slot may be built from.
+        var adjustableSource: WorkspacePreviewPipeline.Source? {
+            isAdjustable ? source : nil
+        }
     }
 
     /// The LibRaw processed-RGB decode kept beside the workspace image.
@@ -144,7 +169,27 @@ final class DocumentState {
     /// response to our own being broken: it would look like success.
     enum OwnedPreview {
         case rendered(WorkspacePreview)
-        case unavailable(reason: String)
+        /// The stage that refused, kept as a value. The UI shows its message;
+        /// the application layer can still ask what kind of refusal it was.
+        case unavailable(RAWPathFailure)
+    }
+
+    /// What the application-owned pipeline achieved for one file, as one
+    /// value.
+    ///
+    /// The distinction the open boundary turns on is between *prepared* and
+    /// *rendered*. Preparing produces the expensive scene-linear state and
+    /// demonstrates nothing about whether an image can be shown; only a
+    /// completed render does. Modelling the two halves as one outcome is what
+    /// stops "prepare succeeded" from being mistaken for "the file opened".
+    private enum OwnedOutcome {
+        /// Prepared and rendered. This is the only success.
+        case rendered(WorkspacePreviewPipeline.Source, WorkspacePreview)
+        /// Prepared, then refused by the orientation or display stage. The
+        /// source is kept for diagnosis; nothing can be re-rendered from it.
+        case unrenderable(WorkspacePreviewPipeline.Source, RAWPathFailure)
+        /// Never reached a scene-linear state at all.
+        case unprepared(RAWPathFailure)
     }
 
     private(set) var status: Status = .empty
@@ -205,13 +250,18 @@ final class DocumentState {
         }
     }
 
-    /// Runs both RAW paths, independently, and reports what each of them did.
+    /// Runs both RAW paths, independently, and decides what the six possible
+    /// pairings mean.
     ///
-    /// The order here is deliberate and so is the absence of a `try` around
-    /// the pair. The application-owned pipeline runs first because it is the
+    /// The order is deliberate and so is the absence of a `try` around the
+    /// pair. The application-owned pipeline runs first because it is the
     /// workspace image; the legacy processed-RGB decode runs beside it, never
-    /// in front of it. Each is allowed to fail on its own, and only both
-    /// failing closes the file.
+    /// in front of it. Each is allowed to fail on its own.
+    ///
+    /// The open succeeds when **an image exists**. A prepared scene-linear
+    /// state is not an image: if the initial render refused it and the
+    /// diagnostic decode refused the file too, there is nothing to show and
+    /// the open failed, however much expensive work succeeded on the way.
     ///
     /// - Returns: the opened file, the reason it could not be opened, or
     ///   `nil` when the open was cancelled before it finished.
@@ -219,41 +269,111 @@ final class DocumentState {
         _ url: URL,
         using decoder: RAWDecoder
     ) -> Result<Loaded, DocumentOpenError>? {
-        let prepared = Result {
-            try WorkspacePreviewPipeline().prepare(decoding: url, using: decoder)
-        }
+        let adjustments = ImageAdjustments.none
+        guard let owned = ownedOutcome(
+            for: url, using: decoder, adjustments: adjustments, cancellation: .enclosingTask
+        ) else { return nil }
         let legacy = legacyReference(for: url, using: decoder)
 
-        let source = try? prepared.get()
-        // Either path's metadata will do — they are the same decoder reading
-        // the same file — and the owned one is preferred because it belongs to
-        // the image the workspace shows. Neither available means neither path
-        // got far enough to read anything.
-        guard let metadata = source?.metadata ?? legacy.decoded?.metadata else {
-            return .failure(
-                DocumentOpenError(
+        // The six cases, written out as the six cases. Metadata comes from
+        // whichever path read it — both paths read the same file with the same
+        // decoder — and the owned one is preferred because it belongs to the
+        // image the workspace shows.
+        switch (owned, legacy) {
+        case (.rendered(let source, let preview), _):
+            return .success(
+                Loaded(
                     url: url,
-                    owned: RAWPathFailure(preparationError(prepared, url: url)),
-                    legacy: legacy.failure ?? RAWPathFailure(RAWDecodingError.decoderUnavailable)
+                    metadata: source.metadata,
+                    legacy: legacy,
+                    source: source,
+                    isAdjustable: true,
+                    adjustments: adjustments,
+                    owned: .rendered(preview)
                 )
             )
+
+        case (.unrenderable(let source, let failure), .decoded):
+            // The expensive half worked and the cheap half refused. The source
+            // is kept — it is the most informative thing about this file — but
+            // nothing can be rendered from it, so nothing offers to.
+            return .success(
+                Loaded(
+                    url: url,
+                    metadata: source.metadata,
+                    legacy: legacy,
+                    source: source,
+                    isAdjustable: false,
+                    adjustments: adjustments,
+                    owned: .unavailable(failure)
+                )
+            )
+
+        case (.unprepared(let failure), .decoded(let decoded, _)):
+            return .success(
+                Loaded(
+                    url: url,
+                    metadata: decoded.metadata,
+                    legacy: legacy,
+                    source: nil,
+                    isAdjustable: false,
+                    adjustments: adjustments,
+                    owned: .unavailable(failure)
+                )
+            )
+
+        case (.unrenderable(_, let ownedFailure), .unavailable(let legacyFailure)),
+             (.unprepared(let ownedFailure), .unavailable(let legacyFailure)):
+            return .failure(
+                DocumentOpenError(url: url, owned: ownedFailure, legacy: legacyFailure)
+            )
+        }
+    }
+
+    /// Prepares and renders the application-owned pipeline, keeping the two
+    /// halves distinguishable in the result.
+    ///
+    /// A failure is reported, never replaced by the LibRaw image. Every error
+    /// the chain can raise is `LocalizedError`, so the message a user sees
+    /// names the stage that actually refused — an unsupported sensor layout,
+    /// an unusable exposure, an orientation code we do not model — instead of
+    /// a generic "preview failed". The error value itself is kept too, which
+    /// is what lets the caller tell a preparation refusal from a render one.
+    ///
+    /// - Returns: the outcome, or `nil` when the work was cancelled.
+    ///   Cancellation is not a failure and must never be shown as one.
+    private nonisolated static func ownedOutcome(
+        for url: URL,
+        using decoder: RAWDecoder,
+        adjustments: ImageAdjustments,
+        cancellation: ProcessingCancellation
+    ) -> OwnedOutcome? {
+        let pipeline = WorkspacePreviewPipeline()
+
+        let source: WorkspacePreviewPipeline.Source
+        do {
+            source = try pipeline.prepare(decoding: url, using: decoder)
+        } catch is CancellationError {
+            // `prepare` polls nothing today, so this is defensive rather than
+            // reachable; it is here so that adding a poll cannot turn a
+            // cancelled open into a reported failure.
+            return nil
+        } catch {
+            log(error, stage: "preparation", url: url)
+            return .unprepared(RAWPathFailure(stage: .ownedPreparation, error))
         }
 
-        let adjustments = ImageAdjustments.none
-        guard let owned = ownedPreview(
-            prepared, adjustments: adjustments, url: url, cancellation: .enclosingTask
-        ) else { return nil }
-
-        return .success(
-            Loaded(
-                url: url,
-                metadata: metadata,
-                legacy: legacy,
-                source: source,
-                adjustments: adjustments,
-                owned: owned
+        do {
+            let preview = try pipeline.render(
+                source, adjustments: adjustments, cancellation: cancellation
             )
-        )
+            return .rendered(source, preview)
+        } catch is CancellationError {
+            return nil
+        } catch {
+            log(error, stage: "render", url: url)
+            return .unrenderable(source, RAWPathFailure(stage: .ownedRender, error))
+        }
     }
 
     /// The legacy processed-RGB decode, at half resolution, and never a reason
@@ -269,65 +389,19 @@ final class DocumentState {
             let decoded = try decoder.decode(at: url, options: .init(halfSize: true))
             return .decoded(decoded, preview: PreviewImageRenderer.makeCGImage(from: decoded.image))
         } catch {
-            Log.raw.error(
-                """
-                LibRaw reference decode failed for \(url.lastPathComponent, privacy: .public): \
-                \(error.localizedDescription, privacy: .public)
-                """
-            )
-            return .unavailable(RAWPathFailure(error))
+            log(error, stage: "LibRaw reference decode", url: url)
+            return .unavailable(RAWPathFailure(stage: .legacyReference, error))
         }
     }
 
-    /// The error a failed preparation carried, or a stand-in if it somehow
-    /// succeeded — which the caller has already established it did not.
-    private nonisolated static func preparationError(
-        _ prepared: Result<WorkspacePreviewPipeline.Source, Error>,
-        url: URL
-    ) -> Error {
-        if case .failure(let error) = prepared { return error }
-        return RAWDecodingError.invalidDecodedImage(url, reason: "No image pipeline result.")
-    }
-
-    /// Orients and encodes a prepared source, and reports rather than hides a
-    /// failure.
-    ///
-    /// Every error type the chain can raise is `LocalizedError`, so the
-    /// message a user sees names the stage that actually refused — a
-    /// non-finite coordinate, an unusable exposure, an unsupported sensor
-    /// layout, an orientation code we do not model — instead of a generic
-    /// "preview failed".
-    ///
-    /// A failure in the expensive half arrives here as a failed `Result` and
-    /// is reported with its own message, so "the mosaic would not decode" and
-    /// "the orientation would not apply" stay distinguishable.
-    /// - Returns: the preview or the reason there is none, or `nil` when the
-    ///   render was cancelled. Cancellation is not a failure and must never be
-    ///   shown as one.
-    private nonisolated static func ownedPreview(
-        _ prepared: Result<WorkspacePreviewPipeline.Source, Error>,
-        adjustments: ImageAdjustments,
-        url: URL,
-        cancellation: ProcessingCancellation
-    ) -> OwnedPreview? {
-        do {
-            let source = try prepared.get()
-            return .rendered(
-                try WorkspacePreviewPipeline().render(
-                    source, adjustments: adjustments, cancellation: cancellation
-                )
-            )
-        } catch is CancellationError {
-            return nil
-        } catch {
-            Log.raw.error(
-                """
-                Owned preview failed for \(url.lastPathComponent, privacy: .public): \
-                \(error.localizedDescription, privacy: .public)
-                """
-            )
-            return .unavailable(reason: error.localizedDescription)
-        }
+    private nonisolated static func log(_ error: Error, stage: String, url: URL) {
+        Log.raw.error(
+            """
+            Owned \(stage, privacy: .public) failed for \
+            \(url.lastPathComponent, privacy: .public): \
+            \(error.localizedDescription, privacy: .public)
+            """
+        )
     }
 
     // MARK: - Orientation adjustment
@@ -425,13 +499,8 @@ final class DocumentState {
         case .success(let preview):
             loaded.owned = .rendered(preview)
         case .failure(let error):
-            Log.raw.error(
-                """
-                Owned preview failed for \(url.lastPathComponent, privacy: .public): \
-                \(error.localizedDescription, privacy: .public)
-                """
-            )
-            loaded.owned = .unavailable(reason: error.localizedDescription)
+            Self.log(error, stage: "re-render", url: url)
+            loaded.owned = .unavailable(RAWPathFailure(stage: .ownedRender, error))
         }
         status = .decoded(loaded)
     }
@@ -442,7 +511,10 @@ final class DocumentState {
 
         switch outcome {
         case .success(let loaded):
-            renderer = loaded.source.map { makeRenderer(for: $0, url: loaded.url) }
+            // Only an adjustable file gets a render slot. A prepared source
+            // nothing can be rendered from gets none, so there is no path by
+            // which a control could request work that is known to fail.
+            renderer = loaded.adjustableSource.map { makeRenderer(for: $0, url: loaded.url) }
             status = .decoded(loaded)
         case .failure(let error):
             Log.ui.error(
