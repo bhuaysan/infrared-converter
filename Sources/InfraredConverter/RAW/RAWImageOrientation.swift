@@ -298,6 +298,145 @@ public enum RAWImageOrientation: Equatable, Sendable, CaseIterable {
     }
 }
 
+// MARK: - Composition
+
+extension RAWImageOrientation {
+
+    /// The canonical decomposition of every orientation: mirror horizontally
+    /// if needed, **then** turn some number of quarter turns clockwise.
+    ///
+    /// ```text
+    /// orientation = rotate(quarterTurnsClockwise) ∘ mirrorHorizontally^isMirrored
+    /// ```
+    ///
+    /// This is the standard presentation of the dihedral group of order eight,
+    /// and the whole of the algebra below rests on it. The eight cases map onto
+    /// it exactly once each:
+    ///
+    /// ```text
+    ///                        isMirrored   quarterTurnsClockwise
+    /// upright                    no                0
+    /// rotated90Clockwise         no                1
+    /// rotated180                 no                2
+    /// rotated270Clockwise        no                3
+    /// mirroredHorizontally       yes               0
+    /// transverse                 yes               1
+    /// mirroredVertically         yes               2
+    /// transposed                 yes               3
+    /// ```
+    ///
+    /// The mirrored half of that table is the part worth checking rather than
+    /// trusting: a horizontal mirror followed by a quarter turn clockwise is
+    /// `transverse`, not `transposed`, and three quarter turns gives
+    /// `transposed`. The test suite derives all eight from the coordinate
+    /// formulas rather than from this table.
+    ///
+    /// `0...3`, always.
+    public var quarterTurnsClockwise: Int {
+        switch self {
+        case .upright, .mirroredHorizontally: return 0
+        case .rotated90Clockwise, .transverse: return 1
+        case .rotated180, .mirroredVertically: return 2
+        case .rotated270Clockwise, .transposed: return 3
+        }
+    }
+
+    /// The orientation with a given canonical decomposition: mirror
+    /// horizontally if `mirroredHorizontally`, then turn `quarterTurnsClockwise`
+    /// quarter turns clockwise.
+    ///
+    /// `quarterTurnsClockwise` is reduced modulo four, negatives included, so
+    /// `-1` is three quarter turns clockwise. Every input therefore names one
+    /// of the eight cases; the set is closed, and there is nothing to fail on.
+    public static func composing(
+        mirroredHorizontally: Bool,
+        quarterTurnsClockwise: Int
+    ) -> RAWImageOrientation {
+        let turns = ((quarterTurnsClockwise % 4) + 4) % 4
+        switch (mirroredHorizontally, turns) {
+        case (false, 0): return .upright
+        case (false, 1): return .rotated90Clockwise
+        case (false, 2): return .rotated180
+        case (false, 3): return .rotated270Clockwise
+        case (true, 0): return .mirroredHorizontally
+        case (true, 1): return .transverse
+        case (true, 2): return .mirroredVertically
+        default: return .transposed
+        }
+    }
+
+    /// This orientation followed by `next`: **apply the receiver first, then
+    /// the argument.**
+    ///
+    /// ```swift
+    /// a.composed(with: b)     // do a, and then do b to the result
+    /// ```
+    ///
+    /// That convention is the one the pipeline needs and the one every caller
+    /// here uses: a file's recorded orientation is what makes the stored
+    /// pixels viewable, and a user's correction is applied on top of the
+    /// result, so the derivation reads
+    /// `recorded.composed(with: userAdjustment)` in that order. Reading it the
+    /// other way round produces a different, perfectly well-formed orientation
+    /// — see below.
+    ///
+    /// ## It does not commute, and the reflections are why
+    ///
+    /// Rotations commute with each other, so a test built only from quarter
+    /// turns would pass with the arguments swapped and prove nothing. The
+    /// reflections do not:
+    ///
+    /// ```text
+    /// transposed         then rotated90Clockwise  =  mirroredHorizontally
+    /// rotated90Clockwise then transposed          =  mirroredVertically
+    /// ```
+    ///
+    /// Both results are valid orientations and neither looks malformed, which
+    /// is exactly why the order has to be pinned by tests rather than eyeballed.
+    ///
+    /// ## How it is computed
+    ///
+    /// Integer arithmetic on the canonical decomposition, with no matrices and
+    /// no floating point. Writing `R` for a quarter turn clockwise and `M` for
+    /// a horizontal mirror, an orientation is `R^k M^m`, and composing forward
+    /// maps gives `(R^kB M^mB)(R^kA M^mA)`. A mirror reverses the sense of a
+    /// rotation it passes — `M R = R⁻¹ M` — so the two collapse to:
+    ///
+    /// ```text
+    /// mirrored = mA XOR mB
+    /// turns    = (kB ± kA) mod 4,   minus when B is mirrored
+    /// ```
+    ///
+    /// The result is always one of the eight: the set is closed under
+    /// composition, which is what makes an orientation adjustment storable as
+    /// a single canonical state instead of a list of button presses.
+    public func composed(with next: RAWImageOrientation) -> RAWImageOrientation {
+        let signedTurns = next.isMirrored ? -quarterTurnsClockwise : quarterTurnsClockwise
+        return .composing(
+            mirroredHorizontally: isMirrored != next.isMirrored,
+            quarterTurnsClockwise: next.quarterTurnsClockwise + signedTurns
+        )
+    }
+
+    /// The orientation that undoes this one, from either side.
+    ///
+    /// ```text
+    /// o.composed(with: o.inverse) == .upright
+    /// o.inverse.composed(with: o) == .upright
+    /// ```
+    ///
+    /// The four reflections are their own inverses — reflecting twice about
+    /// the same axis is the identity — and the two quarter turns invert to
+    /// each other. Only `.rotated90Clockwise` and `.rotated270Clockwise` have
+    /// an inverse that is not themselves, which is a useful thing to remember
+    /// when reading a reset that appears to do nothing.
+    public var inverse: RAWImageOrientation {
+        isMirrored
+            ? self
+            : .composing(mirroredHorizontally: false, quarterTurnsClockwise: -quarterTurnsClockwise)
+    }
+}
+
 extension RAWMetadata.Geometry {
     /// The application-owned orientation this file asks for, or `nil` when the
     /// decoder reported a `flip` value this application does not model.

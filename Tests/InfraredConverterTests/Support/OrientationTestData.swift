@@ -99,6 +99,26 @@ enum OrientationTestData {
         )
     }
 
+    /// Re-presents an oriented image as a channel-mixed one, so a **second**
+    /// orientation can be applied to it.
+    ///
+    /// Test-only, and deliberately so: production code never chains
+    /// orientations — `ImageOrienter.apply(orientation:replacing:)` exists to
+    /// make chaining structurally impossible. Chaining is exactly what the
+    /// composition suite needs as its oracle, though: "apply A, then B" has to
+    /// be produced by genuinely applying A and then B, or the test would be
+    /// checking the composition table against itself.
+    static func reinterpretedAsChannelMixed(
+        _ image: OrientedSceneLinearRGBImage
+    ) -> IRChannelMixedRGBImage {
+        IRChannelMixedRGBImage(
+            width: image.width,
+            height: image.height,
+            values: image.values,
+            processing: image.processing.channelMixProcessing
+        )
+    }
+
     /// Reads an oriented image back as rows of labels, so an expected layout
     /// can be written in the test source exactly as it looks.
     ///
