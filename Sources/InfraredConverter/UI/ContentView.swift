@@ -60,14 +60,18 @@ struct ContentView: View {
                 Text(error.errorDescription ?? "The file could not be decoded.")
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
-                if let diagnostic = error.diagnostic {
-                    // `userFacingSummary` is guaranteed free of LibRaw's
-                    // internal integer code; the code stays available only
-                    // via `diagnostic.logDescription`, for logging.
-                    Text(diagnostic.userFacingSummary)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
+                // Both refusals, labelled. The image pipeline's is the one
+                // that matters; the reference's is shown beside it because
+                // two different reasons say which stage disagreed, and
+                // collapsing them to one message destroys that.
+                Text("Image pipeline: \(error.owned.message)")
+                    .font(.caption)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.tertiary)
+                Text("LibRaw reference: \(error.legacy.message)")
+                    .font(.caption)
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.tertiary)
             }
             .padding(40)
         }
@@ -187,32 +191,52 @@ private struct RAWInspectorView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                section("LibRaw reference (diagnostic)") {
-                    let processing = loaded.decoded.processing
-                    Text("""
-                        A separate, LibRaw-processed decode. It is not what the workspace \
-                        shows, and it is not a colour reference.
-                        """)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    if let legacyPreview = loaded.legacyPreview {
-                        Image(decorative: legacyPreview, scale: 1)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(maxHeight: 120)
-                    }
-                    row("Size", "\(loaded.decoded.image.width) × \(loaded.decoded.image.height)")
-                    row("Decoder", processing.decoderIdentifier)
-                    row("Pixel format", "\(loaded.decoded.image.channelCount) × "
-                        + "\(loaded.decoded.image.bitsPerChannel) bit, interleaved RGB")
-                    row("Encoding", loaded.decoded.image.encoding == .linear ? "Linear" : "Gamma encoded")
-                    row("Colour", loaded.decoded.image.colorSpace == .cameraNative
-                        ? "Camera native (no matrix)" : "sRGB")
-                    row("White balance", processing.whiteBalanceIsUnity ? "Unity (none applied)" : "Applied")
-                    row("Demosaic", Self.demosaicRowDescription(processing))
-                }
+                legacyReferenceSection
             }
             .padding(16)
+        }
+    }
+
+    /// The LibRaw processed-RGB decode, when there is one.
+    ///
+    /// Its absence is reported here and changes nothing else on the screen:
+    /// this is a diagnostic reference, and a missing reference is not a
+    /// missing photograph. It is equally never the other way round — nothing
+    /// in this section can stand in for the owned preview above it.
+    @ViewBuilder
+    private var legacyReferenceSection: some View {
+        section("LibRaw reference (diagnostic)") {
+            Text("""
+                A separate, LibRaw-processed decode. It is not what the workspace \
+                shows, and it is not a colour reference.
+                """)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            switch loaded.legacy {
+            case .decoded(let decoded, let preview):
+                let processing = decoded.processing
+                if let preview {
+                    Image(decorative: preview, scale: 1)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxHeight: 120)
+                }
+                row("Size", "\(decoded.image.width) × \(decoded.image.height)")
+                row("Decoder", processing.decoderIdentifier)
+                row("Pixel format", "\(decoded.image.channelCount) × "
+                    + "\(decoded.image.bitsPerChannel) bit, interleaved RGB")
+                row("Encoding", decoded.image.encoding == .linear ? "Linear" : "Gamma encoded")
+                row("Colour", decoded.image.colorSpace == .cameraNative
+                    ? "Camera native (no matrix)" : "sRGB")
+                row("White balance", processing.whiteBalanceIsUnity ? "Unity (none applied)" : "Applied")
+                row("Demosaic", Self.demosaicRowDescription(processing))
+            case .unavailable(let failure):
+                row("Status", "Unavailable")
+                Text(failure.message)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

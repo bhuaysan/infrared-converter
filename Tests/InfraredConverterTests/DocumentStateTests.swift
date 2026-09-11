@@ -2,15 +2,24 @@ import Testing
 import Foundation
 @testable import InfraredConverter
 
+/// The workspace's two RAW paths and the four ways they can end.
+///
+/// ```text
+/// owned ok    / legacy ok      → workspace image + diagnostic reference
+/// owned ok    / legacy fails   → workspace image, reference reported missing
+/// owned fails / legacy ok      → the owned failure, reported; never a fallback
+/// owned fails / legacy fails   → a typed open error naming both refusals
+/// ```
+///
+/// The second row is the one this suite exists for. The legacy
+/// processed-RGB decode used to run first and throw, which closed the file
+/// before the application-owned pipeline — the actual workspace image — was
+/// ever asked.
 @Suite
 @MainActor
 struct DocumentStateTests {
-    /// A decoder that never touches the filesystem, so state transitions can be
-    /// tested without a RAW fixture.
-    ///
-    /// `decodeMosaic` fails by default, which exercises the case that matters
-    /// most here: the application-owned preview failing must be **reported**,
-    /// not quietly replaced by the LibRaw image that did decode.
+    /// A decoder whose two entry points fail independently, which is exactly
+    /// the axis the four combinations vary along.
     private struct StubDecoder: RAWDecoder {
         let result: Result<DecodedRAW, RAWDecodingError>
         var mosaic: Result<DecodedRAWMosaic, RAWDecodingError>?
@@ -33,36 +42,28 @@ struct DocumentStateTests {
         }
     }
 
+    private static let url = URL(fileURLWithPath: "/tmp/example.orf")
+
     /// A small RGGB mosaic the whole owned chain can actually run over.
     private static func stubMosaic(url: URL) -> DecodedRAWMosaic {
-        let width = 8
-        let height = 8
-        var samples = [UInt16]()
-        for index in 0..<(width * height) {
-            samples.append(UInt16(500 + index * 37))
-        }
-        var metadata = RAWTestData.metadata()
-        metadata.levels = .init(black: 0, perPlaneBlack: [0, 0, 0, 0], maximum: 4095)
-        return DecodedRAWMosaic(
-            url: url,
-            metadata: metadata,
-            mosaic: RAWMosaic(
-                width: width,
-                height: height,
-                bytesPerRow: width * 2,
-                samples: samples.withUnsafeBufferPointer { Data(buffer: $0) },
-                sampleFormat: .uint16,
-                sourceRawBitDepth: 12,
-                sensorColorLayout: RAWTestData.bayerLayout()
-            ),
-            processing: RAWMosaicProcessing(
-                decoderIdentifier: "Stub",
-                sourceStorage: .singleChannel,
-                sourceRowPitch: width,
-                destinationRowStride: width
+        WorkspaceStubs.mosaic(url: url, width: 8, height: 8)
+    }
+
+    private static func state(
+        ownedSucceeds: Bool,
+        legacySucceeds: Bool
+    ) -> DocumentState {
+        DocumentState(
+            decoder: StubDecoder(
+                result: legacySucceeds
+                    ? .success(RAWTestData.decodedRAW(url: url))
+                    : .failure(.fileNotFound(url)),
+                mosaic: ownedSucceeds ? .success(stubMosaic(url: url)) : nil
             )
         )
     }
+
+    // MARK: - Selection
 
     @Test
     func startsWithNoSelection() {
@@ -75,99 +76,33 @@ struct DocumentStateTests {
 
     @Test
     func openingAFileImmediatelyReportsTheSelection() {
-        let url = URL(fileURLWithPath: "/tmp/example.orf")
-        let state = DocumentState(decoder: StubDecoder(result: .failure(.fileNotFound(url))))
+        let state = Self.state(ownedSucceeds: false, legacySucceeds: false)
 
-        state.open(url)
+        state.open(Self.url)
 
-        #expect(state.selectedFileURL == url)
+        #expect(state.selectedFileURL == Self.url)
         if case .decoding(let decoding) = state.status {
-            #expect(decoding == url)
+            #expect(decoding == Self.url)
         } else {
             Issue.record("Expected .decoding, got \(state.status)")
         }
     }
 
-    @Test
-    func aFailedDecodeIsSurfaced() async throws {
-        let url = URL(fileURLWithPath: "/tmp/example.orf")
-        let state = DocumentState(decoder: StubDecoder(result: .failure(.fileNotFound(url))))
+    // MARK: - Owned succeeds, legacy succeeds
 
-        state.open(url)
+    @Test("Both paths succeeding gives the workspace image and the reference")
+    func bothPathsSucceed() async throws {
+        let state = Self.state(ownedSucceeds: true, legacySucceeds: true)
+        state.open(Self.url)
         try await Self.waitUntilSettled(state)
 
-        guard case .failed(let failedURL, let error) = state.status else {
-            Issue.record("Expected .failed, got \(state.status)")
-            return
-        }
-        #expect(failedURL == url)
-        #expect(error == .fileNotFound(url))
-    }
-
-    @Test
-    func aSuccessfulDecodeIsSurfaced() async throws {
-        let url = URL(fileURLWithPath: "/tmp/example.orf")
-        let decoded = RAWTestData.decodedRAW(url: url)
-        let state = DocumentState(decoder: StubDecoder(result: .success(decoded)))
-
-        state.open(url)
-        try await Self.waitUntilSettled(state)
-
-        guard case .decoded(let loaded) = state.status else {
-            Issue.record("Expected .decoded, got \(state.status)")
-            return
-        }
-        #expect(loaded.url == url)
+        let loaded = try Self.decoded(state)
+        #expect(loaded.url == Self.url)
         #expect(loaded.metadata.identity.model == "E-PL3")
-        // The legacy decode is still available as a diagnostic reference.
-        #expect(loaded.legacyPreview != nil)
-    }
+        #expect(loaded.legacy.decoded != nil)
+        #expect(loaded.legacy.preview != nil)
+        #expect(loaded.legacy.failure == nil)
 
-    /// The requirement this test exists for: when the application-owned
-    /// pipeline fails, the workspace says so. It does not fall back to the
-    /// LibRaw image that decoded perfectly well, because a plausible picture
-    /// from a different pipeline would look exactly like success.
-    @Test
-    func aFailedOwnedPreviewIsReportedRatherThanReplaced() async throws {
-        let url = URL(fileURLWithPath: "/tmp/example.orf")
-        let decoded = RAWTestData.decodedRAW(url: url)
-        // `mosaic` is nil, so `decodeMosaic` throws.
-        let state = DocumentState(decoder: StubDecoder(result: .success(decoded)))
-
-        state.open(url)
-        try await Self.waitUntilSettled(state)
-
-        guard case .decoded(let loaded) = state.status else {
-            Issue.record("Expected .decoded, got \(state.status)")
-            return
-        }
-        guard case .unavailable(let reason) = loaded.owned else {
-            Issue.record("Expected the owned preview to be unavailable")
-            return
-        }
-        #expect(!reason.isEmpty)
-        // The legacy decode succeeded, and is deliberately not standing in for
-        // the owned result.
-        #expect(loaded.legacyPreview != nil)
-    }
-
-    @Test
-    func aSuccessfulOwnedPreviewBecomesTheWorkspaceImage() async throws {
-        let url = URL(fileURLWithPath: "/tmp/example.orf")
-        let state = DocumentState(
-            decoder: StubDecoder(
-                result: .success(RAWTestData.decodedRAW(url: url)),
-                mosaic: .success(Self.stubMosaic(url: url))
-            )
-        )
-
-        state.open(url)
-        try await Self.waitUntilSettled(state)
-
-        guard case .decoded(let loaded) = state.status else {
-            Issue.record("Expected .decoded, got \(state.status)")
-            return
-        }
         guard case .rendered(let preview) = loaded.owned else {
             Issue.record("Expected the owned preview to be rendered")
             return
@@ -205,8 +140,129 @@ struct DocumentStateTests {
         #expect(!preview.processing.orientationSwappedDimensions)
     }
 
+    // MARK: - Owned succeeds, legacy fails
+
+    /// The requirement this rework exists for: the diagnostic decode failing
+    /// must not be able to close the workspace.
+    @Test("The workspace image appears even when the LibRaw reference cannot decode")
+    func ownedSucceedsWithoutTheLegacyReference() async throws {
+        let state = Self.state(ownedSucceeds: true, legacySucceeds: false)
+        state.open(Self.url)
+        try await Self.waitUntilSettled(state)
+
+        let loaded = try Self.decoded(state)
+
+        guard case .rendered(let preview) = loaded.owned else {
+            Issue.record("Expected the owned preview to be rendered")
+            return
+        }
+        #expect(preview.image.width == 8)
+        #expect(preview.image.height == 8)
+
+        // Metadata came from the path that worked, so the inspector is not
+        // empty either.
+        #expect(loaded.metadata.identity.model == "E-PL3")
+
+        // And the missing reference is reported as missing, with its reason.
+        #expect(loaded.legacy.decoded == nil)
+        #expect(loaded.legacy.preview == nil)
+        let failure = try #require(loaded.legacy.failure)
+        #expect(failure.decoding == .fileNotFound(Self.url))
+        #expect(!failure.message.isEmpty)
+
+        // The file is fully usable: the correction controls work.
+        #expect(loaded.isAdjustable)
+        #expect(state.canAdjustOrientation)
+    }
+
+    @Test("A file whose LibRaw reference is missing can still be corrected")
+    func aFileWithoutALegacyReferenceIsStillAdjustable() async throws {
+        let state = Self.state(ownedSucceeds: true, legacySucceeds: false)
+        state.open(Self.url)
+        try await Self.waitUntilSettled(state)
+
+        state.rotateOrientationRight()
+        let preview = try #require(
+            await WorkspaceStubs.waitForPreview(state, adjustment: .quarterTurnRight)
+        )
+        #expect(preview.effectiveOrientation == .rotated90Clockwise)
+    }
+
+    // MARK: - Owned fails, legacy succeeds
+
+    /// When the application-owned pipeline fails, the workspace says so. It
+    /// does not fall back to the LibRaw image that decoded perfectly well,
+    /// because a plausible picture from a different pipeline would look
+    /// exactly like success.
+    @Test("An owned-pipeline failure is reported rather than replaced by the reference")
+    func aFailedOwnedPreviewIsReportedRatherThanReplaced() async throws {
+        let state = Self.state(ownedSucceeds: false, legacySucceeds: true)
+        state.open(Self.url)
+        try await Self.waitUntilSettled(state)
+
+        let loaded = try Self.decoded(state)
+        guard case .unavailable(let reason) = loaded.owned else {
+            Issue.record("Expected the owned preview to be unavailable")
+            return
+        }
+        #expect(!reason.isEmpty)
+
+        // The legacy decode succeeded, and is deliberately not standing in for
+        // the owned result.
+        #expect(loaded.legacy.decoded != nil)
+        #expect(loaded.legacy.preview != nil)
+
+        // Nothing to reprocess, and nothing pretending there is.
+        #expect(loaded.source == nil)
+        #expect(!loaded.isAdjustable)
+        #expect(!state.canAdjustOrientation)
+    }
+
+    // MARK: - Both fail
+
+    @Test("Both paths failing is a typed open error naming both refusals")
+    func bothPathsFailing() async throws {
+        let state = Self.state(ownedSucceeds: false, legacySucceeds: false)
+        state.open(Self.url)
+        try await Self.waitUntilSettled(state)
+
+        guard case .failed(let failedURL, let error) = state.status else {
+            Issue.record("Expected .failed, got \(state.status)")
+            return
+        }
+        #expect(failedURL == Self.url)
+        #expect(error.url == Self.url)
+
+        // The owned pipeline's refusal is the one that matters, and it is the
+        // decoder's own error rather than a flattened message.
+        #expect(
+            error.owned.decoding
+                == .unsupportedRawStorage(
+                    Self.url, reason: "StubDecoder does not implement decodeMosaic"
+                )
+        )
+        // The reference's refusal is kept beside it: two different reasons are
+        // themselves the diagnosis.
+        #expect(error.legacy.decoding == .fileNotFound(Self.url))
+
+        #expect(error.errorDescription?.isEmpty == false)
+        let reason = try #require(error.failureReason)
+        #expect(reason.contains("image pipeline"))
+        #expect(reason.contains("LibRaw"))
+    }
+
+    // MARK: - Helpers
+
+    private static func decoded(_ state: DocumentState) throws -> DocumentState.Loaded {
+        guard case .decoded(let loaded) = state.status else {
+            Issue.record("Expected .decoded, got \(state.status)")
+            throw CancellationError()
+        }
+        return loaded
+    }
+
     private static func waitUntilSettled(_ state: DocumentState) async throws {
-        for _ in 0..<200 {
+        for _ in 0..<400 {
             if case .decoding = state.status {
                 try await Task.sleep(nanoseconds: 5_000_000)
             } else {

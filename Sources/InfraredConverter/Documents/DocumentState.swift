@@ -28,6 +28,21 @@ import Observation
 /// 3. durable on-disk persistence         does not exist
 /// ```
 ///
+/// ## Two RAW paths, and only one of them is the photograph
+///
+/// Opening a file runs both, independently:
+///
+/// ```text
+/// WorkspacePreviewPipeline (decodeMosaic → … → display)   the workspace image
+/// RAWDecoder.decode(at:)   (LibRaw processed RGB)         a diagnostic reference
+/// ```
+///
+/// Neither gates the other. The file is open when either produced something,
+/// and the reference never substitutes for the image: an owned-pipeline
+/// failure is reported as a failure even when the LibRaw decode succeeded,
+/// because a plausible picture from a different pipeline would look exactly
+/// like success. Only both refusing gives a `DocumentOpenError`.
+///
 /// ## Re-rendering is coalesced, and superseded work is stopped
 ///
 /// Adjustment changes go through one `CoalescingPreviewRenderer`: at most one
@@ -42,22 +57,29 @@ final class DocumentState {
         case empty
         case decoding(URL)
         case decoded(Loaded)
-        case failed(URL, RAWDecodingError)
+        case failed(URL, DocumentOpenError)
     }
 
     /// A successfully opened file: the application-owned preview the
     /// workspace shows, and the legacy LibRaw decode kept beside it as a
-    /// diagnostic reference.
+    /// diagnostic reference **when there is one**.
+    ///
+    /// The two paths are independent. A file is open when either one of them
+    /// produced something, and neither ever substitutes for the other.
     struct Loaded {
-        /// The legacy processed-RGB decode. It supplies the inspector's
-        /// decoder facts and a labelled reference thumbnail — **not** the
-        /// workspace image.
-        let decoded: DecodedRAW
-        /// The legacy path's own pixels, display-only. Shown small and
-        /// labelled, so a reader can compare the two paths without either
-        /// being mistaken for the other. `nil` when that buffer could not be
-        /// wrapped for display.
-        let legacyPreview: CGImage?
+        let url: URL
+
+        /// The decoder's facts about the file, read through whichever path
+        /// opened it. Both paths read the same file with the same decoder, and
+        /// the owned pipeline's copy is preferred because that is the image
+        /// the workspace shows.
+        let metadata: RAWMetadata
+
+        /// The legacy processed-RGB decode, or the reason there is none. It
+        /// supplies the inspector's decoder facts and a labelled reference
+        /// thumbnail — **not** the workspace image.
+        let legacy: LegacyReference
+
         /// The retained scene-linear state every reprocess starts from, or
         /// `nil` when the owned pipeline could not get that far.
         ///
@@ -66,19 +88,53 @@ final class DocumentState {
         /// always applied to it rather than to whatever is currently on
         /// screen.
         let source: WorkspacePreviewPipeline.Source?
+
         /// The user's editing decisions. In memory only; see the note on the
         /// type.
         var adjustments: ImageAdjustments
+
         /// The application-owned pipeline's result, or the reason it failed.
         var owned: OwnedPreview
-
-        var url: URL { decoded.url }
-        var metadata: RAWMetadata { decoded.metadata }
 
         /// Whether the workspace can reprocess this file with a different
         /// adjustment. False when the owned pipeline never produced a
         /// scene-linear state to start from.
         var isAdjustable: Bool { source != nil }
+    }
+
+    /// The LibRaw processed-RGB decode kept beside the workspace image.
+    ///
+    /// Optional by construction, because that is the architectural claim: a
+    /// diagnostic reference that cannot read the file is a missing reference,
+    /// not a failed open. Before this was modelled, the legacy decode ran
+    /// first and threw, and the owned pipeline — the actual workspace image —
+    /// was never asked.
+    enum LegacyReference {
+        case decoded(DecodedRAW, preview: CGImage?)
+        /// No reference is available, and why. The workspace still works.
+        case unavailable(RAWPathFailure)
+
+        /// The legacy decode's own facts, for the inspector's diagnostic
+        /// section only.
+        var decoded: DecodedRAW? {
+            if case .decoded(let decoded, _) = self { return decoded }
+            return nil
+        }
+
+        /// The legacy path's own pixels, display-only. Shown small and
+        /// labelled, so a reader can compare the two paths without either
+        /// being mistaken for the other. `nil` when there is no decode, or
+        /// when its buffer could not be wrapped for display.
+        var preview: CGImage? {
+            if case .decoded(_, let preview) = self { return preview }
+            return nil
+        }
+
+        /// Why there is no reference, or `nil` when there is one.
+        var failure: RAWPathFailure? {
+            if case .unavailable(let failure) = self { return failure }
+            return nil
+        }
     }
 
     /// The outcome of the application-owned pipeline for one file.
@@ -149,40 +205,88 @@ final class DocumentState {
         }
     }
 
+    /// Runs both RAW paths, independently, and reports what each of them did.
+    ///
+    /// The order here is deliberate and so is the absence of a `try` around
+    /// the pair. The application-owned pipeline runs first because it is the
+    /// workspace image; the legacy processed-RGB decode runs beside it, never
+    /// in front of it. Each is allowed to fail on its own, and only both
+    /// failing closes the file.
+    ///
     /// - Returns: the opened file, the reason it could not be opened, or
     ///   `nil` when the open was cancelled before it finished.
     private nonisolated static func decode(
         _ url: URL,
         using decoder: RAWDecoder
-    ) -> Result<Loaded, RAWDecodingError>? {
-        do {
-            // The legacy processed-RGB decode, at half resolution: it is the
-            // diagnostic reference and the source of the inspector's decoder
-            // facts, and it is no longer what the workspace displays. Metadata
-            // still describes the full-size image.
-            let decoded = try decoder.decode(at: url, options: .init(halfSize: true))
-            let legacyPreview = PreviewImageRenderer.makeCGImage(from: decoded.image)
-            let adjustments = ImageAdjustments.none
-            let prepared = Result {
-                try WorkspacePreviewPipeline().prepare(decoding: url, using: decoder)
-            }
-            guard let owned = ownedPreview(
-                prepared, adjustments: adjustments, url: url, cancellation: .enclosingTask
-            ) else { return nil }
-            return .success(
-                Loaded(
-                    decoded: decoded,
-                    legacyPreview: legacyPreview,
-                    source: try? prepared.get(),
-                    adjustments: adjustments,
-                    owned: owned
+    ) -> Result<Loaded, DocumentOpenError>? {
+        let prepared = Result {
+            try WorkspacePreviewPipeline().prepare(decoding: url, using: decoder)
+        }
+        let legacy = legacyReference(for: url, using: decoder)
+
+        let source = try? prepared.get()
+        // Either path's metadata will do — they are the same decoder reading
+        // the same file — and the owned one is preferred because it belongs to
+        // the image the workspace shows. Neither available means neither path
+        // got far enough to read anything.
+        guard let metadata = source?.metadata ?? legacy.decoded?.metadata else {
+            return .failure(
+                DocumentOpenError(
+                    url: url,
+                    owned: RAWPathFailure(preparationError(prepared, url: url)),
+                    legacy: legacy.failure ?? RAWPathFailure(RAWDecodingError.decoderUnavailable)
                 )
             )
-        } catch let error as RAWDecodingError {
-            return .failure(error)
-        } catch {
-            return .failure(.invalidDecodedImage(url, reason: error.localizedDescription))
         }
+
+        let adjustments = ImageAdjustments.none
+        guard let owned = ownedPreview(
+            prepared, adjustments: adjustments, url: url, cancellation: .enclosingTask
+        ) else { return nil }
+
+        return .success(
+            Loaded(
+                url: url,
+                metadata: metadata,
+                legacy: legacy,
+                source: source,
+                adjustments: adjustments,
+                owned: owned
+            )
+        )
+    }
+
+    /// The legacy processed-RGB decode, at half resolution, and never a reason
+    /// to abandon the file.
+    ///
+    /// It is the diagnostic reference and the source of the inspector's
+    /// LibRaw facts. Its metadata still describes the full-size image.
+    private nonisolated static func legacyReference(
+        for url: URL,
+        using decoder: RAWDecoder
+    ) -> LegacyReference {
+        do {
+            let decoded = try decoder.decode(at: url, options: .init(halfSize: true))
+            return .decoded(decoded, preview: PreviewImageRenderer.makeCGImage(from: decoded.image))
+        } catch {
+            Log.raw.error(
+                """
+                LibRaw reference decode failed for \(url.lastPathComponent, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """
+            )
+            return .unavailable(RAWPathFailure(error))
+        }
+    }
+
+    /// The error a failed preparation carried, or a stand-in if it somehow
+    /// succeeded — which the caller has already established it did not.
+    private nonisolated static func preparationError(
+        _ prepared: Result<WorkspacePreviewPipeline.Source, Error>,
+        url: URL
+    ) -> Error {
+        if case .failure(let error) = prepared { return error }
+        return RAWDecodingError.invalidDecodedImage(url, reason: "No image pipeline result.")
     }
 
     /// Orients and encodes a prepared source, and reports rather than hides a
@@ -332,7 +436,7 @@ final class DocumentState {
         status = .decoded(loaded)
     }
 
-    private func apply(_ outcome: Result<Loaded, RAWDecodingError>, for url: URL) {
+    private func apply(_ outcome: Result<Loaded, DocumentOpenError>, for url: URL) {
         // Ignore a result that a newer selection has already superseded.
         guard selectedFileURL == url else { return }
 
