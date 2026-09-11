@@ -16,8 +16,9 @@ import Foundation
 ///     ↓  RAWWorkingColorConverter (.sensorRGBIdentityFalseColor)
 /// WorkingColorRGBImage
 ///     ↓  IRChannelMixer (.identity)
-/// IRChannelMixedRGBImage
-///     ↓  ImageOrienter (the orientation the file's metadata names)
+/// IRChannelMixedRGBImage                     ← retained, for reprocessing
+///     ↓  EffectiveImageOrientation (metadata orientation + user adjustment)
+///     ↓  ImageOrienter (one permutation, by the effective orientation)
 /// OrientedSceneLinearRGBImage
 ///     ↓  DisplayPreviewRenderer (0 EV, hard clipping, sRGB)
 /// DisplayEncodedPreviewImage
@@ -55,13 +56,26 @@ import Foundation
 ///   neutral; the user will choose the patch when there is a UI for it.
 /// - **`0 EV`.** The mathematically neutral exposure, chosen rather than
 ///   assumed.
-/// - **The orientation the file itself names.** Read from
-///   `RAWMetadata.Geometry.orientation`, which is the decoder's `flip` mapped
-///   once into an application-owned case. There is no camera-model table, no
-///   per-file override and no correction of any kind: if the file records
-///   upright, the photograph is shown as it was stored, because that is what
-///   the file says. A value the application does not model is a **typed
-///   failure**, not a silent `.upright`.
+/// - **The orientation the file itself names, plus whatever the user has
+///   asked for.** The file's own orientation is read from
+///   `RAWMetadata.Geometry.orientation` — the decoder's `flip` mapped once
+///   into an application-owned case — and the user's correction is composed
+///   onto it by `EffectiveImageOrientation`. There is still no camera-model
+///   table, no filename heuristic and no automatic straightening: the only
+///   thing that can depart from the metadata is a person. A `flip` value the
+///   application does not model is a **typed failure**, not a silent
+///   `.upright`.
+///
+/// ## Two phases, because orientation is adjustable
+///
+/// `prepare(decoding:using:)` runs everything up to and including the
+/// creative mix and hands back a `Source` that keeps it. `render(_:adjustments:)`
+/// takes that `Source` and applies the orientation and the display encode.
+///
+/// Changing the orientation therefore reruns the last two stages only, from
+/// the **unoriented** channel-mixed image — never from the previous displayed
+/// buffer. Nothing decodes, normalises, white-balances, demosaics, converts
+/// or remixes again, and no orientation is ever applied on top of another.
 ///
 /// None of this is a colour claim. The result is displayable, which is a
 /// strictly weaker property than correct.
@@ -84,12 +98,35 @@ struct WorkspacePreviewPipeline {
     /// The orientation a file gets when its metadata names one this
     /// application models, or `nil` when it does not.
     ///
-    /// The one place the workspace's orientation policy lives. It is a
-    /// *reading* of metadata, never a correction of it: no camera model, no
-    /// filename and no heuristic takes part, and nothing here can make an
-    /// upright-recorded photograph rotate.
+    /// The one place the workspace's *reading* of orientation metadata lives.
+    /// It is never a correction of it: no camera model, no filename and no
+    /// heuristic takes part, and nothing here can make an upright-recorded
+    /// photograph rotate. Only a user can do that, and that is the separate
+    /// term in `effectiveOrientation(for:adjustments:)`.
     static func orientation(for metadata: RAWMetadata) -> RAWImageOrientation? {
         metadata.geometry.orientation
+    }
+
+    /// The file's recorded orientation and the user's correction, kept
+    /// distinct and combined into the single orientation the pixels get.
+    ///
+    /// - Throws: `OrientationError.unsupportedDecoderOrientation` when the
+    ///   decoder reported a `flip` this application does not model. Reading
+    ///   an unmodelled code as upright would turn a field we could not parse
+    ///   into a claim about the photograph — and would then silently let the
+    ///   user's adjustment compose onto that invented value.
+    static func effectiveOrientation(
+        for metadata: RAWMetadata,
+        adjustments: ImageAdjustments
+    ) throws -> EffectiveImageOrientation {
+        guard let source = orientation(for: metadata) else {
+            throw OrientationError.unsupportedDecoderOrientation(
+                flip: metadata.geometry.flip
+            )
+        }
+        return EffectiveImageOrientation(
+            source: source, userAdjustment: adjustments.orientation
+        )
     }
 
     /// The display settings a freshly opened file gets. Spelled out rather
@@ -124,17 +161,20 @@ struct WorkspacePreviewPipeline {
         )
     }
 
-    /// Decodes a RAW file and renders the workspace's preview from it, through
-    /// the application-owned pipeline only.
+    /// Decodes a RAW file and runs every stage up to and including the
+    /// creative channel mix, keeping the result.
+    ///
+    /// This is the expensive half — decode, normalise, estimate, balance,
+    /// demosaic, convert, mix — and it does not depend on the orientation, so
+    /// it runs once per file rather than once per rotation.
     ///
     /// LibRaw's processed-RGB path is not involved: this calls `decodeMosaic`,
     /// and every stage after it is ours.
     ///
     /// - Throws: whatever the stage that failed reports —
-    ///   `RAWDecodingError`, `RAWProcessingError`, `IRProcessingError`,
-    ///   `OrientationError` or `DisplayRenderingError`. Nothing is caught and
-    ///   turned into a plausible-looking picture here.
-    func render(decoding url: URL, using decoder: RAWDecoder) throws -> WorkspacePreview {
+    ///   `RAWDecodingError`, `RAWProcessingError` or `IRProcessingError`.
+    ///   Nothing is caught and turned into a plausible-looking picture here.
+    func prepare(decoding url: URL, using decoder: RAWDecoder) throws -> Source {
         let decoded = try decoder.decodeMosaic(at: url)
         let normalized = try RAWMosaicNormalizer().process(decoded)
 
@@ -151,16 +191,27 @@ struct WorkspacePreviewPipeline {
             .convert(demosaiced, using: Self.initialTransform)
         let mixed = try IRChannelMixer().apply(to: working, mix: Self.initialMix)
 
-        // The file's own orientation, or a refusal. Reading an unmodelled
-        // code as upright would turn a field we could not parse into a claim
-        // about the photograph, so the preview fails and says which code it
-        // could not read.
-        guard let orientation = Self.orientation(for: mixed.metadata) else {
-            throw OrientationError.unsupportedDecoderOrientation(
-                flip: mixed.metadata.geometry.flip
-            )
-        }
-        let oriented = try ImageOrienter().apply(to: mixed, orientation: orientation)
+        return Source(channelMixed: mixed, neutralPatch: region)
+    }
+
+    /// Orients a prepared source and encodes it for display.
+    ///
+    /// The cheap half, and the only half a change of orientation reruns. It
+    /// always starts from `source.channelMixed`, which is unoriented, so
+    /// repeated user rotations never compose pixel permutations: the image is
+    /// permuted exactly once, by the effective orientation, from the same
+    /// buffer every time.
+    ///
+    /// - Throws: `OrientationError` or `DisplayRenderingError`.
+    func render(
+        _ source: Source,
+        adjustments: ImageAdjustments
+    ) throws -> WorkspacePreview {
+        let orientation = try Self.effectiveOrientation(
+            for: source.metadata, adjustments: adjustments
+        )
+        let oriented = try ImageOrienter()
+            .apply(to: source.channelMixed, orientation: orientation.applied)
 
         let preview = try DisplayPreviewRenderer()
             .render(oriented, settings: Self.initialSettings)
@@ -168,24 +219,72 @@ struct WorkspacePreviewPipeline {
         return WorkspacePreview(
             image: try DisplayPreviewCGImageAdapter.makeCGImage(from: preview.image),
             processing: preview.processing,
-            neutralPatch: region,
-            orientation: orientation,
+            neutralPatch: source.neutralPatch,
+            orientationProvenance: OrientationProvenance(
+                orientation: orientation, stage: oriented.image.processing
+            ),
             sourcePixelWidth: oriented.source.image.width,
             sourcePixelHeight: oriented.source.image.height,
             pixelWidth: preview.image.width,
             pixelHeight: preview.image.height
         )
     }
+
+    /// Both phases, for a caller that has no reason to keep the scene-linear
+    /// state — a test, or a one-shot render.
+    ///
+    /// - Throws: whatever the stage that failed reports.
+    func render(
+        decoding url: URL,
+        using decoder: RAWDecoder,
+        adjustments: ImageAdjustments = .none
+    ) throws -> WorkspacePreview {
+        try render(prepare(decoding: url, using: decoder), adjustments: adjustments)
+    }
+}
+
+extension WorkspacePreviewPipeline {
+    /// The scene-linear state a workspace holds on to so that a change of
+    /// orientation does not decode the file again.
+    ///
+    /// ## Why this is retained, and what it costs
+    ///
+    /// Non-destructive reprocessing needs the **unoriented** channel-mixed
+    /// image: an adjustment must be applied to it, never to whatever is
+    /// currently on screen. Keeping it is the alternative to a full RAW
+    /// decode on every button press, which the project's own architecture
+    /// notes name as a red flag.
+    ///
+    /// It is not free, and the cost should be stated rather than discovered.
+    /// `IRChannelMixedProcessedRAWImage` reaches the working-colour image,
+    /// the camera-native image and both mosaics through its `source` chain,
+    /// so a 4056 × 3040 frame retains roughly half a gigabyte of Float32
+    /// buffers for as long as the file is open. Reduced-resolution previews,
+    /// caching and eviction are all undecided; this is the simple thing, and
+    /// it is measured by nothing yet.
+    struct Source: Sendable {
+        /// Everything up to and including the creative mix, unoriented, with
+        /// the whole upstream chain reachable through it.
+        let channelMixed: IRChannelMixedProcessedRAWImage
+        /// The region the white balance was estimated from, in sensor
+        /// (pre-orientation) active-area coordinates.
+        let neutralPatch: RAWActiveAreaRegion
+
+        /// The RAW-state metadata the chain was processed against, read
+        /// through the retained image rather than stored twice.
+        var metadata: RAWMetadata { channelMixed.metadata }
+        var url: URL { channelMixed.url }
+    }
 }
 
 /// What the workspace shows, plus enough of its provenance to describe it.
 ///
-/// The scene-linear chain is deliberately **not** retained here. Reprocessing
-/// from it is a property of `DisplayPreviewProcessedRAWImage`, and the
-/// workspace has no controls to reprocess with yet; holding several hundred
-/// megabytes of intermediate buffers for a capability nothing currently uses
-/// would be a memory cost with no user. When exposure becomes adjustable, this
-/// is where the retained chain arrives.
+/// The scene-linear chain is **not** retained here. It is retained one level
+/// up, on `WorkspacePreviewPipeline.Source`, which is where reprocessing
+/// starts from: a preview is a finished result, and holding the state that
+/// could produce a different one on the result itself would invite someone to
+/// reprocess from a rendered image. `DocumentState` keeps the two side by
+/// side.
 struct WorkspacePreview {
     /// The display-encoded pixels, tagged sRGB.
     let image: CGImage
@@ -196,8 +295,9 @@ struct WorkspacePreview {
     /// The region the white balance was estimated from, in **sensor**
     /// (pre-orientation) active-area coordinates.
     let neutralPatch: RAWActiveAreaRegion
-    /// The orientation the file's metadata named, applied by `ImageOrienter`.
-    let orientation: RAWImageOrientation
+    /// Why the image has the geometry it has: what the file recorded, what
+    /// the user asked for, and what `ImageOrienter` actually applied.
+    let orientationProvenance: OrientationProvenance
     /// Active-area dimensions before orientation, in pixels.
     let sourcePixelWidth: Int
     let sourcePixelHeight: Int
@@ -207,4 +307,17 @@ struct WorkspacePreview {
     /// touches geometry at all.
     let pixelWidth: Int
     let pixelHeight: Int
+
+    /// The orientation the file's own metadata named.
+    var sourceOrientation: RAWImageOrientation {
+        orientationProvenance.sourceOrientation
+    }
+    /// The correction the user asked for, as a canonical single state.
+    var userOrientationAdjustment: UserOrientationAdjustment {
+        orientationProvenance.userAdjustment
+    }
+    /// The orientation the pixels were actually permuted by.
+    var effectiveOrientation: RAWImageOrientation {
+        orientationProvenance.effectiveOrientation
+    }
 }

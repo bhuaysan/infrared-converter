@@ -149,7 +149,9 @@ struct ImageOrienterFixtureTests {
             .render(decoding: url, using: LibRawDecoder())
 
         // The orientation the file named, applied by the stage that owns it.
-        #expect(preview.orientation == .upright)
+        #expect(preview.sourceOrientation == .upright)
+        #expect(preview.userOrientationAdjustment == .identity)
+        #expect(preview.effectiveOrientation == .upright)
         #expect(preview.sourcePixelWidth == Self.sourceWidth)
         #expect(preview.sourcePixelHeight == Self.sourceHeight)
         #expect(preview.pixelWidth == 4056)

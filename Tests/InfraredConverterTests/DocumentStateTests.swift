@@ -176,7 +176,9 @@ struct DocumentStateTests {
         // The pixels are the owned pipeline's, at the mosaic's own geometry —
         // which is also the oriented geometry here, because this stub's
         // metadata records `flip 0`.
-        #expect(preview.orientation == .upright)
+        #expect(preview.sourceOrientation == .upright)
+        #expect(preview.userOrientationAdjustment == .identity)
+        #expect(preview.effectiveOrientation == .upright)
         #expect(preview.sourcePixelWidth == 8)
         #expect(preview.sourcePixelHeight == 8)
         #expect(preview.pixelWidth == 8)

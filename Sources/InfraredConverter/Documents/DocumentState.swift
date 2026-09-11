@@ -8,7 +8,25 @@ import Observation
 /// the decode task and the resulting state, and it is the only place that knows
 /// a `RAWDecoder` exists. Views read `status` and never touch a decoder.
 ///
-/// It is not `ImageDocument` yet — there are no adjustments here.
+/// It is not `ImageDocument` yet, but it is closer: it now owns an
+/// `ImageAdjustments` record alongside the decoded state, and the preview is
+/// derived from `source + adjustments` rather than from the source alone.
+///
+/// ## Where the adjustment lives, and for how long
+///
+/// **In memory, here, for as long as the file is open.** `ImageAdjustments` is
+/// `Codable` and round-trips, and that is a different fact from being saved:
+/// nothing writes it to disk, there is no sidecar, no document format and no
+/// restore on relaunch. Opening the same file again starts from
+/// `ImageAdjustments.none`.
+///
+/// The three layers are deliberately separate, and only the first two exist:
+///
+/// ```text
+/// 1. a serialisable adjustment model     ImageAdjustments — exists, tested
+/// 2. in-memory ownership                 here, per open file — exists
+/// 3. durable on-disk persistence         does not exist
+/// ```
 @MainActor
 @Observable
 final class DocumentState {
@@ -33,11 +51,27 @@ final class DocumentState {
         /// being mistaken for the other. `nil` when that buffer could not be
         /// wrapped for display.
         let legacyPreview: CGImage?
+        /// The retained scene-linear state every reprocess starts from, or
+        /// `nil` when the owned pipeline could not get that far.
+        ///
+        /// This is what makes an orientation change non-destructive: it is
+        /// the **unoriented** channel-mixed image, so a new adjustment is
+        /// always applied to it rather than to whatever is currently on
+        /// screen.
+        let source: WorkspacePreviewPipeline.Source?
+        /// The user's editing decisions. In memory only; see the note on the
+        /// type.
+        var adjustments: ImageAdjustments
         /// The application-owned pipeline's result, or the reason it failed.
-        let owned: OwnedPreview
+        var owned: OwnedPreview
 
         var url: URL { decoded.url }
         var metadata: RAWMetadata { decoded.metadata }
+
+        /// Whether the workspace can reprocess this file with a different
+        /// adjustment. False when the owned pipeline never produced a
+        /// scene-linear state to start from.
+        var isAdjustable: Bool { source != nil }
     }
 
     /// The outcome of the application-owned pipeline for one file.
@@ -54,6 +88,7 @@ final class DocumentState {
 
     private let decoder: RAWDecoder
     private var decodeTask: Task<Void, Never>?
+    private var reprocessTask: Task<Void, Never>?
 
     init(decoder: RAWDecoder = LibRawDecoder()) {
         self.decoder = decoder
@@ -68,9 +103,23 @@ final class DocumentState {
         }
     }
 
+    /// The user's orientation correction for the open file, or `.identity`
+    /// when nothing is open.
+    var orientationAdjustment: UserOrientationAdjustment {
+        guard case .decoded(let loaded) = status else { return .identity }
+        return loaded.adjustments.orientation
+    }
+
+    /// Whether the orientation controls can do anything right now.
+    var canAdjustOrientation: Bool {
+        guard case .decoded(let loaded) = status else { return false }
+        return loaded.isAdjustable
+    }
+
     /// Selects a file and starts decoding it, replacing any decode in flight.
     func open(_ url: URL) {
         decodeTask?.cancel()
+        reprocessTask?.cancel()
         status = .decoding(url)
 
         let decoder = self.decoder
@@ -96,11 +145,17 @@ final class DocumentState {
             // still describes the full-size image.
             let decoded = try decoder.decode(at: url, options: .init(halfSize: true))
             let legacyPreview = PreviewImageRenderer.makeCGImage(from: decoded.image)
+            let adjustments = ImageAdjustments.none
+            let prepared = Result {
+                try WorkspacePreviewPipeline().prepare(decoding: url, using: decoder)
+            }
             return .success(
                 Loaded(
                     decoded: decoded,
                     legacyPreview: legacyPreview,
-                    owned: ownedPreview(url, using: decoder)
+                    source: try? prepared.get(),
+                    adjustments: adjustments,
+                    owned: ownedPreview(prepared, adjustments: adjustments, url: url)
                 )
             )
         } catch let error as RAWDecodingError {
@@ -110,20 +165,27 @@ final class DocumentState {
         }
     }
 
-    /// Runs the application-owned pipeline, and reports rather than hides a
+    /// Orients and encodes a prepared source, and reports rather than hides a
     /// failure.
     ///
     /// Every error type the chain can raise is `LocalizedError`, so the
     /// message a user sees names the stage that actually refused — a
     /// non-finite coordinate, an unusable exposure, an unsupported sensor
-    /// layout — instead of a generic "preview failed".
+    /// layout, an orientation code we do not model — instead of a generic
+    /// "preview failed".
+    ///
+    /// A failure in the expensive half arrives here as a failed `Result` and
+    /// is reported with its own message, so "the mosaic would not decode" and
+    /// "the orientation would not apply" stay distinguishable.
     private nonisolated static func ownedPreview(
-        _ url: URL,
-        using decoder: RAWDecoder
+        _ prepared: Result<WorkspacePreviewPipeline.Source, Error>,
+        adjustments: ImageAdjustments,
+        url: URL
     ) -> OwnedPreview {
         do {
+            let source = try prepared.get()
             return .rendered(
-                try WorkspacePreviewPipeline().render(decoding: url, using: decoder)
+                try WorkspacePreviewPipeline().render(source, adjustments: adjustments)
             )
         } catch {
             Log.raw.error(
@@ -134,6 +196,95 @@ final class DocumentState {
             )
             return .unavailable(reason: error.localizedDescription)
         }
+    }
+
+    // MARK: - Orientation adjustment
+
+    /// Turns the displayed photograph a quarter turn clockwise.
+    func rotateOrientationRight() { adjustOrientation { $0.rotatedRight() } }
+
+    /// Turns the displayed photograph a quarter turn counter-clockwise.
+    func rotateOrientationLeft() { adjustOrientation { $0.rotatedLeft() } }
+
+    /// Turns the displayed photograph a half turn.
+    func rotateOrientationHalfTurn() { adjustOrientation { $0.rotatedHalfTurn() } }
+
+    /// Exchanges left and right in the displayed photograph.
+    func flipOrientationHorizontally() { adjustOrientation { $0.flippedHorizontally() } }
+
+    /// Exchanges top and bottom in the displayed photograph.
+    func flipOrientationVertically() { adjustOrientation { $0.flippedVertically() } }
+
+    /// Discards the user's correction and returns to the orientation the file
+    /// records.
+    ///
+    /// Not "make upright": a file whose metadata records a rotation gets that
+    /// rotation back.
+    func resetOrientation() { adjustOrientation { _ in .reset } }
+
+    /// Applies a transformation to the current adjustment and re-renders.
+    ///
+    /// The new adjustment is the **canonical composition** of the old one and
+    /// the operation, so pressing a button repeatedly never accumulates a
+    /// history — and the render that follows always starts from the retained,
+    /// unoriented channel-mixed image, never from what is on screen.
+    private func adjustOrientation(
+        _ transform: (UserOrientationAdjustment) -> UserOrientationAdjustment
+    ) {
+        guard case .decoded(var loaded) = status, let source = loaded.source else { return }
+
+        let updated = transform(loaded.adjustments.orientation)
+        guard updated != loaded.adjustments.orientation else { return }
+
+        // Record the intent immediately, so the controls reflect what the
+        // user pressed even while the render is still running.
+        loaded.adjustments.orientation = updated
+        status = .decoded(loaded)
+
+        reprocess(source, adjustments: loaded.adjustments, for: loaded.url)
+    }
+
+    /// Re-runs the orientation and display stages only.
+    ///
+    /// Nothing upstream reruns: no channel mix, no camera conversion, no
+    /// demosaic, no white balance, no decode. It is detached for the same
+    /// reason the decode is — a full-frame permutation and encode is not work
+    /// for the main actor — and superseded by the next adjustment, so holding
+    /// a key down does not queue renders.
+    private func reprocess(
+        _ source: WorkspacePreviewPipeline.Source,
+        adjustments: ImageAdjustments,
+        for url: URL
+    ) {
+        reprocessTask?.cancel()
+        reprocessTask = Task.detached(priority: .userInitiated) {
+            let owned = Self.ownedPreview(.success(source), adjustments: adjustments, url: url)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                self?.applyReprocessed(owned, adjustments: adjustments, for: url)
+            }
+        }
+    }
+
+    /// Installs a re-rendered preview, unless a newer adjustment has already
+    /// superseded it.
+    ///
+    /// The guard compares the adjustment the render was made for with the one
+    /// currently requested. A late result from a superseded adjustment would
+    /// otherwise put the wrong geometry on screen while the controls showed
+    /// the right one.
+    private func applyReprocessed(
+        _ owned: OwnedPreview,
+        adjustments: ImageAdjustments,
+        for url: URL
+    ) {
+        guard case .decoded(var loaded) = status,
+              loaded.url == url,
+              loaded.adjustments == adjustments
+        else { return }
+
+        loaded.owned = owned
+        status = .decoded(loaded)
     }
 
     private func apply(_ outcome: Result<Loaded, RAWDecodingError>, for url: URL) {
