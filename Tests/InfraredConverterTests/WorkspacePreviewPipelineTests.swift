@@ -58,6 +58,65 @@ struct WorkspacePreviewPipelineTests {
         #expect(WorkspacePreviewPipeline.orientation(for: reference) == .upright)
     }
 
+    // MARK: - Effective orientation
+
+    /// The file's orientation and the user's correction stay separate terms,
+    /// and the composition order is source-then-user.
+    @Test("The effective orientation composes metadata with the user's adjustment")
+    func theEffectiveOrientationComposesBothTerms() throws {
+        for source in RAWImageOrientation.allCases {
+            var metadata = RAWTestData.metadata()
+            metadata.geometry.flip = source.decoderFlip
+
+            for adjustment in UserOrientationAdjustment.allCases {
+                let derived = try WorkspacePreviewPipeline.effectiveOrientation(
+                    for: metadata, adjustments: ImageAdjustments(orientation: adjustment)
+                )
+                #expect(derived.source == source)
+                #expect(derived.userAdjustment == adjustment)
+                #expect(derived.applied == source.composed(with: adjustment.transform))
+
+                // The metadata is a fact about the file, and a user
+                // adjustment never writes to it.
+                #expect(metadata.geometry.flip == source.decoderFlip)
+                #expect(metadata.geometry.orientation == source)
+            }
+        }
+    }
+
+    /// Reset means "no user correction", not "upright". The two coincide only
+    /// on a file that records upright, so every other source proves the
+    /// difference.
+    @Test("Resetting restores the file's orientation, whatever that is")
+    func resettingRestoresTheFilesOrientation() throws {
+        for source in RAWImageOrientation.allCases {
+            var metadata = RAWTestData.metadata()
+            metadata.geometry.flip = source.decoderFlip
+
+            let reset = try WorkspacePreviewPipeline.effectiveOrientation(
+                for: metadata, adjustments: ImageAdjustments(orientation: .reset)
+            )
+            #expect(reset.applied == source)
+            #expect(reset.applied.isIdentity == (source == .upright))
+        }
+    }
+
+    /// An unmodelled decoder value is still a typed refusal, and the user's
+    /// adjustment does not get to compose onto an invented `.upright`.
+    @Test("An unmodelled decoder orientation is refused before any adjustment applies")
+    func anUnmodelledOrientationIsRefused() {
+        var metadata = RAWTestData.metadata()
+        metadata.geometry.flip = 9
+
+        for adjustment in UserOrientationAdjustment.allCases {
+            #expect(throws: OrientationError.unsupportedDecoderOrientation(flip: 9)) {
+                try WorkspacePreviewPipeline.effectiveOrientation(
+                    for: metadata, adjustments: ImageAdjustments(orientation: adjustment)
+                )
+            }
+        }
+    }
+
     /// Even sides matter: a region of even width and height contains whole
     /// 2×2 CFA cells whatever its origin's parity, so every colour plane is
     /// measured and the estimator cannot fail for want of samples.
