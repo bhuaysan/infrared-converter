@@ -108,3 +108,87 @@ so.
 - The architectural claim and the control flow now say the same thing.
 - Nothing about the workspace image changed: same pipeline, same stages, same
   pixels.
+
+---
+
+## Amendment (2026-09-12) — an open is an image, not a prepared source
+
+Decision 1 above wrote the table in terms of "owned ok" and "owned fails", and
+the implementation read "owned ok" as `prepare(decoding:using:)` returning a
+`Source`. Those are not the same thing, and the gap was reachable:
+
+```text
+decodeMosaic        succeeds
+prepare             succeeds
+metadata flip       9, which this application does not model
+render              refuses with unsupportedDecoderOrientation
+legacy decode       fails
+```
+
+Every expensive stage succeeded, there was no displayable image anywhere, and
+the workspace reported `.decoded`. The API said the file was open while the
+screen had nothing on it.
+
+### The corrected boundary
+
+**The owned path counts as successful only when the initial workspace render
+completed.** A prepared source is the expensive preparation, not a photograph.
+
+The owned path is now modelled as one value with three outcomes — prepared and
+rendered, prepared but unrenderable, never prepared — and `decode` switches on
+it against the reference's two, so the six pairings are written out as six
+cases rather than inferred:
+
+```text
+owned prepared + rendered / legacy ok      → .decoded, adjustable
+owned prepared + rendered / legacy fails   → .decoded, adjustable, reference missing
+owned fails at prepare    / legacy ok      → .decoded, owned unavailable, no source
+owned fails at render     / legacy ok      → .decoded, owned unavailable, source kept
+owned fails at prepare    / legacy fails   → .failed
+owned fails at render     / legacy fails   → .failed          ← the missing case
+```
+
+The no-fallback rule is untouched: rows three and four still report the owned
+refusal and still never show the LibRaw image in its place.
+
+### `isAdjustable` is a rendered fact, not a retained buffer
+
+It was `source != nil`, which answered a different question — whether the
+expensive preparation exists — and answered `true` for a file where every
+possible adjustment would refuse.
+
+It is now a stored fact established at open time: **the owned pipeline
+rendered this source at least once.**
+
+The source itself is still retained when the render refuses it, because a
+prepared scene-linear state is the most informative thing about such a file.
+Retained and adjustable are simply different properties, and only the second
+one builds a render slot.
+
+Two things follow, both deliberate:
+
+- A file whose recorded orientation this application cannot read shows its
+  refusal and offers no rotate or flip control. There is no camera- or
+  error-specific branch in the view: the decision is a field on the workspace
+  state, where the reasoning lives. With orientation the only adjustment, and
+  every one of its failure modes independent of which orientation was asked
+  for, "the initial render failed" and "no adjustment can succeed" are the
+  same condition. A future adjustment that could repair a render failure would
+  be a reason to revisit this, deliberately.
+- A render that fails *after* the file is open does **not** disable the
+  controls, because the fact is stored rather than read back from the current
+  preview. Otherwise a user could not undo the adjustment that broke it.
+
+### The failure keeps its type
+
+`RAWPathFailure` carried a `RAWDecodingError?` and a message, which lost every
+other error the chain throws. It now carries the refusal itself plus the stage
+that produced it — owned preparation, owned render, or the legacy reference —
+with `decoding` and `orientation` as projections.
+
+That is what lets a test assert `unsupportedDecoderOrientation(flip: 9)` rather
+than match on a sentence, and what lets `DocumentOpenError` name which half of
+the owned path refused. `message` and `failureReason` remain the user-facing
+strings, and neither can carry LibRaw's internal integer codes: the decoder's
+`failureReason` reports diagnostics through `userFacingSummary`, which omits
+them.

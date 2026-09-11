@@ -1054,7 +1054,7 @@ docs/decisions/0013-metal-render-pipeline.md
 
 The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`. The creative channel-mix stage that depends on it is `docs/decisions/0007-infrared-channel-mixing.md`, the display boundary that turns its result into pixels is `docs/decisions/0008-display-preview-rendering.md`, the geometry stage between them is `docs/decisions/0009-application-owned-orientation.md`, and the user-owned orientation adjustment composed onto that is `docs/decisions/0010-user-owned-orientation-adjustment.md`.
 
-How those re-renders are scheduled and cancelled is `docs/decisions/0011-coalesced-preview-rendering.md`. That the application-owned pipeline and the LibRaw processed-RGB reference are independent paths, neither gating nor substituting for the other, is `docs/decisions/0012-independent-raw-paths.md`.
+How those re-renders are scheduled and cancelled is `docs/decisions/0011-coalesced-preview-rendering.md`. That the application-owned pipeline and the LibRaw processed-RGB reference are independent paths, neither gating nor substituting for the other, is `docs/decisions/0012-independent-raw-paths.md` — whose amendment defines the open boundary: a file is open when a path produced an **image**, and a prepared scene-linear state is not one.
 
 ADR numbers are assigned in the order decisions are actually made; do not reuse a number that is already taken.
 
@@ -1382,6 +1382,12 @@ Pause and reconsider when code begins to show any of these patterns:
 - the LibRaw processed-RGB path gating, or standing in for, the
   application-owned pipeline
 - a diagnostic reference whose failure closes the workspace
+- an open reported as successful when no path produced a displayable image
+- a successful expensive preparation mistaken for a successful render
+- adjustability derived from a retained buffer rather than from a render that
+  actually succeeded
+- a control offered for an adjustment that is known to refuse
+- an error flattened to a string where the typed value could have survived
 - a persisted record whose publicly constructible values do not round-trip
 - a schema version that is settable application state rather than wire-format
   metadata
