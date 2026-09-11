@@ -27,6 +27,13 @@ import Observation
 /// 2. in-memory ownership                 here, per open file — exists
 /// 3. durable on-disk persistence         does not exist
 /// ```
+///
+/// ## Re-rendering is coalesced, and superseded work is stopped
+///
+/// Adjustment changes go through one `CoalescingPreviewRenderer`: at most one
+/// full-frame render works at a time, a burst collapses to its newest state,
+/// and the render being replaced is cancelled inside its pass rather than left
+/// to finish work nobody will see.
 @MainActor
 @Observable
 final class DocumentState {
@@ -88,7 +95,11 @@ final class DocumentState {
 
     private let decoder: RAWDecoder
     private var decodeTask: Task<Void, Never>?
-    private var reprocessTask: Task<Void, Never>?
+
+    /// The single slot every re-render goes through, rebuilt for each opened
+    /// file because it closes over that file's retained scene-linear source.
+    /// `nil` when nothing adjustable is open.
+    private var renderer: CoalescingPreviewRenderer?
 
     init(decoder: RAWDecoder = LibRawDecoder()) {
         self.decoder = decoder
@@ -119,14 +130,18 @@ final class DocumentState {
     /// Selects a file and starts decoding it, replacing any decode in flight.
     func open(_ url: URL) {
         decodeTask?.cancel()
-        reprocessTask?.cancel()
+        renderer?.cancelAll()
+        renderer = nil
         status = .decoding(url)
 
         let decoder = self.decoder
         // LibRaw decoding is a long, blocking C++ call. Detaching keeps it off
         // both the main actor and the caller's cooperative context.
         decodeTask = Task.detached(priority: .userInitiated) {
-            let outcome = Self.decode(url, using: decoder)
+            // `nil` means the open was superseded while it was running. There
+            // is nothing to install and nothing to report: a cancelled open is
+            // not a failed one.
+            guard let outcome = Self.decode(url, using: decoder) else { return }
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
                 self?.apply(outcome, for: url)
@@ -134,10 +149,12 @@ final class DocumentState {
         }
     }
 
+    /// - Returns: the opened file, the reason it could not be opened, or
+    ///   `nil` when the open was cancelled before it finished.
     private nonisolated static func decode(
         _ url: URL,
         using decoder: RAWDecoder
-    ) -> Result<Loaded, RAWDecodingError> {
+    ) -> Result<Loaded, RAWDecodingError>? {
         do {
             // The legacy processed-RGB decode, at half resolution: it is the
             // diagnostic reference and the source of the inspector's decoder
@@ -149,13 +166,16 @@ final class DocumentState {
             let prepared = Result {
                 try WorkspacePreviewPipeline().prepare(decoding: url, using: decoder)
             }
+            guard let owned = ownedPreview(
+                prepared, adjustments: adjustments, url: url, cancellation: .enclosingTask
+            ) else { return nil }
             return .success(
                 Loaded(
                     decoded: decoded,
                     legacyPreview: legacyPreview,
                     source: try? prepared.get(),
                     adjustments: adjustments,
-                    owned: ownedPreview(prepared, adjustments: adjustments, url: url)
+                    owned: owned
                 )
             )
         } catch let error as RAWDecodingError {
@@ -177,16 +197,24 @@ final class DocumentState {
     /// A failure in the expensive half arrives here as a failed `Result` and
     /// is reported with its own message, so "the mosaic would not decode" and
     /// "the orientation would not apply" stay distinguishable.
+    /// - Returns: the preview or the reason there is none, or `nil` when the
+    ///   render was cancelled. Cancellation is not a failure and must never be
+    ///   shown as one.
     private nonisolated static func ownedPreview(
         _ prepared: Result<WorkspacePreviewPipeline.Source, Error>,
         adjustments: ImageAdjustments,
-        url: URL
-    ) -> OwnedPreview {
+        url: URL,
+        cancellation: ProcessingCancellation
+    ) -> OwnedPreview? {
         do {
             let source = try prepared.get()
             return .rendered(
-                try WorkspacePreviewPipeline().render(source, adjustments: adjustments)
+                try WorkspacePreviewPipeline().render(
+                    source, adjustments: adjustments, cancellation: cancellation
+                )
             )
+        } catch is CancellationError {
+            return nil
         } catch {
             Log.raw.error(
                 """
@@ -231,7 +259,9 @@ final class DocumentState {
     private func adjustOrientation(
         _ transform: (UserOrientationAdjustment) -> UserOrientationAdjustment
     ) {
-        guard case .decoded(var loaded) = status, let source = loaded.source else { return }
+        guard case .decoded(var loaded) = status, loaded.isAdjustable,
+              let renderer
+        else { return }
 
         let updated = transform(loaded.adjustments.orientation)
         guard updated != loaded.adjustments.orientation else { return }
@@ -241,40 +271,44 @@ final class DocumentState {
         loaded.adjustments.orientation = updated
         status = .decoded(loaded)
 
-        reprocess(source, adjustments: loaded.adjustments, for: loaded.url)
+        // One slot, newest state wins. A burst of presses produces one
+        // cancellation and one render, not a queue.
+        renderer.request(loaded.adjustments)
     }
 
-    /// Re-runs the orientation and display stages only.
+    /// Builds the single render slot for a freshly opened file.
     ///
-    /// Nothing upstream reruns: no channel mix, no camera conversion, no
-    /// demosaic, no white balance, no decode. It is detached for the same
-    /// reason the decode is — a full-frame permutation and encode is not work
-    /// for the main actor — and superseded by the next adjustment, so holding
-    /// a key down does not queue renders.
-    private func reprocess(
-        _ source: WorkspacePreviewPipeline.Source,
-        adjustments: ImageAdjustments,
-        for url: URL
-    ) {
-        reprocessTask?.cancel()
-        reprocessTask = Task.detached(priority: .userInitiated) {
-            let owned = Self.ownedPreview(.success(source), adjustments: adjustments, url: url)
-            guard !Task.isCancelled else { return }
-            await MainActor.run { [weak self] in
-                self?.applyReprocessed(owned, adjustments: adjustments, for: url)
+    /// The closure captures that file's retained, **unoriented** scene-linear
+    /// source, so every re-render starts from it rather than from whatever is
+    /// on screen. Nothing upstream reruns: no channel mix, no camera
+    /// conversion, no demosaic, no white balance, no decode.
+    private func makeRenderer(
+        for source: WorkspacePreviewPipeline.Source,
+        url: URL
+    ) -> CoalescingPreviewRenderer {
+        CoalescingPreviewRenderer(
+            render: { adjustments, cancellation in
+                try WorkspacePreviewPipeline().render(
+                    source, adjustments: adjustments, cancellation: cancellation
+                )
+            },
+            deliver: { [weak self] outcome, adjustments in
+                self?.applyReprocessed(outcome, adjustments: adjustments, for: url)
             }
-        }
+        )
     }
 
     /// Installs a re-rendered preview, unless a newer adjustment has already
     /// superseded it.
     ///
     /// The guard compares the adjustment the render was made for with the one
-    /// currently requested. A late result from a superseded adjustment would
-    /// otherwise put the wrong geometry on screen while the controls showed
-    /// the right one.
+    /// currently requested. `CoalescingPreviewRenderer` already declines to
+    /// deliver a cancelled render, so this is the second line of defence, for
+    /// the render that finished before it noticed: a late result from a
+    /// superseded adjustment would otherwise put the wrong geometry on screen
+    /// while the controls showed the right one.
     private func applyReprocessed(
-        _ owned: OwnedPreview,
+        _ outcome: Result<WorkspacePreview, Error>,
         adjustments: ImageAdjustments,
         for url: URL
     ) {
@@ -283,7 +317,18 @@ final class DocumentState {
               loaded.adjustments == adjustments
         else { return }
 
-        loaded.owned = owned
+        switch outcome {
+        case .success(let preview):
+            loaded.owned = .rendered(preview)
+        case .failure(let error):
+            Log.raw.error(
+                """
+                Owned preview failed for \(url.lastPathComponent, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """
+            )
+            loaded.owned = .unavailable(reason: error.localizedDescription)
+        }
         status = .decoded(loaded)
     }
 
@@ -293,6 +338,7 @@ final class DocumentState {
 
         switch outcome {
         case .success(let loaded):
+            renderer = loaded.source.map { makeRenderer(for: $0, url: loaded.url) }
             status = .decoded(loaded)
         case .failure(let error):
             Log.ui.error(
