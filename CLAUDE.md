@@ -344,6 +344,10 @@ The working representation is established **before** the infrared channel/color 
 
 The pipeline's "Display or Export Transform" step is now partly implemented, and only partly: a display preview boundary exists — exposure, hard display-range clipping, the sRGB transfer function, 8-bit quantisation — while export does not, and neither does any tone stage. See `docs/decisions/0008-display-preview-rendering.md`. Display and export remain separate decisions: an export path must choose its own bit depth and color handling and must never reuse the 8-bit preview buffer.
 
+Image orientation is a stage of its own, between the infrared channel/color transform and the display or export transform. It is **discrete geometry**: the eight standard orientations a file's metadata can name, applied as an exact permutation of whole pixels, lossless and with every component's bit pattern preserved. It is the only stage that changes where a pixel is, or that can exchange the image's width and height. See `docs/decisions/0009-application-owned-orientation.md`.
+
+Keep that apart from arbitrary-angle rotation, straightening, crop and perspective correction. Those are continuous editing operations, they require resampling, and none of them is implemented. Do not fold either kind of geometry into demosaicing — a CFA layout is defined in sensor coordinates — or into the display encoder, whose per-component, geometry-preserving claim is what makes it auditable.
+
 Whenever processing order changes, document:
 
 1. old order
@@ -528,7 +532,9 @@ Choosing that space defines only the coordinate system. How camera-native sensor
 
 Creative infrared channel mixing is a **third** decision, distinct from both. It operates inside the working representation, leaves the color space unchanged, and carries its own provenance as creative intent — never as camera calibration, white balance, working-space establishment or filter calibration. That decision is recorded in `docs/decisions/0007-infrared-channel-mixing.md`.
 
-Encoding the result for a display is a **fourth** decision, distinct from all three. It is the first point in the pipeline where a value stops being proportional to light, and it is deliberately minimal: exposure in the linear domain, an explicitly named hard clip to `0...1`, the piecewise sRGB transfer function, and deterministic 8-bit quantisation. That decision is recorded in `docs/decisions/0008-display-preview-rendering.md`.
+Arranging the pixels for viewing is a **fourth** decision, and it is not a colour decision at all: metadata-driven orientation moves whole pixels and changes no value, so it is kept out of every colour stage. That decision is recorded in `docs/decisions/0009-application-owned-orientation.md`.
+
+Encoding the result for a display is a **fifth** decision, distinct from all four. It is the first point in the pipeline where a value stops being proportional to light, and it is deliberately minimal: exposure in the linear domain, an explicitly named hard clip to `0...1`, the piecewise sRGB transfer function, and deterministic 8-bit quantisation. That decision is recorded in `docs/decisions/0008-display-preview-rendering.md`.
 
 Keep these apart in code and in language:
 
@@ -1029,10 +1035,10 @@ Examples:
 ```text
 docs/decisions/0001-use-libraw.md
 docs/decisions/0006-working-color-space.md
-docs/decisions/0009-metal-render-pipeline.md
+docs/decisions/0010-metal-render-pipeline.md
 ```
 
-The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`. The creative channel-mix stage that depends on it is `docs/decisions/0007-infrared-channel-mixing.md`, and the display boundary that turns its result into pixels is `docs/decisions/0008-display-preview-rendering.md`.
+The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`. The creative channel-mix stage that depends on it is `docs/decisions/0007-infrared-channel-mixing.md`, the display boundary that turns its result into pixels is `docs/decisions/0008-display-preview-rendering.md`, and the geometry stage between them is `docs/decisions/0009-application-owned-orientation.md`.
 
 ADR numbers are assigned in the order decisions are actually made; do not reuse a number that is already taken.
 
@@ -1352,6 +1358,9 @@ Pause and reconsider when code begins to show any of these patterns:
 - large mutable global image state
 - one class controlling decode, edit, preview, and export
 - camera/filter presets hard-coded into rendering functions
+- orientation applied inside a colour stage, corrected by a view transform, or not applied at all
+- a decoder's orientation integer travelling through the pipeline instead of an application-owned type
+- an unreadable orientation value silently treated as upright
 - full RAW decode on every slider move without measurement or caching rationale
 - every feature depending directly on LibRaw
 - direct Metal shader calls from UI views

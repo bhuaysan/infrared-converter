@@ -143,6 +143,16 @@ extended linear sRGB; unclamped Float32; still linear
 ═══════════ CREATIVE IR WORKING RGB DOMAIN ═════════════
 the SAME extended linear sRGB; unclamped Float32; linear
 a different PROCESSING STATE, not a different space
+pixels are still in SENSOR reading order
+
+                  ↓
+       explicit RAWImageOrientation                ┐
+                  ↓                                ├ ImageOrienter
+       OrientedSceneLinearRGBImage                 ┘
+
+═══════════ ORIENTED SCENE-LINEAR DOMAIN ═══════════════
+the same space, the same values, the same bit patterns
+pixels are now in VIEWING order; width/height may be swapped
 
                   ↓
        explicit DisplayRenderSettings              ┐
@@ -247,12 +257,19 @@ receives no `RAWMetadata` and there is no default transform.
 reachable on `.source` so the mix can be changed without converting again. It
 receives no `RAWMetadata` either, and there is no default mix.
 
-`DisplayPreviewRenderer` takes an `IRChannelMixedProcessedRAWImage` (or a bare
-`IRChannelMixedRGBImage`) **and explicit settings** and returns a
+`ImageOrienter` takes an `IRChannelMixedProcessedRAWImage` (or a bare
+`IRChannelMixedRGBImage`) **and an explicit orientation** and returns an
+`OrientedProcessedRAWImage`, which keeps the unoriented image reachable on
+`.source` so the orientation can be changed without mixing again. It receives
+no `RAWMetadata`: the orientation is chosen by the caller, normally from
+`RAWMetadata.Geometry.orientation`, and there is no default.
+
+`DisplayPreviewRenderer` takes an `OrientedProcessedRAWImage` (or a bare
+`OrientedSceneLinearRGBImage`) **and explicit settings** and returns a
 `DisplayPreviewProcessedRAWImage`, which keeps the scene-linear image reachable
-on `.source` so exposure can be changed without mixing again. It receives no
-`RAWMetadata` — not even the orientation, which it deliberately does not apply
-— and there is no default exposure.
+on `.source` so exposure can be changed without orienting again. It receives no
+`RAWMetadata` — not even the orientation, which one stage upstream has already
+applied — and there is no default exposure.
 
 **Automatic estimation does not exist yet.** The caller still chooses which
 samples to measure; nothing decides that on its own, and no filter profile or
@@ -800,11 +817,120 @@ crop, no resize, no orientation, no resampling.
 with `M2` gives `M2 × workingRGB`, not `M2 × (M1 × workingRGB)`. Two red/blue
 swaps in a row would otherwise cancel.
 
-### Creative infrared RGB → display-encoded preview
+### Creative infrared RGB → oriented scene-linear RGB
+
+`ImageOrienter` is the only stage in the pipeline that changes **where** a
+pixel is, and the only one that can change the image's width and height. It
+takes a channel-mixed image and **one explicit `RAWImageOrientation`**, and
+returns the same values arranged for viewing.
+
+See `docs/decisions/0009-application-owned-orientation.md`.
+
+#### Discrete geometry, not editing
+
+```text
+Orientation        eight standard arrangements, read from file metadata,
+                   an exact permutation of whole pixels, lossless
+
+Rotation / crop    continuous editing operations chosen by a person,
+                   requiring resampling — neither exists yet
+```
+
+Nothing here interpolates, resamples, scales, crops or invents a pixel.
+
+#### The orientation type
+
+`RAWImageOrientation` models all eight standard orientations, with reflections
+distinguished from rotations — four of the eight reverse handedness, and no
+rotation reproduces them.
+
+| Case | EXIF | LibRaw `flip` | Swaps dimensions | Mirrored |
+| --- | --- | --- | --- | --- |
+| `upright` | 1 | 0 | no | no |
+| `mirroredHorizontally` | 2 | 1 | no | yes |
+| `rotated180` | 3 | 3 | no | no |
+| `mirroredVertically` | 4 | 2 | no | yes |
+| `transposed` | 5 | 4 | yes | yes |
+| `rotated90Clockwise` | 6 | 6 | yes | no |
+| `transverse` | 7 | 7 | yes | yes |
+| `rotated270Clockwise` | 8 | 5 | yes | no |
+
+The names describe the operation a **viewer performs**, not where the stored
+image's first row ends up, which is what EXIF's own names describe.
+
+`RAWMetadata.Geometry.flip` is LibRaw's dcraw-derived bitfield, and it
+disagrees with the EXIF code for five of the eight values. It is mapped exactly
+once, by `RAWImageOrientation.init?(decoderFlip:)`, and no stage downstream
+sees the integer.
+
+#### Unknown or unmodelled orientation
+
+`init?(decoderFlip:)` returns `nil` outside `0...7`, and
+`RAWMetadata.Geometry.orientation` is therefore optional. LibRaw does not
+guarantee the range: several format parsers assign `flip` straight from a file
+field.
+
+An unmodelled value is **never** read as upright. `WorkspacePreviewPipeline`
+refuses with `OrientationError.unsupportedDecoderOrientation(flip:)`, reporting
+the value verbatim.
+
+What this cannot distinguish is a file that recorded upright from a file that
+recorded nothing: LibRaw's `identify()` substitutes `0` when neither a
+makernote nor EXIF tag 274 supplied an orientation, so both arrive as the same
+number.
+
+#### The coordinate mapping
+
+The loop runs over **destination** coordinates and gathers, so every output
+pixel is written exactly once by construction. With `w = sourceWidth`,
+`h = sourceHeight` and a destination coordinate `(r, c)`:
+
+```text
+upright                source(r,          c        )
+mirroredHorizontally   source(r,          w − 1 − c)
+rotated180             source(h − 1 − r,  w − 1 − c)
+mirroredVertically     source(h − 1 − r,  c        )
+transposed             source(c,          r        )
+rotated90Clockwise     source(h − 1 − c,  r        )
+transverse             source(h − 1 − c,  w − 1 − r)
+rotated270Clockwise    source(c,          w − 1 − r)
+```
+
+The four transposing cases take their destination row from a source *column*,
+which is why the `w − 1` and `h − 1` terms attach to the opposite axis from the
+one a reader expects.
+
+#### Values
+
+Each destination pixel's three components are **copied**, never computed, so
+every `Float` bit pattern survives: signed zeros, subnormals, the extremes, and
+non-finite values too. The stage reads no component as a number and therefore
+refuses none — a NaN is the display renderer's boundary.
+
+`.upright` allocates nothing: it hands the same immutable array back.
+
+#### Output
+
+`OrientedSceneLinearRGBImage` uses the same storage contract as every RGB
+representation upstream — tightly packed, row-major, interleaved, three
+`Float32` per pixel. `(0, 0)` is the top-left **as viewed**. Width and height
+are exchanged for exactly the four orientations whose `swapsDimensions` is
+`true`; the pixel count is invariant in every case.
+
+#### Reprocessing
+
+`OrientedProcessedRAWImage` retains the unoriented channel-mixed state, and
+`apply(orientation:replacing:)` reaches through it. Orientations never compose:
+replacing `O1` with `O2` gives `orient(mixed, O2)`. The eight orientations are
+closed under composition, so a chained result would always be *some* valid
+orientation and would never look malformed — just not the one asked for.
+
+### Oriented scene-linear RGB → display-encoded preview
 
 `DisplayPreviewRenderer` is the first stage whose output is **not**
-proportional to light. It takes a channel-mixed image and **one explicit
-`DisplayRenderSettings`**, and returns bytes a monitor can be handed correctly.
+proportional to light. It takes an oriented scene-linear image and **one
+explicit `DisplayRenderSettings`**, and returns bytes a monitor can be handed
+correctly.
 
 See `docs/decisions/0008-display-preview-rendering.md`.
 
@@ -1050,6 +1176,34 @@ A creative mix never makes anything a calibration:
 `isValidatedInfraredCalibration` is still `false`, and still forwarded from the
 upstream transform rather than restated here.
 
+### What the orientation stage does not do
+
+| Stage | Applied? |
+| --- | --- |
+| One of the eight standard orientations | **yes** |
+| Interpolation / resampling / filtering | no |
+| Arbitrary-angle rotation or straightening | no |
+| Crop / scale / padding | no |
+| Change to any channel value | no — components are copied, bit for bit |
+| Refusal of non-finite values | no — they are moved like any other |
+| Clamping / clipping | no |
+| Colour-space conversion | no — the space is unchanged |
+| Channel mixing | no — upstream, and not reapplied |
+| Camera → working transform | no — upstream, and not reapplied |
+| White balance | no — upstream, in the mosaic domain |
+| Gamma / transfer function | no |
+| Tone mapping / exposure / gamut mapping | no |
+| Display encoding / 8-bit quantisation | no |
+| Reading `RAWMetadata` | no — the caller passes the orientation in |
+
+Each is recorded on `ImageOrientationProcessing`. The orientation is its own
+field; the whole upstream chain is read through the `IRChannelMixProcessing` it
+carries rather than copied.
+
+Rearranging pixels never makes anything a calibration:
+`isValidatedInfraredCalibration` is still `false`, forwarded from the upstream
+transform rather than restated here.
+
 ### What the display stage does not do
 
 | Stage | Applied? |
@@ -1068,13 +1222,20 @@ upstream transform rather than restated here.
 | White balance | no — upstream, in the mosaic domain |
 | Camera colour metadata of any kind | no — none reaches this stage |
 | Sharpening / noise reduction | no |
-| Orientation / crop / resampling | no |
+| Orientation / crop / resampling | no — orientation is upstream, and forwarded |
 | Mutation of the scene-linear input | no |
 
 Each is recorded on `DisplayPreviewProcessing`, alongside the settings and the
-two clip counts. The mix, the camera transform, the demosaic algorithm and the
-gains are read through the `IRChannelMixProcessing` it carries rather than
-copied — so no record of this history can disagree with another.
+two clip counts. The orientation, the mix, the camera transform, the demosaic
+algorithm and the gains are read through the `ImageOrientationProcessing` it
+carries rather than copied — so no record of this history can disagree with
+another.
+
+`orientationApplied` is `true` on this record and `false` on every record
+upstream of `ImageOrientationProcessing`, and both are correct: the flag is
+forwarded so one record answers "is this arranged for viewing?" without a
+reader having to know which stage did it. The display stage itself reads no
+orientation metadata and moves no pixel.
 
 `isValidatedInfraredCalibration` is still `false`. Making an image displayable
 never makes it correct.
@@ -1588,15 +1749,60 @@ with six additions per pixel. Inside the fully parallel test run they are
 roughly twice that, which is contention rather than cost. No optimised-build
 measurement has been taken and no performance claim is made.
 
-### After display preview rendering
+### After orientation
 
-Same chain again — identity false-colour transform, identity channel mix — then
-`DisplayPreviewRenderer` at `0 EV`, hard display-range clipping and sRGB
-encoding.
+Same chain again, then `ImageOrienter` with the orientation the file's own
+metadata names.
 
 | | |
 | --- | --- |
-| Preview geometry | 4056 × 3040, unchanged (no orientation applied) |
+| EXIF tag 274 in the file | `1` |
+| LibRaw `flip` | `0` |
+| Application-owned orientation | `.upright` |
+| Swaps dimensions / mirrored | no / no |
+| Geometry before → after | 4056 × 3040 → 4056 × 3040 |
+| Values | 36 990 720, bit-identical to the channel-mixed buffer |
+| Allocation | none — the `.upright` path shares the input array |
+
+**The fixture is stored sideways and records no rotation.** The photograph was
+taken with the camera turned and the body recorded nothing about it, so the
+correct response to the metadata is to display it as captured. Making it
+upright is a manual editing operation; a camera-model special case would make
+this one file look right and every correctly tagged E-PL3 file look wrong.
+
+That makes the fixture a strong test of the metadata path and a weak one for
+the coordinate arithmetic, so the same real 12-megapixel frame is also put
+through non-identity orientations. Under `.rotated90Clockwise` the geometry
+becomes 3040 × 4056 and named destination coordinates are checked against the
+source coordinates the written-out formula gives, by `Float` bit pattern:
+
+| Destination | Source |
+| --- | --- |
+| (0, 0) — top-left | (3039, 0) — the source's bottom-left |
+| (0, 3039) — top-right | (0, 0) — the source's top-left |
+| (4055, 0) — bottom-left | (3039, 4055) |
+| (4055, 3039) — bottom-right | (0, 4055) |
+| (2000, 1500) | (1539, 2000) |
+| (1024, 2048) | (991, 1024) |
+
+Under `.transposed` the geometry is 3040 × 4056 as well, and the two are
+distinguished numerically rather than visually: the reflection's fixed points
+lie on the main diagonal and the rotation's do not.
+
+Whole-frame sums, extremes and element counts are identical before and after,
+which a dropped or duplicated pixel would break. The sum is compared with a
+relative tolerance of `1e-9` rather than claimed exact, because floating-point
+addition over the same multiset in a different order is not associative.
+
+### After display preview rendering
+
+Same chain again — identity false-colour transform, identity channel mix,
+`.upright` orientation — then `DisplayPreviewRenderer` at `0 EV`, hard
+display-range clipping and sRGB encoding.
+
+| | |
+| --- | --- |
+| Preview geometry | 4056 × 3040, unchanged by this stage (orientation is upstream) |
 | Buffer | 36 990 720 bytes |
 | Bytes per row | 12 168 |
 | Layout | 8 bits per component, three components `R G B`, no alpha |
@@ -1656,15 +1862,16 @@ can.
 
 ## Not yet decided
 
-Demosaicing, the working colour space, creative channel mixing and the first
-display boundary are no longer on this list. One application-owned reference
-demosaic algorithm is decided and implemented, the working representation is
-extended linear sRGB (ADR 0006) reached through an explicit
-provenance-carrying transform, a linear 3×3 creative channel mix sits after
-that boundary (ADR 0007), and its result now reaches a monitor through an
-explicit exposure, a named clip, the sRGB transfer function and 8-bit
-quantisation (ADR 0008). What remains open is everything downstream of *that*,
-plus image quality:
+Demosaicing, the working colour space, creative channel mixing, the first
+display boundary and metadata-driven orientation are no longer on this list.
+One application-owned reference demosaic algorithm is decided and implemented,
+the working representation is extended linear sRGB (ADR 0006) reached through
+an explicit provenance-carrying transform, a linear 3×3 creative channel mix
+sits after that boundary (ADR 0007), the eight standard orientations are
+applied as their own lossless geometry stage (ADR 0009), and the result now
+reaches a monitor through an explicit exposure, a named clip, the sRGB
+transfer function and 8-bit quantisation (ADR 0008). What remains open is
+everything downstream of *that*, plus image quality:
 
 - **The rest of the infrared creative colour transform** — false-colour
   mapping, hue remapping, LUT-based finishing. Channel mixing is decided; these
@@ -1681,10 +1888,14 @@ plus image quality:
   fixture's clip counts are the argument for taking them on.
 - **Real gamut mapping.** Component-wise clipping to the unit cube is the
   primitive stand-in.
-- **Orientation.** The pipeline still has no application-owned orientation
-  stage, so a file that asks for a flip displays unrotated. Deliberate: a
-  geometry operation hidden inside a colour stage would be invisible in the
-  one record meant to describe the pipeline.
+- **Arbitrary-angle rotation, straightening, crop and perspective
+  correction**, and therefore any resampling. Orientation is decided and
+  implemented (ADR 0009), but only as the eight discrete arrangements a file's
+  metadata can name; the continuous editing operations are a different problem
+  and need interpolation.
+- **A way to override a file's recorded orientation.** The workspace reads
+  metadata and corrects nothing, so a photograph taken with the camera turned
+  by a body that recorded no orientation displays as captured.
 - **Preview resolution strategy, caching and cancellation.** The workspace
   renders the full frame every time it opens a file.
 - **Export**, which needs its own bit depth, its own colour decisions and its

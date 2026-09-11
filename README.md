@@ -52,6 +52,8 @@ bilinear Bayer demosaic          DemosaicedRAWRGBImage (camera-native RGB)
 explicit camera → working 3×3    WorkingColorRGBImage (extended linear sRGB)
    ↓                             IRChannelMixer
 IR channel mixing                IRChannelMixedRGBImage (same space, remixed)
+   ↓                             ImageOrienter
+metadata-driven orientation      OrientedSceneLinearRGBImage (viewing order)
    ↓                             DisplayPreviewRenderer
 exposure, clip, sRGB, 8 bit      DisplayEncodedPreviewImage (display referred)
    ↓                             DisplayPreviewCGImageAdapter
@@ -89,9 +91,17 @@ records what it did and explicitly did not do.
 
 What the app-owned pipeline puts on screen, for a freshly opened file: a
 centred neutral-patch white balance, bilinear demosaicing, the identity
-false-colour camera transform, an identity channel mix, `0 EV`, hard clipping
-and sRGB. Those choices are made in the application layer, visibly, because no
-processing API has a default to make them.
+false-colour camera transform, an identity channel mix, the orientation the
+file's own metadata names, `0 EV`, hard clipping and sRGB. Those choices are
+made in the application layer, visibly, because no processing API has a
+default to make them.
+
+Orientation is one of the eight standard arrangements, applied as an exact
+permutation of whole pixels by its own stage, lossless and with every `Float`
+bit pattern preserved. It is **discrete file geometry only**: arbitrary-angle
+rotation, straightening, crop and any kind of resampling are editing features
+that do not exist yet. See
+[ADR 0009](docs/decisions/0009-application-owned-orientation.md).
 
 Still legacy diagnostic behaviour: the LibRaw processed-RGB decode. It is no
 longer the workspace image. It supplies the inspector's decoder facts and a
@@ -99,10 +109,10 @@ small labelled reference thumbnail, and is kept because comparing the two paths
 is useful while the owned one is young.
 
 Still absent: any tone control — contrast, curves, highlight recovery,
-saturation; orientation, so a file that asks for a flip displays unrotated;
-filter and capture profiles, recipes and presets beyond the two built-in mixes;
-export of any kind; a reduced-resolution or cached preview path, so the
-workspace renders the full frame each time; Metal.
+saturation; arbitrary rotation, straightening and crop; a way to override the
+orientation a file records; filter and capture profiles, recipes and presets
+beyond the two built-in mixes; export of any kind; a reduced-resolution or
+cached preview path, so the workspace renders the full frame each time; Metal.
 
 There are two decode paths, and they are not interchangeable:
 
@@ -148,10 +158,18 @@ identity false-colour transform, identity mix, `0 EV`:
 
 | | |
 | --- | --- |
-| Preview geometry | 4056 × 3040, unchanged (no orientation applied) |
+| Recorded orientation | EXIF 1 → LibRaw `flip 0` → `.upright` |
+| Preview geometry | 4056 × 3040 (`.upright` swaps nothing) |
 | Preview buffer | 36 990 720 bytes, 12 168 per row, 8-bit `R G B`, no alpha |
 | Samples clipped low / high | 11 / 0 |
 | Non-finite intermediates | 0 |
+
+The fixture photograph was taken with the camera turned, and the body recorded
+nothing about it — EXIF tag 274 is `1`. The application therefore displays it
+exactly as captured, sideways, which is the correct response to the metadata
+that exists. Making it upright is a manual editing operation, and a
+camera-model special case would make this one file look right and every
+correctly tagged E-PL3 file look wrong.
 
 Other formats LibRaw supports (ARW, NEF/NRW, CR2/CR3, RAF, RW2, …) should decode
 through the same path, but none has been verified. Nothing in the decoder is
@@ -372,11 +390,14 @@ See [RAW/README.md](RAW/README.md).
   and below `0` is destroyed, and the provenance record says how many samples
   that was. There is no highlight recovery, no curve and no automatic
   exposure.
-- **Orientation is not applied anywhere.** A file that records a flip displays
-  unrotated, and the E-PL3 fixture is one. Deliberate: the pipeline has no
-  application-owned orientation stage, and hiding a geometry operation inside
-  the display encoder would keep it out of the one record meant to describe
-  the pipeline.
+- **Orientation is metadata-driven only, and cannot be overridden.** A file
+  that records one of the eight standard orientations is oriented; a file that
+  records none — the E-PL3 fixture included — is shown exactly as captured,
+  even when the camera was plainly turned. There is no user control, no
+  camera-model table and no automatic straightening.
+- **Arbitrary rotation does not exist.** Orientation is a discrete permutation
+  of whole pixels. Straightening, crop and perspective correction would need
+  resampling, and none of that is implemented.
 - Export does not exist. The 8-bit preview buffer is a preview and must not be
   written to a file as though it were one.
 - Exposure is not adjustable from the UI. The renderer takes any EV; the
