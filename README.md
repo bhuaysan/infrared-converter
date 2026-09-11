@@ -53,7 +53,8 @@ explicit camera → working 3×3    WorkingColorRGBImage (extended linear sRGB)
    ↓                             IRChannelMixer
 IR channel mixing                IRChannelMixedRGBImage (same space, remixed)
    ↓                             ImageOrienter
-metadata-driven orientation      OrientedSceneLinearRGBImage (viewing order)
+recorded orientation + user      OrientedSceneLinearRGBImage (viewing order)
+adjustment = effective
    ↓                             DisplayPreviewRenderer
 exposure, clip, sRGB, 8 bit      DisplayEncodedPreviewImage (display referred)
    ↓                             DisplayPreviewCGImageAdapter
@@ -98,10 +99,32 @@ default to make them.
 
 Orientation is one of the eight standard arrangements, applied as an exact
 permutation of whole pixels by its own stage, lossless and with every `Float`
-bit pattern preserved. It is **discrete file geometry only**: arbitrary-angle
+bit pattern preserved. It is **discrete geometry only**: arbitrary-angle
 rotation, straightening, crop and any kind of resampling are editing features
 that do not exist yet. See
 [ADR 0009](docs/decisions/0009-application-owned-orientation.md).
+
+The orientation applied is **derived from two separate facts**, and the
+workspace has controls for the second:
+
+```text
+recorded / decoder orientation      immutable; a fact about the file
+            +
+user orientation adjustment         an editing decision, one of eight states
+            =
+effective orientation               what the pixels are permuted by
+```
+
+Rotate left, rotate right, flip horizontally, flip vertically and reset act on
+the adjustment, never on a pixel buffer and never on `RAWMetadata`. The
+adjustment is a **canonical single state**, not a history: four rotate-rights
+persist as "no correction", and the image is permuted exactly once, from the
+retained unoriented buffer, each time. Reset means "the user asked for no
+correction" — on a file whose metadata records a rotation, that restores the
+rotation rather than making the image upright. The adjustment is serialisable
+and versioned; it lives in memory for as long as the file is open and is
+**not** written to disk. See
+[ADR 0010](docs/decisions/0010-user-owned-orientation-adjustment.md).
 
 Still legacy diagnostic behaviour: the LibRaw processed-RGB decode. It is no
 longer the workspace image. It supplies the inspector's decoder facts and a
@@ -109,10 +132,11 @@ small labelled reference thumbnail, and is kept because comparing the two paths
 is useful while the owned one is young.
 
 Still absent: any tone control — contrast, curves, highlight recovery,
-saturation; arbitrary rotation, straightening and crop; a way to override the
-orientation a file records; filter and capture profiles, recipes and presets
-beyond the two built-in mixes; export of any kind; a reduced-resolution or
-cached preview path, so the workspace renders the full frame each time; Metal.
+saturation; arbitrary rotation, straightening and crop; durable persistence of
+the user's adjustments, so they are lost when the file is closed; filter and
+capture profiles, recipes and presets beyond the two built-in mixes; export of
+any kind; a reduced-resolution or cached preview path, so the workspace
+renders the full frame on every open; Metal.
 
 There are two decode paths, and they are not interchangeable:
 
@@ -159,7 +183,8 @@ identity false-colour transform, identity mix, `0 EV`:
 | | |
 | --- | --- |
 | Recorded orientation | EXIF 1 → LibRaw `flip 0` → `.upright` |
-| Preview geometry | 4056 × 3040 (`.upright` swaps nothing) |
+| Preview geometry, no correction | 4056 × 3040 (`.upright` swaps nothing) |
+| Preview geometry, corrected | 3040 × 4056 (a user quarter turn left) |
 | Preview buffer | 36 990 720 bytes, 12 168 per row, 8-bit `R G B`, no alpha |
 | Samples clipped low / high | 11 / 0 |
 | Non-finite intermediates | 0 |
@@ -393,19 +418,28 @@ See [RAW/README.md](RAW/README.md).
   and below `0` is destroyed, and the provenance record says how many samples
   that was. There is no highlight recovery, no curve and no automatic
   exposure.
-- **Orientation is metadata-driven only, and cannot be overridden.** A file
-  that records one of the eight standard orientations is oriented; a file that
-  records none — the E-PL3 fixture included — is shown exactly as captured,
-  even when the camera was plainly turned. There is no user control, no
-  camera-model table and no automatic straightening.
+- **The user's orientation adjustment is not saved.** It is a serialisable,
+  versioned record, and nothing writes it anywhere: closing the file, or
+  quitting, loses it. There is no sidecar and no document format.
+- **Orientation has no automatic correction.** A file is oriented by what it
+  records, and departing from that is a manual act. There is no camera-model
+  table, no filename heuristic and no automatic straightening — the E-PL3
+  fixture records EXIF 1 and is shown sideways until someone rotates it.
+- **Only orientation is adjustable.** Exposure, the white-balance patch, the
+  camera transform and the channel mix are still fixed application-layer
+  choices with no controls.
 - **Arbitrary rotation does not exist.** Orientation is a discrete permutation
   of whole pixels. Straightening, crop and perspective correction would need
   resampling, and none of that is implemented.
 - Export does not exist. The 8-bit preview buffer is a preview and must not be
   written to a file as though it were one.
-- Exposure is not adjustable from the UI. The renderer takes any EV; the
-  workspace passes `0` and offers no control, so the retained scene-linear
-  chain that would let it re-render is deliberately not held in memory yet.
+- Exposure is not adjustable from the UI. The renderer takes any EV and the
+  workspace passes `0`.
+- The scene-linear chain is retained for as long as a file is open, so that a
+  change of orientation reprocesses instead of decoding. For a 4056 × 3040
+  frame that is roughly half a gigabyte of `Float32` buffers. Nothing has
+  measured it, and there is no eviction, no cache policy and no
+  reduced-resolution path.
 - No transform in the project is a validated infrared colour calibration. The
   file's own `rgbFromCamera` is visible-light data and is opt-in and
   diagnostic only.
@@ -422,8 +456,9 @@ See [RAW/README.md](RAW/README.md).
   sRGB with no white balance, so a visible-light frame shows the sensor's
   native channel imbalance. That is expected, and it is a reference thumbnail
   rather than the workspace image.
-- The owned preview renders the full frame on the CPU on every open, with no
-  cache and no reduced-resolution path. Preview strategy is a later decision.
+- The owned preview renders the full frame on the CPU on every open, and
+  re-orients and re-encodes the full frame on every adjustment, with no cache
+  and no reduced-resolution path. Preview strategy is a later decision.
 - Infrared white balance, channel mixing and a display boundary exist; no
   false-colour mapping, hue remapping, filter profiles or recipes, no develop
   controls, no export.

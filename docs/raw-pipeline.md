@@ -146,7 +146,11 @@ a different PROCESSING STATE, not a different space
 pixels are still in SENSOR reading order
 
                   ↓
-       explicit RAWImageOrientation                ┐
+       recorded orientation (metadata)   ┐
+                  +                      ├ EffectiveImageOrientation
+       user orientation adjustment       ┘
+                  ↓
+       one explicit RAWImageOrientation            ┐
                   ↓                                ├ ImageOrienter
        OrientedSceneLinearRGBImage                 ┘
 
@@ -829,8 +833,9 @@ See `docs/decisions/0009-application-owned-orientation.md`.
 #### Discrete geometry, not editing
 
 ```text
-Orientation        eight standard arrangements, read from file metadata,
-                   an exact permutation of whole pixels, lossless
+Orientation        eight standard arrangements, an exact permutation of
+                   whole pixels, lossless — whether the file asked for it
+                   or a person did
 
 Rotation / crop    continuous editing operations chosen by a person,
                    requiring resampling — neither exists yet
@@ -925,6 +930,38 @@ are exchanged for exactly the four orientations whose `swapsDimensions` is
 replacing `O1` with `O2` gives `orient(mixed, O2)`. The eight orientations are
 closed under composition, so a chained result would always be *some* valid
 orientation and would never look malformed — just not the one asked for.
+
+#### Where the orientation comes from
+
+The stage is handed one orientation and knows nothing about where it came
+from. The application layer derives it from two separate facts:
+
+```text
+recorded / decoder orientation      RAWMetadata.Geometry.orientation — immutable
+            +
+user orientation adjustment         UserOrientationAdjustment — an edit
+            =
+effective orientation               EffectiveImageOrientation.applied
+```
+
+`effective = source.composed(with: userAdjustment.transform)` — **source
+first, then the user**, because a person rotates what they are looking at.
+The order is load-bearing: composition does not commute once reflections are
+involved, so `transposed` then a quarter turn right is
+`mirroredHorizontally`, while the reverse is `mirroredVertically`.
+
+`composed(with:)` is integer arithmetic on the canonical mirror-then-rotate
+decomposition of the dihedral group of order eight — no matrices, no floating
+point. All 64 pairs are tested against two independent oracles: real pixel
+permutations, and the destination-to-source mappings composed by hand.
+
+The adjustment is a **canonical single state**, one of eight, never a history
+of presses. Four rotate-rights reduce to the identity, and the image is
+permuted exactly once, from `WorkspacePreviewPipeline.Source`'s unoriented
+buffer, on every change. Reset sets the adjustment to the identity, which
+restores the **file's** orientation — not upright.
+
+See `docs/decisions/0010-user-owned-orientation-adjustment.md`.
 
 ### Oriented scene-linear RGB → display-encoded preview
 
@@ -1196,6 +1233,8 @@ upstream transform rather than restated here.
 | Tone mapping / exposure / gamut mapping | no |
 | Display encoding / 8-bit quantisation | no |
 | Reading `RAWMetadata` | no — the caller passes the orientation in |
+| Composing the recorded orientation with a user adjustment | no — that happens above the stage |
+| Knowing about buttons, documents or persistence | no |
 
 Each is recorded on `ImageOrientationProcessing`. The orientation is its own
 field; the whole upstream chain is read through the `IRChannelMixProcessing` it
@@ -1752,8 +1791,8 @@ measurement has been taken and no performance claim is made.
 
 ### After orientation
 
-Same chain again, then `ImageOrienter` with the orientation the file's own
-metadata names.
+Same chain again, then `ImageOrienter` with the effective orientation — here
+the file's own, because no user adjustment has been made.
 
 | | |
 | --- | --- |
@@ -1796,6 +1835,44 @@ Whole-frame sums, extremes and element counts are identical before and after,
 which a dropped or duplicated pixel would break. The sum is compared with a
 relative tolerance of `1e-9` rather than claimed exact, because floating-point
 addition over the same multiset in a different order is not associative.
+
+### After a user orientation correction
+
+The same fixture, corrected by hand. The sky runs along the right edge of the
+stored frame, so a quarter turn **left** puts it at the top. That choice is a
+person's; no code path consults the camera model.
+
+| | |
+| --- | --- |
+| Recorded orientation | EXIF 1 → LibRaw `flip 0` → `.upright` (unchanged) |
+| User adjustment | `.quarterTurnLeft`, persisted as `"rotate270Clockwise"` |
+| Effective orientation | `.rotated270Clockwise` |
+| Swaps dimensions / mirrored | yes / no |
+| Geometry before → after | 4056 × 3040 → 3040 × 4056 |
+| `RAWMetadata.Geometry.flip` after | `0` — a user correction never writes metadata |
+
+For `.rotated270Clockwise` on a `w × h` source, destination `(r, c)` comes from
+source `(c, w − 1 − r)`, with `w − 1 = 4055`. Six named coordinates, compared
+by `Float` bit pattern:
+
+| Destination | Source |
+| --- | --- |
+| (0, 0) — top-left | (0, 4055) — the source's top-right |
+| (0, 3039) — top-right | (3039, 4055) |
+| (4055, 0) — bottom-left | (0, 0) — the source's top-left |
+| (4055, 3039) — bottom-right | (3039, 0) |
+| (2000, 1500) | (1500, 2055) |
+| (1024, 2048) | (2048, 3031) |
+
+`.transposed` gives the same 3040 × 4056 geometry and different pixels, which
+is checked numerically — a reflection and a quarter turn are
+indistinguishable by eye on a photograph.
+
+Reprocessing is non-destructive, and proved rather than asserted. Two
+rotate-rights followed by a reset return display bytes **bit-identical** to
+the first render, the retained channel-mixed buffer is bit-identical element
+by element throughout, and a sequence of presses matches reaching the same
+canonical state in one step.
 
 ### After display preview rendering
 
@@ -1893,12 +1970,16 @@ everything downstream of *that*, plus image quality:
   primitive stand-in.
 - **Arbitrary-angle rotation, straightening, crop and perspective
   correction**, and therefore any resampling. Orientation is decided and
-  implemented (ADR 0009), but only as the eight discrete arrangements a file's
-  metadata can name; the continuous editing operations are a different problem
-  and need interpolation.
-- **A way to override a file's recorded orientation.** The workspace reads
-  metadata and corrects nothing, so a photograph taken with the camera turned
-  by a body that recorded upright displays as captured.
+  implemented (ADR 0009, ADR 0010), but only as the eight discrete
+  arrangements — whether a file names one or a person does; the continuous
+  editing operations are a different problem and need interpolation.
+- **Durable persistence of the user's adjustments.** The orientation
+  adjustment is serialisable and versioned (ADR 0010) and lives in memory
+  only; there is no sidecar, no document format and no restore on relaunch.
+- **Any adjustment other than orientation.** Exposure, the white-balance
+  patch, the camera transform and the channel mix are still fixed
+  application-layer choices with no controls, and the recipe format that
+  would hold them is deliberately undefined.
 - **Preview resolution strategy, caching and cancellation.** The workspace
   renders the full frame every time it opens a file.
 - **Export**, which needs its own bit depth, its own colour decisions and its
