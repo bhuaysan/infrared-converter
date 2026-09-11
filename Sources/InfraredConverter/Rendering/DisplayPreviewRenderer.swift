@@ -1,11 +1,17 @@
 import Foundation
 
-/// The first display boundary: `IRChannelMixedRGBImage` →
+/// The first display boundary: `OrientedSceneLinearRGBImage` →
 /// `DisplayEncodedPreviewImage`, by exposure, hard display-range clipping, the
 /// sRGB transfer function and deterministic quantisation.
 ///
 /// ```text
-/// IRChannelMixedRGBImage         extended linear sRGB, scene-linear, unclamped
+/// IRChannelMixedRGBImage         extended linear sRGB, in sensor order
+///       │
+///       │  explicit RAWImageOrientation
+///       ↓
+/// ImageOrienter                  discrete geometry — ADR 0009
+///       ↓
+/// OrientedSceneLinearRGBImage    the same values, in viewing order
 ///       │
 ///       │  explicit DisplayRenderSettings
 ///       ↓
@@ -70,9 +76,14 @@ import Foundation
 ///
 /// Strictly per-pixel and geometry-preserving: same width, same height, same
 /// pixel order. No crop, no resize, no resampling — and **no orientation**.
-/// This stage does not read `RAWMetadata.geometry.flip`, and the pipeline
-/// still has no application-owned orientation stage; `orientationApplied`
-/// stays `false` in provenance where it is visible rather than merely absent.
+/// This stage does not read `RAWMetadata.geometry.flip` and never will.
+///
+/// Its input arrives already arranged for viewing because `ImageOrienter` did
+/// that one stage upstream, as its own auditable operation. Provenance
+/// forwards the fact — `orientationApplied` and `appliedOrientation` are
+/// readable from a preview — while the work itself stays where it can be seen.
+/// Rotating inside a colour stage would make the one record meant to describe
+/// the pipeline describe it wrongly.
 ///
 /// ## Cost
 ///
@@ -92,19 +103,20 @@ public struct DisplayPreviewRenderer: Sendable {
     /// pixels.
     ///
     /// - Parameters:
-    ///   - image: extended-linear-sRGB coordinates, as `IRChannelMixer`
-    ///     produces. Not mutated, not clamped, not modified in any way.
+    ///   - image: extended-linear-sRGB coordinates in viewing order, as
+    ///     `ImageOrienter` produces. Not mutated, not clamped, not modified in
+    ///     any way.
     ///   - settings: exposure, range policy and encoding. Required — there is
     ///     deliberately no default.
     /// - Throws: `DisplayRenderingError`.
     public func render(
-        _ image: IRChannelMixedRGBImage,
+        _ image: OrientedSceneLinearRGBImage,
         settings: DisplayRenderSettings
     ) throws -> DisplayEncodedPreviewImage {
         guard image.isGeometryConsistent else {
             throw DisplayRenderingError.invalidGeometry(
                 reason: """
-                    Channel-mixed RGB geometry \(image.width)x\(image.height) needs \
+                    Oriented scene-linear RGB geometry \(image.width)x\(image.height) needs \
                     \(image.expectedValueCount.map(String.init) ?? "an unrepresentable number of") \
                     values, buffer holds \(image.values.count).
                     """
@@ -223,22 +235,22 @@ public struct DisplayPreviewRenderer: Sendable {
             bytes: bytes,
             processing: DisplayPreviewProcessing(
                 settings: settings,
-                channelMixProcessing: image.processing,
+                orientationProcessing: image.processing,
                 clippedLowSampleCount: clippedLow,
                 clippedHighSampleCount: clippedHigh
             )
         )
     }
 
-    /// Renders a channel-mixed result, keeping that whole scene-linear state
+    /// Renders an oriented result, keeping that whole scene-linear state
     /// reachable on the returned value's `source`.
     ///
     /// Use this rather than the bare-image overload whenever the caller may
     /// want different settings later: the result carries everything needed to
-    /// re-render from the scene-linear image, without mixing, converting,
-    /// demosaicing or decoding again.
+    /// re-render from the scene-linear image, without orienting, mixing,
+    /// converting, demosaicing or decoding again.
     public func render(
-        _ processed: IRChannelMixedProcessedRAWImage,
+        _ processed: OrientedProcessedRAWImage,
         settings: DisplayRenderSettings
     ) throws -> DisplayPreviewProcessedRAWImage {
         let image = try render(processed.image, settings: settings)
@@ -249,14 +261,14 @@ public struct DisplayPreviewRenderer: Sendable {
     /// scene-linear image it was produced from.
     ///
     /// Previews never compound: new settings are applied to the
-    /// `IRChannelMixedRGBImage`, never to the already-encoded bytes. That is
+    /// `OrientedSceneLinearRGBImage`, never to the already-encoded bytes. That is
     /// structural — this reaches through `previous.source` and never touches
     /// `previous.image`. Re-rendering an encoded preview would apply the
     /// transfer function twice, compound quantisation, and be unable to
     /// recover a single clipped highlight, while looking entirely plausible.
     ///
-    /// Nothing upstream reruns: no channel mix, no camera conversion, no
-    /// demosaic, no white balance, no decode.
+    /// Nothing upstream reruns: no orientation, no channel mix, no camera
+    /// conversion, no demosaic, no white balance, no decode.
     public func render(
         settings newSettings: DisplayRenderSettings,
         replacing previous: DisplayPreviewProcessedRAWImage

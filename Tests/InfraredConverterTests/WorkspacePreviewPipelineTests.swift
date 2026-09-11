@@ -31,6 +31,33 @@ struct WorkspacePreviewPipelineTests {
         #expect(WorkspacePreviewPipeline.initialSettings.encoding == .sRGB)
     }
 
+    /// The orientation a file gets is read from its metadata and nothing
+    /// else. This is the test that would fail if a camera-model table, a
+    /// filename heuristic or an automatic straightening ever appeared.
+    @Test("The orientation comes from metadata, whatever the camera says it is")
+    func theOrientationIsReadFromMetadataAlone() {
+        // Every modelled orientation is read back unchanged, for two
+        // different camera models — so the model cannot be influencing it.
+        for model in ["E-PL3", "E-M1", "Some Other Body"] {
+            var metadata = RAWTestData.metadata(model: model)
+            for orientation in RAWImageOrientation.allCases {
+                metadata.geometry.flip = orientation.decoderFlip
+                #expect(
+                    WorkspacePreviewPipeline.orientation(for: metadata) == orientation,
+                    "\(model) flip \(orientation.decoderFlip)"
+                )
+            }
+        }
+
+        // And the reference camera's own recorded value maps to upright,
+        // which is what the fixture actually contains. Nothing here corrects
+        // a photograph taken with the camera turned; that is a manual editing
+        // operation, not a metadata reading.
+        var reference = RAWTestData.metadata()
+        reference.geometry.flip = 0
+        #expect(WorkspacePreviewPipeline.orientation(for: reference) == .upright)
+    }
+
     /// Even sides matter: a region of even width and height contains whole
     /// 2×2 CFA cells whatever its origin's parity, so every colour plane is
     /// measured and the estimator cannot fail for want of samples.

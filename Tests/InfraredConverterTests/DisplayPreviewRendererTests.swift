@@ -468,7 +468,7 @@ struct DisplayPreviewRendererTests {
             bytes: Data(count: 12),
             processing: DisplayPreviewProcessing(
                 settings: DisplayPreviewTestData.settings(exposureEV: 0),
-                channelMixProcessing: DisplayPreviewTestData.channelMixProcessing(),
+                orientationProcessing: DisplayPreviewTestData.orientationProcessing(),
                 clippedLowSampleCount: 0,
                 clippedHighSampleCount: 0
             )

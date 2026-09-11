@@ -10,10 +10,11 @@ import Foundation
 /// them.
 ///
 /// Nothing upstream is copied. The exposure, the range policy and the encoding
-/// live on `settings`; the creative mix, the camera-to-working transform, the
-/// demosaic algorithm, the gains and their provenance, the white level and the
-/// black subtraction all already live on `channelMixProcessing` and are read
-/// through it. Two copies of the same history can disagree; one cannot.
+/// live on `settings`; the orientation, the creative mix, the
+/// camera-to-working transform, the demosaic algorithm, the gains and their
+/// provenance, the white level and the black subtraction all already live on
+/// `orientationProcessing` and are read through it. Two copies of the same
+/// history can disagree; one cannot.
 ///
 /// ## One thing here is measured, not declared
 ///
@@ -25,10 +26,11 @@ import Foundation
 public struct DisplayPreviewProcessing: Equatable, Sendable {
     /// The exact settings that were applied: exposure, range policy, encoding.
     public let settings: DisplayRenderSettings
-    /// Provenance of the `IRChannelMixedRGBImage` this stage consumed, carried
-    /// forward so the whole chain from unpacked samples to here is readable
-    /// from one record.
-    public let channelMixProcessing: IRChannelMixProcessing
+    /// Provenance of the `OrientedSceneLinearRGBImage` this stage consumed,
+    /// carried forward so the whole chain from unpacked samples to here is
+    /// readable from one record — including the orientation, which happened
+    /// upstream and not here.
+    public let orientationProcessing: ImageOrientationProcessing
     /// How many **components** (not pixels) were below `0` after exposure and
     /// were replaced by `0`.
     ///
@@ -74,10 +76,21 @@ public struct DisplayPreviewProcessing: Equatable, Sendable {
     public let highlightReconstructionApplied: Bool = false
     /// No sharpening and no noise reduction.
     public let sharpeningApplied: Bool = false
-    /// No orientation (rotation/flip) transform. This stage is
-    /// geometry-preserving and does not read the file's orientation metadata;
-    /// the application-owned pipeline still has no orientation stage.
-    public let orientationApplied: Bool = false
+    /// An orientation was applied — **upstream**, by `ImageOrienter`, not
+    /// here. This stage remains strictly per-component and
+    /// geometry-preserving: it does not rotate, flip, crop or resample, and it
+    /// does not read the file's orientation metadata. The flag is forwarded so
+    /// one record still answers "is this image arranged for viewing?" without
+    /// a reader having to know which stage did it.
+    public var orientationApplied: Bool { orientationProcessing.orientationApplied }
+    /// Which of the eight arrangements was applied upstream.
+    public var appliedOrientation: RAWImageOrientation {
+        orientationProcessing.orientation
+    }
+    /// Whether that orientation exchanged the image's width and height.
+    public var orientationSwappedDimensions: Bool {
+        orientationProcessing.dimensionsSwapped
+    }
 
     /// Exposure in stops, read through `settings`.
     public var exposureEV: Double { settings.exposureEV }
@@ -90,51 +103,56 @@ public struct DisplayPreviewProcessing: Equatable, Sendable {
     /// Components clipped in either direction.
     public var clippedSampleCount: Int { clippedLowSampleCount + clippedHighSampleCount }
 
+    /// Provenance of the channel-mixed image the orientation stage consumed,
+    /// read through `orientationProcessing` rather than stored again.
+    public var channelMixProcessing: IRChannelMixProcessing {
+        orientationProcessing.channelMixProcessing
+    }
     /// The creative mix applied upstream — a **different operation** from
     /// anything this stage did, kept separately readable so a rendering can be
     /// audited for both.
-    public var mix: IRChannelMix { channelMixProcessing.mix }
+    public var mix: IRChannelMix { orientationProcessing.mix }
     /// Where that mix came from: a built-in, or an explicit caller choice.
-    public var mixSource: IRChannelMixSource { channelMixProcessing.mixSource }
+    public var mixSource: IRChannelMixSource { orientationProcessing.mixSource }
     /// The working colour space the scene-linear input was in. Display
     /// encoding does not change primaries; it changes the transfer function
     /// and the range.
     public var workingColorSpace: RAWWorkingColorSpace {
-        channelMixProcessing.workingColorSpace
+        orientationProcessing.workingColorSpace
     }
     /// A creative channel mix ran upstream. It is not applied again here.
-    public var channelMixApplied: Bool { channelMixProcessing.channelMixApplied }
+    public var channelMixApplied: Bool { orientationProcessing.channelMixApplied }
     /// The camera-to-working transform applied upstream.
     public var cameraToWorkingTransform: RAWCameraToWorkingColorTransform {
-        channelMixProcessing.cameraToWorkingTransform
+        orientationProcessing.cameraToWorkingTransform
     }
     /// Where that upstream transform came from.
     public var cameraToWorkingTransformSource: RAWCameraToWorkingColorTransformSource {
-        channelMixProcessing.cameraToWorkingTransformSource
+        orientationProcessing.cameraToWorkingTransformSource
     }
     /// Whether the upstream camera-to-working transform is a validated
     /// infrared colour calibration. `false` for every source the project can
     /// produce — and making an image displayable never makes it one.
     public var isValidatedInfraredCalibration: Bool {
-        channelMixProcessing.isValidatedInfraredCalibration
+        orientationProcessing.isValidatedInfraredCalibration
     }
     /// Missing channels were reconstructed upstream, in the mosaic domain.
-    public var demosaiced: Bool { channelMixProcessing.demosaiced }
+    public var demosaiced: Bool { orientationProcessing.demosaiced }
     /// Which algorithm reconstructed them.
     public var demosaicAlgorithm: RAWDemosaicAlgorithm {
-        channelMixProcessing.demosaicAlgorithm
+        orientationProcessing.demosaicAlgorithm
     }
     /// White balance was applied upstream, per CFA plane in the mosaic domain
     /// — and is not applied again here.
-    public var whiteBalanceApplied: Bool { channelMixProcessing.whiteBalanceApplied }
+    public var whiteBalanceApplied: Bool { orientationProcessing.whiteBalanceApplied }
     /// The exact gains applied upstream.
     public var whiteBalanceGains: RAWWhiteBalanceGains {
-        channelMixProcessing.whiteBalanceGains
+        orientationProcessing.whiteBalanceGains
     }
     /// The effective black level was subtracted, five stages upstream.
-    public var blackLevelSubtracted: Bool { channelMixProcessing.blackLevelSubtracted }
+    public var blackLevelSubtracted: Bool { orientationProcessing.blackLevelSubtracted }
     /// Samples were normalised against a white level, five stages upstream.
-    public var normalized: Bool { channelMixProcessing.normalized }
+    public var normalized: Bool { orientationProcessing.normalized }
 
     /// Public, like every other stage-processing record: this is a description
     /// of a stage, and the bare `DisplayEncodedPreviewImage` it belongs to is
@@ -146,12 +164,12 @@ public struct DisplayPreviewProcessing: Equatable, Sendable {
     /// module-internal.
     public init(
         settings: DisplayRenderSettings,
-        channelMixProcessing: IRChannelMixProcessing,
+        orientationProcessing: ImageOrientationProcessing,
         clippedLowSampleCount: Int,
         clippedHighSampleCount: Int
     ) {
         self.settings = settings
-        self.channelMixProcessing = channelMixProcessing
+        self.orientationProcessing = orientationProcessing
         self.clippedLowSampleCount = clippedLowSampleCount
         self.clippedHighSampleCount = clippedHighSampleCount
     }
@@ -215,20 +233,26 @@ public struct DisplayEncodedRGBPixel: Equatable, Sendable {
 ///
 /// ## Why this is not one of the scene-linear image types
 ///
-/// `WorkingColorRGBImage` and `IRChannelMixedRGBImage` hold unclamped Float32
-/// coordinates in extended linear sRGB. `RAWImage` holds LibRaw's processed
-/// output. This holds neither. That the storage shape could be made to fit one
+/// `WorkingColorRGBImage`, `IRChannelMixedRGBImage` and
+/// `OrientedSceneLinearRGBImage` hold unclamped Float32 coordinates in
+/// extended linear sRGB. `RAWImage` holds LibRaw's processed output. This
+/// holds neither. That the storage shape could be made to fit one
 /// of them is a coincidence of layout, not a reason to reuse it: a function
 /// signature has to be able to refuse a buffer that is already encoded, and
 /// only a distinct type can do that.
 ///
 /// ## Coordinate convention
 ///
-/// Identical to the image it was rendered from: `(0, 0)` is the top-left of
-/// the **active image area**, and the dimensions are unchanged. Rendering is
-/// strictly per-pixel and touches no geometry — no crop, no resize, no
-/// rotation, no flip, no resampling. In particular the file's orientation is
-/// **not** applied here, and the pipeline still has no stage that applies it.
+/// Identical to the image it was rendered from: `(0, 0)` is the top-left **as
+/// viewed**, and the dimensions are unchanged. Rendering is strictly per-pixel
+/// and touches no geometry — no crop, no resize, no rotation, no flip, no
+/// resampling.
+///
+/// The image is arranged for viewing because `ImageOrienter` arranged it
+/// upstream, not because anything here did. The file's orientation metadata is
+/// **not** read at this stage, and never will be: a geometry operation hidden
+/// inside a colour stage is invisible in the one record meant to describe the
+/// pipeline.
 ///
 /// ## Storage
 ///
@@ -392,16 +416,16 @@ public struct DisplayEncodedPreviewImage: Equatable, Sendable {
 /// never from an already-encoded preview:
 ///
 /// ```text
-/// new preview = render(the IRChannelMixedRGBImage, newSettings)
+/// new preview = render(the OrientedSceneLinearRGBImage, newSettings)
 ///        NOT   render(the previous 8-bit preview, newSettings)
 /// ```
 ///
 /// Re-rendering an encoded buffer would compound quantisation, apply the
 /// transfer function twice, and could not recover a single clipped highlight —
-/// and the result would look entirely plausible. So the mixed image stays
-/// reachable here, with the pre-mix working image below it, the camera-native
-/// image below that, and the mosaics, the decoded `UInt16` mosaic and the
-/// metadata at the bottom. Nothing is mutated in place and nothing is
+/// and the result would look entirely plausible. So the oriented image stays
+/// reachable here, with the unoriented mixed image below it, the pre-mix
+/// working image below that, the camera-native image below that again, and the
+/// mosaics, the decoded `UInt16` mosaic and the metadata at the bottom. Nothing is mutated in place and nothing is
 /// discarded.
 ///
 /// `DisplayPreviewRenderer.render(settings:replacing:)` is the structural
@@ -415,23 +439,28 @@ public struct DisplayEncodedPreviewImage: Equatable, Sendable {
 /// minted, so a scene-linear source from one run cannot be attached to a
 /// preview from another.
 public struct DisplayPreviewProcessedRAWImage: Sendable {
-    /// The scene-linear, channel-mixed state this was rendered from,
-    /// unchanged — with the pre-mix working image on its own `.source`, and
-    /// the camera-native image and the mosaics below that.
-    public let source: IRChannelMixedProcessedRAWImage
+    /// The scene-linear, oriented state this was rendered from, unchanged —
+    /// with the unoriented channel-mixed image on its own `.source`, the
+    /// pre-mix working image below that, and the camera-native image and the
+    /// mosaics below that again.
+    public let source: OrientedProcessedRAWImage
     /// The display-encoded preview.
     public let image: DisplayEncodedPreviewImage
 
     /// Module-internal, deliberately: only `DisplayPreviewRenderer` pairs a
     /// scene-linear state with the preview it rendered from it.
-    init(source: IRChannelMixedProcessedRAWImage, image: DisplayEncodedPreviewImage) {
+    init(source: OrientedProcessedRAWImage, image: DisplayEncodedPreviewImage) {
         self.source = source
         self.image = image
     }
 
-    /// The scene-linear image the settings were applied to, untouched by
-    /// rendering. Changing exposure or the encoding must always start here.
-    public var channelMixedImage: IRChannelMixedRGBImage { source.image }
+    /// The oriented scene-linear image the settings were applied to,
+    /// untouched by rendering. Changing exposure or the encoding must always
+    /// start here.
+    public var orientedImage: OrientedSceneLinearRGBImage { source.image }
+    /// The unoriented channel-mixed image. Changing the orientation starts
+    /// here.
+    public var channelMixedImage: IRChannelMixedRGBImage { source.channelMixedImage }
     /// The pre-mix working-colour image. Changing the creative mix starts
     /// here.
     public var workingColorImage: WorkingColorRGBImage { source.workingColorImage }
@@ -448,6 +477,9 @@ public struct DisplayPreviewProcessedRAWImage: Sendable {
     public var processing: DisplayPreviewProcessing { image.processing }
     /// The settings that produced `image`.
     public var settings: DisplayRenderSettings { image.processing.settings }
+    /// The orientation applied upstream — a geometry operation, distinct from
+    /// every colour decision in the chain.
+    public var orientation: RAWImageOrientation { source.orientation }
     /// The creative mix applied upstream — a different operation from anything
     /// this stage did, and still separately readable.
     public var mix: IRChannelMix { source.mix }
@@ -456,8 +488,8 @@ public struct DisplayPreviewProcessedRAWImage: Sendable {
         source.cameraToWorkingTransform
     }
     /// The RAW-state metadata the chain was processed against. This stage
-    /// reads none of it — not even the orientation, which it deliberately does
-    /// not apply.
+    /// reads none of it — not even the orientation, which is applied one stage
+    /// upstream by a caller's explicit choice.
     public var metadata: RAWMetadata { source.metadata }
     public var url: URL { source.url }
 }

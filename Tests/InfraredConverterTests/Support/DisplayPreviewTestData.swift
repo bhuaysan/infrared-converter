@@ -43,8 +43,29 @@ enum DisplayPreviewTestData {
         )
     }
 
-    /// A channel-mixed image from interleaved `R G B` values.
-    static func image(
+    /// Provenance for an oriented image: the orientation the geometry stage
+    /// applied, over a channel-mix history rich enough that a stage which
+    /// overwrote it would be visible.
+    static func orientationProcessing(
+        orientation: RAWImageOrientation = .upright,
+        mix: IRChannelMix = .identity,
+        transform: RAWCameraToWorkingColorTransform = .sensorRGBIdentityFalseColor,
+        gains: RAWWhiteBalanceGains = RAWWhiteBalanceGains(
+            plane0: 2, plane1: 1, plane2: 3, plane3: 1
+        ),
+        whiteLevel: UInt32 = 4095
+    ) -> ImageOrientationProcessing {
+        ImageOrientationProcessing(
+            orientation: orientation,
+            channelMixProcessing: channelMixProcessing(
+                mix: mix, transform: transform, gains: gains, whiteLevel: whiteLevel
+            )
+        )
+    }
+
+    /// A channel-mixed image from interleaved `R G B` values: the orientation
+    /// stage's input, and the display stage's input one stage further back.
+    static func channelMixedImage(
         width: Int,
         height: Int,
         values: [Float],
@@ -58,8 +79,26 @@ enum DisplayPreviewTestData {
         )
     }
 
+    /// An oriented scene-linear image from interleaved `R G B` values: what
+    /// the display renderer actually consumes.
+    static func image(
+        width: Int,
+        height: Int,
+        values: [Float],
+        processing: ImageOrientationProcessing? = nil
+    ) -> OrientedSceneLinearRGBImage {
+        OrientedSceneLinearRGBImage(
+            width: width,
+            height: height,
+            values: values,
+            processing: processing ?? orientationProcessing()
+        )
+    }
+
     /// One pixel, for hand-computable arithmetic.
-    static func pixel(_ red: Float, _ green: Float, _ blue: Float) -> IRChannelMixedRGBImage {
+    static func pixel(
+        _ red: Float, _ green: Float, _ blue: Float
+    ) -> OrientedSceneLinearRGBImage {
         image(width: 1, height: 1, values: [red, green, blue])
     }
 

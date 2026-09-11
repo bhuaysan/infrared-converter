@@ -17,6 +17,8 @@ import Foundation
 /// WorkingColorRGBImage
 ///     ↓  IRChannelMixer (.identity)
 /// IRChannelMixedRGBImage
+///     ↓  ImageOrienter (the orientation the file's metadata names)
+/// OrientedSceneLinearRGBImage
 ///     ↓  DisplayPreviewRenderer (0 EV, hard clipping, sRGB)
 /// DisplayEncodedPreviewImage
 ///     ↓  DisplayPreviewCGImageAdapter
@@ -53,6 +55,13 @@ import Foundation
 ///   neutral; the user will choose the patch when there is a UI for it.
 /// - **`0 EV`.** The mathematically neutral exposure, chosen rather than
 ///   assumed.
+/// - **The orientation the file itself names.** Read from
+///   `RAWMetadata.Geometry.orientation`, which is the decoder's `flip` mapped
+///   once into an application-owned case. There is no camera-model table, no
+///   per-file override and no correction of any kind: if a body recorded no
+///   orientation, the photograph is shown as it was stored, because that is
+///   what the file says. A value the application does not model is a **typed
+///   failure**, not a silent `.upright`.
 ///
 /// None of this is a colour claim. The result is displayable, which is a
 /// strictly weaker property than correct.
@@ -71,6 +80,17 @@ struct WorkspacePreviewPipeline {
 
     /// The camera-to-working transform a freshly opened file gets.
     static let initialTransform = RAWCameraToWorkingColorTransform.sensorRGBIdentityFalseColor
+
+    /// The orientation a file gets when its metadata names one this
+    /// application models, or `nil` when it does not.
+    ///
+    /// The one place the workspace's orientation policy lives. It is a
+    /// *reading* of metadata, never a correction of it: no camera model, no
+    /// filename and no heuristic takes part, and nothing here can make an
+    /// upright-recorded photograph rotate.
+    static func orientation(for metadata: RAWMetadata) -> RAWImageOrientation? {
+        metadata.geometry.orientation
+    }
 
     /// The display settings a freshly opened file gets. Spelled out rather
     /// than defaulted, because no entry point offers a default.
@@ -111,9 +131,9 @@ struct WorkspacePreviewPipeline {
     /// and every stage after it is ours.
     ///
     /// - Throws: whatever the stage that failed reports —
-    ///   `RAWDecodingError`, `RAWProcessingError`, `IRProcessingError` or
-    ///   `DisplayRenderingError`. Nothing is caught and turned into a
-    ///   plausible-looking picture here.
+    ///   `RAWDecodingError`, `RAWProcessingError`, `IRProcessingError`,
+    ///   `OrientationError` or `DisplayRenderingError`. Nothing is caught and
+    ///   turned into a plausible-looking picture here.
     func render(decoding url: URL, using decoder: RAWDecoder) throws -> WorkspacePreview {
         let decoded = try decoder.decodeMosaic(at: url)
         let normalized = try RAWMosaicNormalizer().process(decoded)
@@ -130,13 +150,28 @@ struct WorkspacePreviewPipeline {
         let working = try RAWWorkingColorConverter()
             .convert(demosaiced, using: Self.initialTransform)
         let mixed = try IRChannelMixer().apply(to: working, mix: Self.initialMix)
+
+        // The file's own orientation, or a refusal. Reading an unmodelled
+        // code as upright would turn a field we could not parse into a claim
+        // about the photograph, so the preview fails and says which code it
+        // could not read.
+        guard let orientation = Self.orientation(for: mixed.metadata) else {
+            throw OrientationError.unsupportedDecoderOrientation(
+                flip: mixed.metadata.geometry.flip
+            )
+        }
+        let oriented = try ImageOrienter().apply(to: mixed, orientation: orientation)
+
         let preview = try DisplayPreviewRenderer()
-            .render(mixed, settings: Self.initialSettings)
+            .render(oriented, settings: Self.initialSettings)
 
         return WorkspacePreview(
             image: try DisplayPreviewCGImageAdapter.makeCGImage(from: preview.image),
             processing: preview.processing,
             neutralPatch: region,
+            orientation: orientation,
+            sourcePixelWidth: oriented.source.image.width,
+            sourcePixelHeight: oriented.source.image.height,
             pixelWidth: preview.image.width,
             pixelHeight: preview.image.height
         )
@@ -158,10 +193,18 @@ struct WorkspacePreview {
     /// settings, clip counts, mix, camera transform, demosaic, gains,
     /// normalisation.
     let processing: DisplayPreviewProcessing
-    /// The region the white balance was estimated from.
+    /// The region the white balance was estimated from, in **sensor**
+    /// (pre-orientation) active-area coordinates.
     let neutralPatch: RAWActiveAreaRegion
-    /// Preview dimensions in pixels. Equal to the active area's, since no
-    /// stage in this chain changes geometry — orientation included.
+    /// The orientation the file's metadata named, applied by `ImageOrienter`.
+    let orientation: RAWImageOrientation
+    /// Active-area dimensions before orientation, in pixels.
+    let sourcePixelWidth: Int
+    let sourcePixelHeight: Int
+    /// Preview dimensions in pixels, **as viewed**. Equal to the source
+    /// dimensions exchanged for a quarter-turn-family orientation, and to them
+    /// unchanged otherwise; orientation is the only stage in this chain that
+    /// touches geometry at all.
     let pixelWidth: Int
     let pixelHeight: Int
 }

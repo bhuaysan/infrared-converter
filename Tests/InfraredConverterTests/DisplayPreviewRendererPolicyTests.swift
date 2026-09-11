@@ -15,8 +15,8 @@ struct DisplayPreviewRendererPolicyTests {
     /// A small image with values in every interesting region: below zero,
     /// inside the range, and above one.
     static func spreadImage(
-        processing: IRChannelMixProcessing? = nil
-    ) -> IRChannelMixedRGBImage {
+        processing: ImageOrientationProcessing? = nil
+    ) -> OrientedSceneLinearRGBImage {
         DisplayPreviewTestData.image(
             width: 3,
             height: 2,
@@ -52,7 +52,7 @@ struct DisplayPreviewRendererPolicyTests {
         // A completely different upstream history: a different creative mix, a
         // different camera-to-working transform, different white-balance gains
         // and a different white level. The scene-linear numbers are unchanged.
-        let differentHistory = DisplayPreviewTestData.channelMixProcessing(
+        let differentHistory = DisplayPreviewTestData.orientationProcessing(
             mix: .redBlueSwap,
             transform: .explicit(
                 matrix: try RAWColorMatrix3x3(
@@ -165,7 +165,8 @@ struct DisplayPreviewRendererPolicyTests {
     // MARK: - Geometry and orientation
 
     /// The stage does not read orientation metadata and does not move a pixel.
-    @Test("Geometry and pixel order are preserved, and orientation is not applied")
+    /// Its input arrives already arranged for viewing, by a stage upstream.
+    @Test("Geometry and pixel order are preserved, and this stage orients nothing")
     func renderingIsGeometryPreserving() throws {
         let width = 4
         let height = 3
@@ -180,7 +181,14 @@ struct DisplayPreviewRendererPolicyTests {
 
         #expect(rendered.width == image.width)
         #expect(rendered.height == image.height)
-        #expect(!rendered.processing.orientationApplied)
+
+        // The stage is geometry-preserving. It forwards the upstream
+        // orientation fact — here `.upright`, so nothing was rearranged at all
+        // — and does not perform one itself. A stage that rotated would have
+        // to change these dimensions, and a rotating stage that did not would
+        // be caught by the corners below.
+        #expect(rendered.processing.appliedOrientation == .upright)
+        #expect(!rendered.processing.orientationSwappedDimensions)
 
         // A rotation or flip would move the corners. Each is checked against
         // the value that genuinely lives there.
@@ -224,7 +232,13 @@ struct DisplayPreviewRendererPolicyTests {
         #expect(!processing.saturationApplied)
         #expect(!processing.highlightReconstructionApplied)
         #expect(!processing.sharpeningApplied)
-        #expect(!processing.orientationApplied)
+
+        // What it did not do, but something upstream did: the orientation
+        // stage ran before this one, and this record forwards that rather
+        // than claiming it.
+        #expect(processing.orientationApplied)
+        #expect(processing.appliedOrientation == .upright)
+        #expect(!processing.orientationSwappedDimensions)
 
         // Displayable is not a colour claim.
         #expect(!processing.isValidatedInfraredCalibration)

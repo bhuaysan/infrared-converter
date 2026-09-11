@@ -225,6 +225,7 @@ private struct RAWInspectorView: View {
             case .rendered(let preview):
                 let processing = preview.processing
                 row("Size", "\(preview.pixelWidth) × \(preview.pixelHeight)")
+                row("Orientation", Self.orientationDescription(preview))
                 row("White balance", "Neutral patch, \(Self.regionDescription(preview.neutralPatch))")
                 row("Camera → working", Self.transformDescription(
                     processing.cameraToWorkingTransformSource
@@ -247,6 +248,24 @@ private struct RAWInspectorView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    /// What the orientation stage did, in the vocabulary of the metadata it
+    /// read.
+    ///
+    /// The pixel buffer itself is oriented; nothing in this view rotates
+    /// anything. A file recording `.upright` is shown as it was stored, and
+    /// this row says so rather than leaving the reader to wonder whether a
+    /// stage was skipped.
+    private static func orientationDescription(_ preview: WorkspacePreview) -> String {
+        let orientation = preview.orientation
+        let source = "\(preview.sourcePixelWidth) × \(preview.sourcePixelHeight) sensor"
+        guard !orientation.isIdentity else {
+            return "Upright, as recorded (\(source))"
+        }
+        return orientation.diagnosticDescription.prefix(1).uppercased()
+            + orientation.diagnosticDescription.dropFirst()
+            + " (from \(source))"
     }
 
     private static func regionDescription(_ region: RAWActiveAreaRegion) -> String {

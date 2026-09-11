@@ -99,16 +99,25 @@ struct ProcessedWrapperProvenanceTests {
         #expect(mixed.source.source.source.source.source.mosaic == decoded.mosaic)
         #expect(mixed.url == decoded.url)
 
-        // Stage 6 mints DisplayPreviewProcessedRAWImage over that.
+        // Stage 6 mints OrientedProcessedRAWImage over that.
+        let oriented = try ImageOrienter().apply(to: mixed, orientation: .rotated90Clockwise)
+        #expect(oriented.channelMixedImage == mixed.image)
+        #expect(oriented.workingColorImage == working.image)
+        #expect(oriented.source.source.source.source.source.source.mosaic == decoded.mosaic)
+        #expect(oriented.url == decoded.url)
+
+        // Stage 7 mints DisplayPreviewProcessedRAWImage over that.
         let preview = try DisplayPreviewRenderer().render(
-            mixed,
+            oriented,
             settings: DisplayRenderSettings(
                 exposureEV: 0, rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
             )
         )
+        #expect(preview.orientedImage == oriented.image)
         #expect(preview.channelMixedImage == mixed.image)
         #expect(preview.workingColorImage == working.image)
-        #expect(preview.source.source.source.source.source.source.mosaic == decoded.mosaic)
+        #expect(preview.source.source.source.source.source.source.source.mosaic
+            == decoded.mosaic)
         #expect(preview.url == decoded.url)
 
         // The provenance record reaches back through all five stages upstream
@@ -116,6 +125,8 @@ struct ProcessedWrapperProvenanceTests {
         #expect(preview.processing.mixSource == .redBlueSwap)
         #expect(preview.processing.whiteBalanceGains == gains)
         #expect(preview.processing.exposureEV == 0)
+        #expect(preview.processing.appliedOrientation == .rotated90Clockwise)
+        #expect(preview.orientation == .rotated90Clockwise)
 
         let processing = mixed.processing
         #expect(processing.mixSource == .redBlueSwap)

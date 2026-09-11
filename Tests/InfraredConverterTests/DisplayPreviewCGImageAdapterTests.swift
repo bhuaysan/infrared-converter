@@ -47,6 +47,41 @@ struct DisplayPreviewCGImageAdapterTests {
     /// are. Tagging them `linearSRGB` — which is right for the legacy
     /// 16-bit LibRaw preview and wrong for these — would leave ColorSync
     /// applying a transfer function to values that already have one.
+    /// The adapter knows nothing about orientation. It is handed geometry
+    /// that a stage upstream already decided, and describes it.
+    ///
+    /// This is the end-to-end proof that the pixel buffer itself is oriented:
+    /// a dimension-swapping orientation reaches CoreGraphics as swapped
+    /// dimensions, with no `CGImagePropertyOrientation`, no
+    /// `CGAffineTransform` and no SwiftUI modifier anywhere in the path.
+    @Test("A dimension-swapping orientation reaches CoreGraphics as swapped dimensions")
+    func orientedDimensionsReachCoreGraphics() throws {
+        let width = 6
+        let height = 4
+        var values = [Float]()
+        for index in 0..<(width * height * 3) {
+            values.append(Float(index % 251) / 251)
+        }
+        let mixed = OrientationTestData.image(width: width, height: height, values: values)
+
+        for orientation in RAWImageOrientation.allCases {
+            let oriented = try ImageOrienter().apply(to: mixed, orientation: orientation)
+            let preview = try DisplayPreviewRenderer().render(
+                oriented, settings: DisplayPreviewTestData.settings(exposureEV: 0)
+            )
+            let cgImage = try DisplayPreviewCGImageAdapter.makeCGImage(from: preview)
+
+            let expectedWidth = orientation.swapsDimensions ? height : width
+            let expectedHeight = orientation.swapsDimensions ? width : height
+
+            #expect(cgImage.width == expectedWidth, "\(orientation) width")
+            #expect(cgImage.height == expectedHeight, "\(orientation) height")
+            #expect(cgImage.width == preview.width, "\(orientation)")
+            #expect(cgImage.height == preview.height, "\(orientation)")
+            #expect(cgImage.bytesPerRow == expectedWidth * 3, "\(orientation)")
+        }
+    }
+
     @Test("The pixels are tagged as standard sRGB, not linear sRGB")
     func colourSpaceIsStandardSRGB() throws {
         let preview = try Self.rendered(width: 4, height: 4)
@@ -118,7 +153,7 @@ struct DisplayPreviewCGImageAdapterTests {
     func inconsistentGeometryIsRefused() {
         let processing = DisplayPreviewProcessing(
             settings: DisplayPreviewTestData.settings(exposureEV: 0),
-            channelMixProcessing: DisplayPreviewTestData.channelMixProcessing(),
+            orientationProcessing: DisplayPreviewTestData.orientationProcessing(),
             clippedLowSampleCount: 0,
             clippedHighSampleCount: 0
         )

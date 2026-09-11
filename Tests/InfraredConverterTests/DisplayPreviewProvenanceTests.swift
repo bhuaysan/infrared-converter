@@ -59,33 +59,52 @@ struct DisplayPreviewProvenanceTests {
         return try IRChannelMixer().apply(to: working, mix: mix)
     }
 
+    /// The display stage's actual input: a mixed image that has been through
+    /// the orientation stage. `.upright` is the default so the scene-linear
+    /// values stay bit-identical to the mixed ones and the display assertions
+    /// below are about the display stage alone.
+    static func oriented(
+        mix: IRChannelMix = .identity,
+        orientation: RAWImageOrientation = .upright
+    ) throws -> OrientedProcessedRAWImage {
+        try ImageOrienter().apply(to: try mixed(mix: mix), orientation: orientation)
+    }
+
     @Test("The display stage mints its wrapper over the exact state it consumed")
     func theStageMintsItsWrapper() throws {
-        let mixed = try Self.mixed(mix: .redBlueSwap)
+        let oriented = try Self.oriented(mix: .redBlueSwap, orientation: .rotated90Clockwise)
         let preview = try DisplayPreviewRenderer().render(
-            mixed, settings: DisplayPreviewTestData.settings(exposureEV: 0)
+            oriented, settings: DisplayPreviewTestData.settings(exposureEV: 0)
         )
 
         // Each hop reaches the state that actually produced the next one.
-        #expect(preview.channelMixedImage == mixed.image)
-        #expect(preview.workingColorImage == mixed.workingColorImage)
-        #expect(preview.demosaicedImage == mixed.demosaicedImage)
-        #expect(preview.whiteBalancedMosaic == mixed.whiteBalancedMosaic)
-        #expect(preview.linearMosaic == mixed.linearMosaic)
-        #expect(preview.url == mixed.url)
-        #expect(preview.metadata == mixed.metadata)
+        #expect(preview.orientedImage == oriented.image)
+        #expect(preview.channelMixedImage == oriented.channelMixedImage)
+        #expect(preview.workingColorImage == oriented.workingColorImage)
+        #expect(preview.demosaicedImage == oriented.demosaicedImage)
+        #expect(preview.whiteBalancedMosaic == oriented.whiteBalancedMosaic)
+        #expect(preview.linearMosaic == oriented.linearMosaic)
+        #expect(preview.url == oriented.url)
+        #expect(preview.metadata == oriented.metadata)
+
+        // The orientation is readable from the preview, and it is the geometry
+        // stage's fact, not the display stage's.
+        #expect(preview.orientation == .rotated90Clockwise)
+        #expect(preview.processing.appliedOrientation == .rotated90Clockwise)
+        #expect(preview.image.width == oriented.channelMixedImage.height)
+        #expect(preview.image.height == oriented.channelMixedImage.width)
 
         // And the decoded UInt16 mosaic is reachable from the last wrapper
-        // alone, six sources down.
-        #expect(preview.source.source.source.source.source.source.mosaic
+        // alone, seven sources down.
+        #expect(preview.source.source.source.source.source.source.source.mosaic
             == Self.decoded().mosaic)
     }
 
     @Test("The whole chain is readable back from the rendered preview")
     func theChainIsReadableFromTheResult() throws {
-        let mixed = try Self.mixed(mix: .redBlueSwap)
+        let oriented = try Self.oriented(mix: .redBlueSwap)
         let settings = DisplayPreviewTestData.settings(exposureEV: 1.5)
-        let preview = try DisplayPreviewRenderer().render(mixed, settings: settings)
+        let preview = try DisplayPreviewRenderer().render(oriented, settings: settings)
         let processing = preview.processing
 
         #expect(processing.settings == settings)
@@ -99,6 +118,9 @@ struct DisplayPreviewProvenanceTests {
             == RAWWhiteBalanceGains(plane0: 2, plane1: 1, plane2: 3, plane3: 1.5))
         #expect(processing.blackLevelSubtracted)
         #expect(processing.normalized)
+        #expect(processing.orientationApplied)
+        #expect(processing.appliedOrientation == .upright)
+        #expect(!processing.orientationSwappedDimensions)
         #expect(
             processing.channelMixProcessing.workingColorProcessing
                 .demosaicProcessing.whiteBalanceProcessing.linearProcessing.whiteLevel == 4095
@@ -109,9 +131,9 @@ struct DisplayPreviewProvenanceTests {
 
     @Test("A wrapper forwards its own image's provenance, never a second copy")
     func provenanceIsForwardedNotCopied() throws {
-        let mixed = try Self.mixed()
+        let oriented = try Self.oriented()
         let preview = try DisplayPreviewRenderer().render(
-            mixed, settings: DisplayPreviewTestData.settings(exposureEV: 0)
+            oriented, settings: DisplayPreviewTestData.settings(exposureEV: 0)
         )
         #expect(preview.processing == preview.image.processing)
         #expect(preview.settings == preview.image.processing.settings)
@@ -125,11 +147,11 @@ struct DisplayPreviewProvenanceTests {
     /// and would look entirely plausible.
     @Test("Changing settings re-renders from the same scene-linear image")
     func changingSettingsRestartsFromTheMixedImage() throws {
-        let mixed = try Self.mixed()
+        let oriented = try Self.oriented()
         let renderer = DisplayPreviewRenderer()
 
         let neutral = try renderer.render(
-            mixed, settings: DisplayPreviewTestData.settings(exposureEV: 0)
+            oriented, settings: DisplayPreviewTestData.settings(exposureEV: 0)
         )
         let brightened = try renderer.render(
             settings: DisplayPreviewTestData.settings(exposureEV: 1), replacing: neutral
@@ -147,7 +169,7 @@ struct DisplayPreviewProvenanceTests {
         // two stops from the source, which is the other thing chaining would
         // break.
         let twoStops = try renderer.render(
-            mixed, settings: DisplayPreviewTestData.settings(exposureEV: 2)
+            oriented, settings: DisplayPreviewTestData.settings(exposureEV: 2)
         )
         let secondStop = try renderer.render(
             settings: DisplayPreviewTestData.settings(exposureEV: 1), replacing: brightened
@@ -159,35 +181,37 @@ struct DisplayPreviewProvenanceTests {
         // buffer.
         #expect(neutral.processing.exposureEV == 0)
         #expect(brightened.channelMixedImage == neutral.channelMixedImage)
-        #expect(backToNeutral.channelMixedImage == mixed.image)
+        #expect(backToNeutral.channelMixedImage == oriented.channelMixedImage)
+        #expect(backToNeutral.orientedImage == oriented.image)
     }
 
     /// Nothing upstream reruns: the re-rendered result carries the identical
     /// upstream values, not equal-looking recomputed ones.
     @Test("Re-rendering reruns no upstream stage")
     func reRenderingRerunsNothingUpstream() throws {
-        let mixed = try Self.mixed(mix: .redBlueSwap)
+        let oriented = try Self.oriented(mix: .redBlueSwap)
         let renderer = DisplayPreviewRenderer()
 
         let first = try renderer.render(
-            mixed, settings: DisplayPreviewTestData.settings(exposureEV: 0)
+            oriented, settings: DisplayPreviewTestData.settings(exposureEV: 0)
         )
         let second = try renderer.render(
             settings: DisplayPreviewTestData.settings(exposureEV: -1), replacing: first
         )
 
-        // The same channel-mixed buffer, bit for bit — not a remixed one.
-        #expect(second.channelMixedImage.values == mixed.image.values)
-        for index in 0..<mixed.image.values.count
-        where second.channelMixedImage.values[index].bitPattern
-            != mixed.image.values[index].bitPattern {
+        // The same oriented buffer, bit for bit — not a re-oriented one.
+        #expect(second.orientedImage.values == oriented.image.values)
+        for index in 0..<oriented.image.values.count
+        where second.orientedImage.values[index].bitPattern
+            != oriented.image.values[index].bitPattern {
             Issue.record("scene-linear element \(index) changed")
         }
         // And every upstream state is the identical value, not a rebuilt one.
-        #expect(second.workingColorImage == mixed.workingColorImage)
-        #expect(second.demosaicedImage == mixed.demosaicedImage)
-        #expect(second.whiteBalancedMosaic == mixed.whiteBalancedMosaic)
-        #expect(second.linearMosaic == mixed.linearMosaic)
+        #expect(second.channelMixedImage == oriented.channelMixedImage)
+        #expect(second.workingColorImage == oriented.workingColorImage)
+        #expect(second.demosaicedImage == oriented.demosaicedImage)
+        #expect(second.whiteBalancedMosaic == oriented.whiteBalancedMosaic)
+        #expect(second.linearMosaic == oriented.linearMosaic)
         #expect(second.mix == .redBlueSwap)
         #expect(second.processing.demosaicAlgorithm == .bilinearBayer)
     }
@@ -197,16 +221,21 @@ struct DisplayPreviewProvenanceTests {
     @Test("Display settings and the creative mix change independently")
     func displaySettingsAndTheMixAreIndependent() throws {
         let mixed = try Self.mixed(mix: .identity)
+        let orienter = ImageOrienter()
         let renderer = DisplayPreviewRenderer()
         let settings = DisplayPreviewTestData.settings(exposureEV: 0)
 
-        let identityPreview = try renderer.render(mixed, settings: settings)
+        let identityPreview = try renderer.render(
+            try orienter.apply(to: mixed, orientation: .upright), settings: settings
+        )
         #expect(identityPreview.mix == .identity)
 
-        // A different mix is a different upstream result, rendered by the same
-        // renderer with the same settings.
+        // A different mix is a different upstream result, oriented the same
+        // way and rendered by the same renderer with the same settings.
         let swapped = try IRChannelMixer().apply(mix: .redBlueSwap, replacing: mixed)
-        let swappedPreview = try renderer.render(swapped, settings: settings)
+        let swappedPreview = try renderer.render(
+            try orienter.apply(to: swapped, orientation: .upright), settings: settings
+        )
 
         #expect(swappedPreview.settings == identityPreview.settings)
         #expect(swappedPreview.mix == .redBlueSwap)

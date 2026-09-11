@@ -63,6 +63,23 @@ struct DisplayPreviewRendererFixtureTests {
         return try IRChannelMixer().apply(to: working, mix: mix)
     }
 
+    /// The same chain, carried one stage further through `ImageOrienter`:
+    /// what the display renderer actually consumes.
+    ///
+    /// `.upright` is the default because it is what this fixture's own
+    /// metadata records, and because it keeps the scene-linear values
+    /// bit-identical to the channel-mixed ones — so the assertions below stay
+    /// about the display stage alone.
+    static func orientedFixture(
+        mix: IRChannelMix,
+        orientation: RAWImageOrientation = .upright
+    ) throws -> OrientedProcessedRAWImage {
+        try ImageOrienter().apply(
+            to: try channelMixedFixture(mix: mix), orientation: orientation
+        )
+    }
+
+
     /// Coordinates spot-checked by hand below. Spread across the frame, on
     /// both parities of both axes, including all four corners, so a stride,
     /// phase or row-order mistake cannot miss every one of them.
@@ -75,7 +92,7 @@ struct DisplayPreviewRendererFixtureTests {
 
     @Test("The owned pipeline reaches display-encoded pixels, deterministically")
     func theFixtureRendersToDisplayPixels() throws {
-        let mixed = try Self.channelMixedFixture(mix: .identity)
+        let oriented = try Self.orientedFixture(mix: .identity)
         let settings = DisplayRenderSettings(
             exposureEV: 0,
             rangePolicy: .hardClipToDisplayRange,
@@ -83,16 +100,20 @@ struct DisplayPreviewRendererFixtureTests {
         )
 
         let start = DispatchTime.now().uptimeNanoseconds
-        let result = try DisplayPreviewRenderer().render(mixed, settings: settings)
+        let result = try DisplayPreviewRenderer().render(oriented, settings: settings)
         let milliseconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
         let preview = result.image
 
-        // Geometry is untouched: this stage is per-pixel and applies no
-        // orientation.
+        // Geometry is untouched by this stage: it is per-pixel, and the
+        // orientation happened upstream. The fixture records `.upright`, so
+        // the oriented geometry is the sensor's own active area.
         #expect(preview.width == 4056)
         #expect(preview.height == 3040)
-        #expect(preview.width == mixed.image.width)
-        #expect(preview.height == mixed.image.height)
+        #expect(preview.width == oriented.image.width)
+        #expect(preview.height == oriented.image.height)
+        #expect(oriented.orientation == .upright)
+        #expect(oriented.image.width == oriented.channelMixedImage.width)
+        #expect(oriented.image.height == oriented.channelMixedImage.height)
         #expect(preview.bytes.count == 4056 * 3040 * 3)
         #expect(preview.bytes.count == 36_990_720)
         #expect(preview.bytesPerRow == 12_168)
@@ -113,7 +134,11 @@ struct DisplayPreviewRendererFixtureTests {
         #expect(!processing.toneMappingApplied)
         #expect(!processing.automaticExposureApplied)
         #expect(!processing.highlightReconstructionApplied)
-        #expect(!processing.orientationApplied)
+        // The orientation stage ran — upstream, and this fixture's file asks
+        // for no rearrangement. Both facts are readable from one record.
+        #expect(processing.orientationApplied)
+        #expect(processing.appliedOrientation == .upright)
+        #expect(!processing.orientationSwappedDimensions)
         #expect(!processing.isValidatedInfraredCalibration)
         #expect(processing.mixSource == .identity)
         #expect(processing.cameraToWorkingTransformSource == .sensorRGBIdentityFalseColor)
@@ -124,7 +149,7 @@ struct DisplayPreviewRendererFixtureTests {
         var sourceBelowZero = 0
         var sourceAboveOne = 0
         var sourceNonFinite = 0
-        mixed.image.values.withUnsafeBufferPointer { input in
+        oriented.image.values.withUnsafeBufferPointer { input in
             for index in 0..<input.count {
                 let value = input[index]
                 if !value.isFinite { sourceNonFinite += 1 }
@@ -142,8 +167,8 @@ struct DisplayPreviewRendererFixtureTests {
 
         // The scene-linear buffer is untouched: the values that clipped in the
         // preview are all still there.
-        #expect(mixed.image.values.count == 36_990_720)
-        #expect(mixed.image.values.contains { $0 < 0 } == (sourceBelowZero > 0))
+        #expect(oriented.image.values.count == 36_990_720)
+        #expect(oriented.image.values.contains { $0 < 0 } == (sourceBelowZero > 0))
 
         // Every byte is a legal sample, and every one of them was written —
         // a `Data(count:)` that was only partly filled would show as an
@@ -160,7 +185,7 @@ struct DisplayPreviewRendererFixtureTests {
         report += "colour-correct. No transform in this pipeline is a validated infrared\n"
         report += "calibration, and a defined display encoding does not create one.\n"
         report += "camera-to-working transform: "
-        report += "\(mixed.cameraToWorkingTransform.source.diagnosticDescription)\n"
+        report += "\(oriented.cameraToWorkingTransform.source.diagnosticDescription)\n"
         report += "channel mix: \(processing.mixSource.diagnosticDescription)\n"
         report += "settings: \(settings.diagnosticDescription)\n"
         report += "preview: \(preview.width) x \(preview.height), "
@@ -168,7 +193,7 @@ struct DisplayPreviewRendererFixtureTests {
         report += "layout: 8 bits per component, three components R G B, no alpha\n"
         report += "colour space tagged on the CGImage: sRGB (non-linear)\n"
         report += "\nscene-linear input (extended linear sRGB, unclamped):\n"
-        report += "  values:      \(mixed.image.values.count)\n"
+        report += "  values:      \(oriented.image.values.count)\n"
         report += "  below zero:  \(sourceBelowZero)\n"
         report += "  above one:   \(sourceAboveOne)\n"
         report += "  non-finite:  \(sourceNonFinite)\n"
@@ -193,10 +218,10 @@ struct DisplayPreviewRendererFixtureTests {
     /// coordinate to the byte, with no production helper involved.
     @Test("Selected pixels match the arithmetic written out step by step")
     func selectedPixelsMatchHandComputedArithmetic() throws {
-        let mixed = try Self.channelMixedFixture(mix: .identity)
+        let oriented = try Self.orientedFixture(mix: .identity)
         let exposureEV = 0.0
         let preview = try DisplayPreviewRenderer().render(
-            mixed.image,
+            oriented.image,
             settings: DisplayRenderSettings(
                 exposureEV: exposureEV,
                 rangePolicy: .hardClipToDisplayRange,
@@ -209,7 +234,7 @@ struct DisplayPreviewRendererFixtureTests {
         report += "0 EV, hard display-range clipping, piecewise sRGB, round to nearest.\n"
 
         for (row, column) in Self.probeCoordinates {
-            let sceneLinear = try #require(mixed.image.pixel(row: row, column: column))
+            let sceneLinear = try #require(oriented.image.pixel(row: row, column: column))
             let rendered = try #require(preview.pixel(row: row, column: column))
 
             report += "\n(\(row), \(column))\n"
@@ -246,11 +271,11 @@ struct DisplayPreviewRendererFixtureTests {
     /// values.
     @Test("A stop of exposure on the fixture is exactly a factor of two")
     func exposureOnTheFixture() throws {
-        let mixed = try Self.channelMixedFixture(mix: .identity)
+        let oriented = try Self.orientedFixture(mix: .identity)
         let renderer = DisplayPreviewRenderer()
 
         let neutral = try renderer.render(
-            mixed,
+            oriented,
             settings: DisplayRenderSettings(
                 exposureEV: 0, rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
             )
@@ -264,7 +289,8 @@ struct DisplayPreviewRendererFixtureTests {
 
         // Re-rendering started from the same scene-linear image, not from the
         // 8-bit preview.
-        #expect(brightened.channelMixedImage == mixed.image)
+        #expect(brightened.orientedImage == oriented.image)
+        #expect(brightened.channelMixedImage == oriented.channelMixedImage)
         #expect(brightened.image.bytes != neutral.image.bytes)
 
         // More is clipped high at +1 EV, and nothing more is clipped low: a
@@ -275,7 +301,7 @@ struct DisplayPreviewRendererFixtureTests {
             == neutral.processing.clippedLowSampleCount)
 
         for (row, column) in Self.probeCoordinates {
-            let sceneLinear = try #require(mixed.image.pixel(row: row, column: column))
+            let sceneLinear = try #require(oriented.image.pixel(row: row, column: column))
             let rendered = try #require(brightened.image.pixel(row: row, column: column))
             for channel in RAWLinearRGBChannel.allCases {
                 let exposed = Double(sceneLinear.value(channel)) * 2
@@ -309,10 +335,10 @@ struct DisplayPreviewRendererFixtureTests {
         let renderer = DisplayPreviewRenderer()
 
         let identity = try renderer.render(
-            try Self.channelMixedFixture(mix: .identity), settings: settings
+            try Self.orientedFixture(mix: .identity), settings: settings
         )
         let swapped = try renderer.render(
-            try Self.channelMixedFixture(mix: .redBlueSwap), settings: settings
+            try Self.orientedFixture(mix: .redBlueSwap), settings: settings
         )
 
         // The display stage is per-component, so a permutation upstream shows
@@ -338,9 +364,9 @@ struct DisplayPreviewRendererFixtureTests {
 
     @Test("The fixture's preview becomes a correctly tagged CGImage")
     func theFixtureReachesCoreGraphics() throws {
-        let mixed = try Self.channelMixedFixture(mix: .identity)
+        let oriented = try Self.orientedFixture(mix: .identity)
         let preview = try DisplayPreviewRenderer().render(
-            mixed.image,
+            oriented.image,
             settings: DisplayRenderSettings(
                 exposureEV: 0, rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
             )

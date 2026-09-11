@@ -158,10 +158,27 @@ struct PublicProcessingSurfaceTests {
             rangePolicy: .hardClipToDisplayRange,
             encoding: .sRGB
         )
+        let oriented: OrientedProcessedRAWImage = try ImageOrienter()
+            .apply(to: mixed, orientation: .rotated270Clockwise)
+        _ = oriented.source
+        _ = oriented.image
+        _ = oriented.channelMixedImage
+        _ = oriented.workingColorImage
+        _ = oriented.demosaicedImage
+        _ = oriented.whiteBalancedMosaic
+        _ = oriented.linearMosaic
+        _ = oriented.processing
+        _ = oriented.orientation
+        _ = oriented.mix
+        _ = oriented.cameraToWorkingTransform
+        _ = oriented.metadata
+        #expect(oriented.url == decoded.url)
+
         let preview: DisplayPreviewProcessedRAWImage = try DisplayPreviewRenderer()
-            .render(mixed, settings: settings)
+            .render(oriented, settings: settings)
         _ = preview.source
         _ = preview.image
+        _ = preview.orientedImage
         _ = preview.channelMixedImage
         _ = preview.workingColorImage
         _ = preview.demosaicedImage
@@ -169,13 +186,15 @@ struct PublicProcessingSurfaceTests {
         _ = preview.linearMosaic
         _ = preview.processing
         _ = preview.settings
+        _ = preview.orientation
         _ = preview.mix
         _ = preview.cameraToWorkingTransform
         _ = preview.metadata
         #expect(preview.url == decoded.url)
 
         // The whole chain is readable from the last wrapper alone.
-        #expect(preview.source.source.source.source.source.source.mosaic == decoded.mosaic)
+        #expect(preview.source.source.source.source.source.source.source.mosaic
+            == decoded.mosaic)
         #expect(mixed.image.isGeometryConsistent)
         #expect(mixed.processing.whiteBalanceApplied)
         #expect(mixed.processing.channelMixApplied)
@@ -191,6 +210,11 @@ struct PublicProcessingSurfaceTests {
         #expect(!preview.processing.sceneLinear)
         #expect(!preview.processing.toneMappingApplied)
         #expect(preview.processing.mixSource == .redBlueSwap)
+        #expect(preview.processing.orientationApplied)
+        #expect(preview.processing.appliedOrientation == .rotated270Clockwise)
+        #expect(preview.processing.orientationSwappedDimensions)
+        #expect(preview.image.width == mixed.image.height)
+        #expect(preview.image.height == mixed.image.width)
         #expect(preview.processing.clippedSampleCount
             == preview.processing.clippedLowSampleCount
                 + preview.processing.clippedHighSampleCount)
@@ -236,22 +260,25 @@ struct PublicProcessingSurfaceTests {
                 settings: DisplayRenderSettings(
                     exposureEV: 0, rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
                 ),
-                channelMixProcessing: IRChannelMixProcessing(
-                    mix: .identity,
-                    workingColorProcessing: RAWWorkingColorProcessing(
-                        transform: .sensorRGBIdentityFalseColor,
-                        demosaicProcessing: RAWDemosaicProcessing(
-                            algorithm: .bilinearBayer,
-                            sourcePattern: RAWBayerCellPattern(
-                                topLeft: .red,
-                                topRight: .green,
-                                bottomLeft: .green,
-                                bottomRight: .blue
-                            ),
-                            whiteBalanceProcessing: RAWWhiteBalanceProcessing(
-                                gains: .identity,
-                                gainSource: .explicit,
-                                linearProcessing: linearProcessing
+                orientationProcessing: ImageOrientationProcessing(
+                    orientation: .upright,
+                    channelMixProcessing: IRChannelMixProcessing(
+                        mix: .identity,
+                        workingColorProcessing: RAWWorkingColorProcessing(
+                            transform: .sensorRGBIdentityFalseColor,
+                            demosaicProcessing: RAWDemosaicProcessing(
+                                algorithm: .bilinearBayer,
+                                sourcePattern: RAWBayerCellPattern(
+                                    topLeft: .red,
+                                    topRight: .green,
+                                    bottomLeft: .green,
+                                    bottomRight: .blue
+                                ),
+                                whiteBalanceProcessing: RAWWhiteBalanceProcessing(
+                                    gains: .identity,
+                                    gainSource: .explicit,
+                                    linearProcessing: linearProcessing
+                                )
                             )
                         )
                     )
