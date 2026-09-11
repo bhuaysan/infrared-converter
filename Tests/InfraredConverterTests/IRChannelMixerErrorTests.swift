@@ -277,7 +277,7 @@ struct IRChannelMixerErrorTests {
         let error = IRProcessingError.nonFiniteChannelMixResult(
             row: 0, column: 0, channel: .red
         )
-        let description = try? #require(error.errorDescription)
+        let description = error.errorDescription
         #expect(description?.localizedCaseInsensitiveContains("too large") == false)
         #expect(description?.localizedCaseInsensitiveContains("finite") == true)
         // The detail keeps saying which coordinate, in the same terms.
