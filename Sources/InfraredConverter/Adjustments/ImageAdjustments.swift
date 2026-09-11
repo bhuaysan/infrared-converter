@@ -40,19 +40,32 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// written to disk — which is the only time it is free to do.
     public static let currentSchemaVersion = 1
 
-    /// The schema version this record was written with.
-    public let schemaVersion: Int
+    /// The wire-format version this record belongs to.
+    ///
+    /// **Wire-format metadata, not editing state**, and therefore not stored
+    /// and not settable. An in-memory record is always a record of this
+    /// build's schema, so an `ImageAdjustments` whose version disagrees with
+    /// what `encode(to:)` writes cannot be constructed — by anyone, not
+    /// merely by convention.
+    ///
+    /// It was a stored property with a public parameter, and that was a
+    /// modelling error: a caller could name any integer, and encoding ignored
+    /// it and wrote the current one, so a publicly constructible value did not
+    /// round-trip. Harmless while nothing is persisted; a corruption bug the
+    /// day a sidecar is written. A historical version now exists only inside
+    /// `init(from:)`, for exactly as long as it takes to decide whether it can
+    /// be read.
+    public var schemaVersion: Int { Self.currentSchemaVersion }
 
     /// The user's orientation correction, on top of whatever the file
     /// recorded. `.identity` means they asked for none.
     public var orientation: UserOrientationAdjustment
 
-    public init(
-        orientation: UserOrientationAdjustment = .identity,
-        schemaVersion: Int = ImageAdjustments.currentSchemaVersion
-    ) {
+    /// Builds a record of the user's decisions at this build's schema version.
+    ///
+    /// There is deliberately no version parameter. See `schemaVersion`.
+    public init(orientation: UserOrientationAdjustment = .identity) {
         self.orientation = orientation
-        self.schemaVersion = schemaVersion
     }
 
     /// A freshly opened file's adjustments: the user has decided nothing.
@@ -66,6 +79,29 @@ public struct ImageAdjustments: Equatable, Sendable {
 
 // MARK: - Persistence
 
+/// ## The forward-compatibility rule
+///
+/// Extensibility is why this is a record rather than a property, so a reader
+/// is allowed to ignore a field it does not know about — but only a field
+/// whose absence cannot change the photograph.
+///
+/// ```text
+/// non-semantic field      may be added within a schema version, and ignored
+///                         e.g. a note, an author, a timestamp
+///
+/// image-affecting field   requires a schema-version bump
+///                         e.g. exposure, a channel mix, a crop, a curve
+/// ```
+///
+/// The distinction is not stylistic. An older client that silently ignored a
+/// newer `exposureEV` would open the file, render a different photograph from
+/// the one the user saved, and report no problem at all — and would then write
+/// the record back without the field, destroying the edit. So:
+///
+/// **Any new persisted setting whose omission would change the rendered image
+/// requires a new schema version, and an older client must refuse that
+/// version rather than read around it.** `init(from:)` already does refuse it;
+/// this is the rule that says when a future author must raise the number.
 extension ImageAdjustments: Codable {
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -109,15 +145,19 @@ extension ImageAdjustments: Codable {
             )
         }
 
-        self.init(orientation: orientation, schemaVersion: version)
+        // `version` is known to equal `currentSchemaVersion` here: anything
+        // else was refused above. When a second version exists, this is where
+        // a migration becomes visible, and the decoded version stops being
+        // discardable.
+        self.init(orientation: orientation)
     }
 
-    /// Writes the record at the **current** schema version, whatever version
-    /// it was read at.
+    /// Writes the record at the **current** schema version.
     ///
-    /// A record read at version 1 and written back is a version-1 record;
-    /// there is nothing else it could be while only one version exists. When
-    /// a second version arrives, this is where a migration becomes visible.
+    /// Nothing else is possible: no in-memory record carries any other
+    /// version, which is what makes every publicly constructible value
+    /// round-trip. When a second version arrives, this is where a migration
+    /// becomes visible.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(Self.currentSchemaVersion, forKey: .schemaVersion)

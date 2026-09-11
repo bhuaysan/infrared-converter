@@ -45,14 +45,90 @@ struct ImageAdjustmentsTests {
 
     /// Extensibility is the reason this is a record rather than a property,
     /// so a record carrying a field this version does not know about is read,
-    /// not refused — within a version it can read.
-    @Test("An unknown extra field at a readable version is ignored")
-    func unknownFieldsAtAReadableVersionAreIgnored() throws {
+    /// not refused — **when ignoring it cannot change the photograph**.
+    ///
+    /// The field here is a note. It is deliberately not an adjustment: an
+    /// earlier version of this test used `exposureEV`, which stated the
+    /// opposite contract. An older client that ignored a newer exposure would
+    /// open the file, render a different photograph, report no problem, and
+    /// then write the record back without the field.
+    @Test("An unknown non-semantic field at a readable version is ignored")
+    func unknownNonSemanticFieldsAreIgnored() throws {
         let json = Data(
-            #"{"schemaVersion":1,"orientation":"flipVertical","exposureEV":0.75}"#.utf8
+            #"""
+            {"schemaVersion":1,"orientation":"flipVertical","note":"scanned by hand"}
+            """#.utf8
         )
         let decoded = try JSONDecoder().decode(ImageAdjustments.self, from: json)
         #expect(decoded.orientation == .verticalFlip)
+    }
+
+    /// The other half of the same rule, and the reason the field above has to
+    /// be a note: anything image-affecting arrives with a version bump, and a
+    /// version bump is refused outright.
+    @Test("An image-affecting field arrives with a version this build refuses")
+    func anImageAffectingFieldArrivesAsANewerVersion() {
+        let json = Data(
+            #"""
+            {"schemaVersion":2,"orientation":"flipVertical","exposureEV":0.75}
+            """#.utf8
+        )
+        #expect(
+            throws: ImageAdjustmentError.unsupportedSchemaVersion(found: 2, supported: 1)
+        ) {
+            try JSONDecoder().decode(ImageAdjustments.self, from: json)
+        }
+    }
+
+    // MARK: - The schema version is wire-format metadata
+
+    @Test(
+        "Every publicly constructed record carries the current schema version",
+        arguments: UserOrientationAdjustment.allCases
+    )
+    func everyConstructedRecordIsCurrent(orientation: UserOrientationAdjustment) {
+        #expect(
+            ImageAdjustments(orientation: orientation).schemaVersion
+                == ImageAdjustments.currentSchemaVersion
+        )
+    }
+
+    /// The invariant the old initialiser broke: what a record says its version
+    /// is, and what encoding writes, can no longer disagree.
+    @Test("A record's version and its encoded version always agree")
+    func theVersionAndTheEncodedVersionAgree() throws {
+        for orientation in UserOrientationAdjustment.allCases {
+            let adjustments = ImageAdjustments(orientation: orientation)
+            let data = try JSONEncoder().encode(adjustments)
+            let object = try #require(
+                try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            )
+            #expect(object["schemaVersion"] as? Int == adjustments.schemaVersion)
+        }
+    }
+
+    /// Round-tripping is now a property of the type rather than of careful
+    /// callers: there is no publicly reachable value that fails it.
+    @Test("Re-encoding a decoded record reproduces the bytes exactly")
+    func encodingIsStableAcrossARoundTrip() throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+
+        for orientation in UserOrientationAdjustment.allCases {
+            let first = try encoder.encode(ImageAdjustments(orientation: orientation))
+            let decoded = try JSONDecoder().decode(ImageAdjustments.self, from: first)
+            #expect(try encoder.encode(decoded) == first)
+        }
+    }
+
+    /// A record read at a supported historical version is written back at the
+    /// current one, and says so.
+    @Test("A decoded record reports the current version, not the one on the wire")
+    func aDecodedRecordReportsTheCurrentVersion() throws {
+        let json = Data(#"{"schemaVersion":1,"orientation":"rotate180"}"#.utf8)
+        let decoded = try JSONDecoder().decode(ImageAdjustments.self, from: json)
+        #expect(decoded.schemaVersion == ImageAdjustments.currentSchemaVersion)
+        #expect(decoded == ImageAdjustments(orientation: .halfTurn))
     }
 
     // MARK: - Refusals
