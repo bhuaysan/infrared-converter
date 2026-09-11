@@ -342,3 +342,69 @@ leaving every buffer, every test and every future export in sensor order.
   rather than a redesign.
 - Reprocessing costs one permutation and one encode instead of a decode.
 - A full frame's scene-linear chain now stays resident while a file is open.
+
+---
+
+## Amendment (2026-09-12) — the schema version is wire-format metadata
+
+Decision 10 above versioned the persisted form and specified typed refusals for
+anything unreadable. It got one thing wrong, and the error was in the shape of
+the type rather than in the policy.
+
+`ImageAdjustments` stored `schemaVersion` and exposed it as a public
+initialiser parameter, while `encode(to:)` always wrote
+`Self.currentSchemaVersion`. So this compiled:
+
+```swift
+ImageAdjustments(orientation: .halfTurn, schemaVersion: 999)
+```
+
+and did not round-trip: a publicly constructible value encoded to something
+that decoded back as a different value. Harmless while nothing is written to
+disk. A corruption bug on the day a sidecar is.
+
+### The correction
+
+```swift
+public init(orientation: UserOrientationAdjustment = .identity)
+
+public var schemaVersion: Int { Self.currentSchemaVersion }
+```
+
+The version is **wire-format metadata, not user-settable application state**.
+It is no longer stored and no longer nameable. A historical version exists
+only inside `init(from:)`, for exactly as long as it takes to decide whether
+this build can read it — which today is the only version it can. When a second
+version arrives, that is where a migration becomes visible, and the decoded
+version stops being discardable.
+
+Round-tripping is now a property of the type rather than of careful callers:
+there is no publicly reachable value that fails it.
+
+### The forward-compatibility rule, stated
+
+Decision 10 allowed a reader to ignore an unknown field, and a test pinned that
+behaviour using `exposureEV` as the example. That example stated the wrong
+contract, and it is corrected here.
+
+```text
+non-semantic field      may be added within a schema version, and ignored
+                        a note, an author, a timestamp
+
+image-affecting field   requires a schema-version bump
+                        exposure, a channel mix, a crop, a curve
+```
+
+**Any new persisted setting whose omission would change the rendered image
+requires a new schema version, and an older client must refuse that version
+rather than read around it.**
+
+The failure mode this forbids is quiet and complete. An older client that
+ignored a newer `exposureEV` would open the file, render a different photograph
+from the one the user saved, report no problem at all, and then write the
+record back without the field — destroying the edit while looking like it
+worked. That is the same class of failure as decoding a corrupt record into
+"the user asked for nothing", which Decision 10 already refuses.
+
+`init(from:)` already enforces the refusal. This rule is the instruction to a
+future author about when to raise the number.

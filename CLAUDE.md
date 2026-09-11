@@ -763,7 +763,19 @@ Do not annotate entire processing engines with `@MainActor`.
 
 Avoid unnecessary detached tasks.
 
-Obsolete preview renders should be cancellable when users change parameters rapidly.
+Obsolete preview renders must be genuinely cancellable when users change
+parameters rapidly, not merely discardable. A full-frame stage is one
+synchronous pass with no suspension point, so `Task.cancel()` alone stops
+nothing: a stage that can be superseded takes an explicit
+`ProcessingCancellation`, polls it at a documented granularity, and throws
+`CancellationError` rather than returning a partially written buffer.
+Cancellation is not a processing failure and must never be reported as one.
+
+Rapid parameter changes coalesce. At most one expensive render works at a
+time, a burst collapses to the newest requested state, and no historical state
+is rendered on the way there — the scheduling counterpart of adjustments being
+canonical state rather than command history. See
+`docs/decisions/0011-coalesced-preview-rendering.md`.
 
 Treat memory usage as a first-class engineering constraint.
 
@@ -1037,10 +1049,12 @@ Examples:
 ```text
 docs/decisions/0001-use-libraw.md
 docs/decisions/0006-working-color-space.md
-docs/decisions/0011-metal-render-pipeline.md
+docs/decisions/0013-metal-render-pipeline.md
 ```
 
 The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`. The creative channel-mix stage that depends on it is `docs/decisions/0007-infrared-channel-mixing.md`, the display boundary that turns its result into pixels is `docs/decisions/0008-display-preview-rendering.md`, the geometry stage between them is `docs/decisions/0009-application-owned-orientation.md`, and the user-owned orientation adjustment composed onto that is `docs/decisions/0010-user-owned-orientation-adjustment.md`.
+
+How those re-renders are scheduled and cancelled is `docs/decisions/0011-coalesced-preview-rendering.md`. That the application-owned pipeline and the LibRaw processed-RGB reference are independent paths, neither gating nor substituting for the other, is `docs/decisions/0012-independent-raw-paths.md`.
 
 ADR numbers are assigned in the order decisions are actually made; do not reuse a number that is already taken.
 
@@ -1360,6 +1374,19 @@ Pause and reconsider when code begins to show any of these patterns:
 - large mutable global image state
 - one class controlling decode, edit, preview, and export
 - camera/filter presets hard-coded into rendering functions
+- a cancellation check placed after the work it was meant to prevent
+- a processing stage returning a partially written buffer when cancelled, or
+  reporting cancellation as a processing failure
+- a queue of pending renders, or any structure that replays superseded
+  adjustment states
+- the LibRaw processed-RGB path gating, or standing in for, the
+  application-owned pipeline
+- a diagnostic reference whose failure closes the workspace
+- a persisted record whose publicly constructible values do not round-trip
+- a schema version that is settable application state rather than wire-format
+  metadata
+- an image-affecting persisted field added without a schema-version bump, or
+  an older client reading around a newer version
 - orientation applied inside a colour stage, corrected by a view transform, or not applied at all
 - a decoder's orientation integer travelling through the pipeline instead of an application-owned type
 - an unreadable orientation value silently treated as upright
