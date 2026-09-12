@@ -783,7 +783,15 @@ Opening another file does not cancel a render whose result a user's decision
 depends on. A document the workspace leaves keeps its render slot until the
 state it was asked for has settled, and may then do one thing only: write its
 own sidecar. For that interval, and only that interval, two documents' renders
-can overlap. See `docs/decisions/0014-adjustment-lifecycle.md`.
+can overlap.
+
+Two generations of one RAW file share one sidecar, so they are serialised: an
+older generation of a file must never write after a newer generation of that
+same file has read or written it. Reopening a file therefore waits for that
+file's older generation to finish writing, and only that case waits — two
+different files have two different destinations and race over nothing. Prefer
+removing such an overlap to arbitrating it with a written-generation
+comparison. See `docs/decisions/0014-adjustment-lifecycle.md`.
 
 Treat memory usage as a first-class engineering constraint.
 
@@ -1422,6 +1430,9 @@ Pause and reconsider when code begins to show any of these patterns:
 - several booleans standing in for one closed state enum
 - a user's decision discarded because they opened another file, with nothing said
 - a delivery routed to a document by its path rather than by which open it belongs to
+- two generations of one RAW file able to write its sidecar in either order
+- a newly opened file reading a sidecar an older generation of it is about to change
+- a queue of deferred opens, or a superseded open still able to install a preview
 - full RAW decode on every slider move without measurement or caching rationale
 - every feature depending directly on LibRaw
 - direct Metal shader calls from UI views

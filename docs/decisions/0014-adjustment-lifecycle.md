@@ -203,14 +203,117 @@ its documentation now says only that.
 ## What this does not decide
 
 - **Quitting with a render in flight.** See Decision 5.
-- **Reopening a file that is still settling.** The new open reads the sidecar
-  before the settling write lands, so the workspace can show the older state
-  while the newer one reaches disk a moment later. Nothing is corrupted and
-  nothing is lost — the next open shows the saved state — but the two disagree
-  for the length of one render. Fixing it means making an open wait for its own
-  file to settle, which is the deferred-switch design Decision 2 rejected for
-  the general case and may be worth it for this specific one.
+- ~~**Reopening a file that is still settling.**~~ Decided in the amendment
+  below: a reopen waits for its own file to settle before it reads the sidecar.
+  The case turned out to lose a write, not merely to display a stale one.
 - **Retrying a failed write.** There is no retry engine; the next successful
   adjustment writes again.
 - **Anything about preview cost.** Full-resolution renders, no cache, no
   reduced-resolution path: unchanged, and still the open question.
+
+---
+
+## Amendment (2026-09-12) — a reopen waits for its own file
+
+Decision 2 let every open proceed immediately and left one case under "What
+this does not decide": reopening a file that is still settling. The entry said
+the workspace would show the older state for the length of one render and
+called it a disagreement, not a loss.
+
+That was too generous. The same shape also loses a write:
+
+```text
+G1  A opened, quarter turn requested, render running
+G2  A reopened → reads the sidecar (no record yet), renders identity
+G2  user asks for a half turn → renders → writes rotate180
+G1  settles → writes rotate90Clockwise
+```
+
+The sidecar ends up holding the older generation's state, and the screen holds
+the newer one. Nothing reports a problem, because from each generation's own
+point of view everything worked.
+
+### The cause
+
+Generation routing (Decision 3) protects the **preview**: a delivery can only
+install into the generation it belongs to. It says nothing about the **sidecar**,
+which is not addressed by generation at all. Two generations of one RAW file
+share one destination, and both were free to write to it in whatever order
+their renders happened to finish.
+
+### The fix: serialise opens of the same file, and only those
+
+```text
+different file    the reopen starts at once; the previous document settles behind it
+same file         the reopen waits until that file has no settling generation left,
+                  and only then reads its sidecar and starts decoding
+```
+
+The rule follows the destination, not the document:
+
+```text
+two different RAW files      two different sidecars      no race       no waiting
+two generations of one RAW   one shared sidecar          a real race   serialised
+```
+
+So the user-facing decision from Decision 2 is untouched where it matters.
+Opening the *next* photograph never waits — that is the common case, and the one
+that would feel broken. Reopening the file you just left waits for one render,
+which is also the only case where waiting buys anything.
+
+### What that makes structurally true
+
+`settle` writes, releases the settling slot, and then starts the waiting open —
+in that order, all on the main actor. The write has therefore already returned
+before the next generation of that file reads anything. Two consequences follow
+without a single comparison of generation numbers:
+
+- **A generation never reads a sidecar that an older generation of the same
+  file is about to change.** The first render of a reopen already carries the
+  state the previous generation saved, so there is no identity render on the way
+  to it and no moment at which screen and disk disagree.
+- **An older generation can never overwrite a newer generation's save**, because
+  the two are never live at the same time. The older one has finished and been
+  released before the newer one exists as anything but a waiting request.
+
+A "last writer generation" comparison guarding each write was considered and
+rejected: it would leave both generations live and racing, and merely arbitrate
+the collision after the fact. Removing the overlap removes the collision.
+
+### The waiting open is one slot, newest wins
+
+A deferred open is a URL and the generation it was given, and there is at most
+one. A newer open replaces it, whatever file it names, so a superseded reopen
+disappears without ever touching `status` — the generation it belongs to is no
+longer the current one, and the resume path checks exactly that. Three reopens
+of a settling file therefore produce one decode, not three, which is the same
+collapsing rule the render slot already applies to a burst of presses.
+
+A settling document always delivers: nothing cancels it, and its render slot
+either has work in flight or work pending. A refused render frees the file just
+as a successful one does — it records the lost decision and releases the slot —
+so a waiting open cannot be blocked by a render that will never succeed.
+
+### `hasUnsettledAdjustments` is now `hasPendingAdjustmentWork`
+
+The old name suggested "there are adjustments that are not settled", which
+reads as a close-safety predicate and is not one. Two states are equally not
+durable and deliberately not counted, because nothing is in flight for them and
+waiting would never make them safe:
+
+```text
+pending work        hasPendingAdjustmentWork
+known unsaved work  .renderRefused, .saveFailed, unsavedAdjustments
+```
+
+A future close guard must consult both: the first says wait, the second says
+tell the user. The name now says only what the property means.
+
+### What this still does not decide
+
+- **Quitting with a render in flight.** Unchanged, and still waiting for a real
+  document lifecycle.
+- **Two RAW files in different directories with the same name.** Sidecars are
+  addressed by full URL, so they do not collide; nothing here changes that.
+- **External writers.** Serialisation covers this application's own generations.
+  Another process editing a sidecar is out of scope, as it was in ADR 0013.
