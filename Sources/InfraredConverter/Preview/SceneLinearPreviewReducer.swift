@@ -35,15 +35,16 @@ import Foundation
 ///
 /// ## Why here, and not one stage later
 ///
-/// One stage later is the creative channel mix, and mixing is the next thing
-/// the workspace will let a user change. Reducing after it would bake one mix
-/// into the retained buffer, so changing the mix would have to re-decode,
-/// re-normalise, re-balance, re-demosaic and re-convert the whole file — the
-/// exact full-resolution work this milestone removes.
+/// One stage later is the creative channel mix, which is now a **user
+/// adjustment**. Reducing after it would bake one mix into the retained
+/// buffer, so changing the mix would have to re-decode, re-normalise,
+/// re-balance, re-demosaic and re-convert the whole file.
 ///
-/// Reducing *before* the mix costs nothing to do and keeps that door open: the
-/// reduced image is the pre-creative working representation, and the mix runs
-/// on 3.1 megapixels instead of 12.3.
+/// Reducing *before* the mix costs nothing to do, and it is what makes the
+/// interactive mixer possible: the reduced image is the pre-creative working
+/// representation a document retains, and a mix the user asks for runs on 3.1
+/// megapixels instead of 12.3. See
+/// `docs/decisions/0016-interactive-channel-mixer.md`.
 ///
 /// ## Why the point does not change the pixels
 ///
@@ -105,9 +106,16 @@ import Foundation
 /// ## Cancellation
 ///
 /// Polled once before anything is allocated and once per destination row, the
-/// same contract `ImageOrienter` and `DisplayPreviewRenderer` follow. A
-/// cancelled reduction throws `CancellationError` and abandons its buffer; it
-/// never returns a partially written image.
+/// same contract `ImageOrienter`, `IRChannelMixer` and
+/// `DisplayPreviewRenderer` follow. A cancelled reduction throws
+/// `CancellationError` and abandons its buffer; it never returns a partially
+/// written image.
+///
+/// That holds on **both** paths, including the pass-through one for an image
+/// already within the limit: its sweep for non-finite values polls per source
+/// row. It did not, and the difference mattered — the pass-through path is the
+/// one a modest photograph takes, so it was the one place a superseded call
+/// would read a whole frame before noticing.
 public struct SceneLinearPreviewReducer: Sendable {
     public init() {}
 
@@ -178,7 +186,10 @@ public struct SceneLinearPreviewReducer: Sendable {
             // non-finite values still runs, so the stage's output contract
             // holds on both paths.
             try Self.validateFinite(
-                image.values, width: image.width, height: image.height
+                image.values,
+                width: image.width,
+                height: image.height,
+                cancellation: cancellation
             )
             values = image.values
         }
@@ -381,12 +392,19 @@ public struct SceneLinearPreviewReducer: Sendable {
 
     /// Sweeps a buffer for non-finite values, reporting the first with its
     /// coordinate and channel. Reads only; allocates nothing.
+    ///
+    /// Polled per row, so the pass-through path honours the same cancellation
+    /// granularity the area-averaging path does.
     private static func validateFinite(
-        _ values: [Float], width: Int, height: Int
+        _ values: [Float],
+        width: Int,
+        height: Int,
+        cancellation: ProcessingCancellation = .none
     ) throws {
         try values.withUnsafeBufferPointer { input in
             var base = 0
             for row in 0..<height {
+                if cancellation.isCancelled { throw CancellationError() }
                 for column in 0..<width {
                     let red = input[base]
                     let green = input[base + 1]
@@ -443,7 +461,12 @@ extension SceneLinearPreviewReducer {
             )
         }
         guard destinationWidth != sourceWidth || destinationHeight != sourceHeight else {
-            try validateFinite(values, width: sourceWidth, height: sourceHeight)
+            try validateFinite(
+                values,
+                width: sourceWidth,
+                height: sourceHeight,
+                cancellation: cancellation
+            )
             return values
         }
         return try areaAveraged(

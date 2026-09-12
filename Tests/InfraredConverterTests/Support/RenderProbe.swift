@@ -48,10 +48,16 @@ final class RenderProbe: @unchecked Sendable {
     /// the main actor and takes minutes, so a short bound reports a starved
     /// test as a broken scheduler — which it did, at thirty seconds.
     ///
-    /// Ten minutes is therefore deliberately far longer than anything healthy,
-    /// and exists only so that a genuine deadlock fails the run instead of
-    /// hanging it.
-    static let waitLimit = DispatchTimeInterval.seconds(600)
+    /// It therefore has to be far longer than anything healthy, and exists only
+    /// so that a genuine deadlock fails the run instead of hanging it.
+    ///
+    /// It was ten minutes, and that stopped clearing the bar: a full run with
+    /// the RAW fixture now takes eight minutes of its own, so a starved test
+    /// could exceed the guard and report a scheduling failure that was really
+    /// contention. Observed once, as exactly that. Thirty minutes restores the
+    /// property the guard is supposed to have — longer than any healthy run,
+    /// rather than comparable to one.
+    static let waitLimit = DispatchTimeInterval.seconds(1800)
 
     private let lock = NSLock()
     private var started = 0
