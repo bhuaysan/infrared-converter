@@ -205,6 +205,97 @@ struct UserChannelMixAdjustmentTests {
         }
     }
 
+    // MARK: - A built-in is its token alone
+
+    /// Regressions A and B. These records used to decode, with the
+    /// coefficients silently ignored — including coefficients that are not
+    /// the built-in's matrix at all.
+    @Test(
+        "A built-in carrying a matrix is refused, whatever the coefficients",
+        arguments: [
+            ("identity", "[9,9,9,9,9,9,9,9,9]"),
+            ("identity", "[1,0,0,0,1,0,0,0,1]"),
+            ("redBlueSwap", "[9,9,9,9,9,9,9,9,9]"),
+            ("redBlueSwap", "[0,0,1,0,1,0,1,0,0]"),
+            ("redBlueSwap", "[1,2,3]"),
+            ("identity", "[]"),
+            ("redBlueSwap", "null"),
+        ]
+    )
+    func aBuiltInCarryingAMatrixIsRefused(kind: String, matrix: String) {
+        let json = Data(#"{"kind":"\#(kind)","matrix":\#(matrix)}"#.utf8)
+        #expect(
+            throws: ImageAdjustmentError.unexpectedChannelMixField(field: "matrix", kind: kind)
+        ) {
+            try JSONDecoder().decode(UserChannelMixAdjustment.self, from: json)
+        }
+    }
+
+    /// Regression C: the ordinary built-in records are unaffected, and an
+    /// unrelated extra key is not this type's business.
+    @Test("A built-in token on its own still reads")
+    func aBareBuiltInStillReads() throws {
+        #expect(
+            try JSONDecoder().decode(
+                UserChannelMixAdjustment.self, from: Data(#"{"kind":"identity"}"#.utf8)
+            ) == .identity
+        )
+        #expect(
+            try JSONDecoder().decode(
+                UserChannelMixAdjustment.self, from: Data(#"{"kind":"redBlueSwap"}"#.utf8)
+            ) == .redBlueSwap
+        )
+        #expect(
+            try JSONDecoder().decode(
+                UserChannelMixAdjustment.self,
+                from: Data(#"{"kind":"redBlueSwap","note":"by hand"}"#.utf8)
+            ) == .redBlueSwap
+        )
+    }
+
+    /// Regression D, and the remaining rows of the wire-format table.
+    @Test("A matrix record reads with nine finite coefficients and only then")
+    func aMatrixRecordNeedsExactlyNineFiniteCoefficients() throws {
+        let valid = Data(#"{"kind":"matrix","matrix":[0.5,0,0,0,1,0,0,0,2]}"#.utf8)
+        #expect(
+            try JSONDecoder().decode(UserChannelMixAdjustment.self, from: valid)
+                == .explicit(try RAWColorMatrix3x3(
+                    m00: 0.5, m01: 0, m02: 0, m10: 0, m11: 1, m12: 0, m20: 0, m21: 0, m22: 2
+                ))
+        )
+
+        #expect(throws: ImageAdjustmentError.missingChannelMixField(field: "matrix")) {
+            try JSONDecoder().decode(
+                UserChannelMixAdjustment.self, from: Data(#"{"kind":"matrix"}"#.utf8)
+            )
+        }
+        #expect(
+            throws: ImageAdjustmentError.malformedChannelMixMatrix(coefficientCount: 8, expected: 9)
+        ) {
+            try JSONDecoder().decode(
+                UserChannelMixAdjustment.self,
+                from: Data(#"{"kind":"matrix","matrix":[1,0,0,0,1,0,0,0]}"#.utf8)
+            )
+        }
+        // Non-finite coefficients cannot be written in strict JSON; the
+        // factory the decoder uses refuses them, as tested above.
+        #expect(throws: ImageAdjustmentError.self) {
+            _ = try UserChannelMixAdjustment.explicit(
+                persistedMatrix: [1, 0, 0, 0, .nan, 0, 0, 0, 1]
+            )
+        }
+    }
+
+    @Test("The contradiction refusal names the field and the kind")
+    func theContradictionRefusalIsInformative() {
+        let error = ImageAdjustmentError.unexpectedChannelMixField(
+            field: "matrix", kind: "redBlueSwap"
+        )
+        #expect(error.errorDescription?.isEmpty == false)
+        #expect(error.failureReason?.contains("matrix") == true)
+        #expect(error.failureReason?.contains("redBlueSwap") == true)
+    }
+
     @Test("An unknown kind is refused, never read as identity")
     func anUnknownKindIsRefused() {
         let json = Data(#"{"kind":"candychrome"}"#.utf8)

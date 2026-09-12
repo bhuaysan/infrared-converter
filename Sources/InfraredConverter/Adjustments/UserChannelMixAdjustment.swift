@@ -171,6 +171,19 @@ public enum UserChannelMixAdjustment: Equatable, Sendable {
 /// could select another. When a second working space exists, that is a schema
 /// version, not a field somebody adds.
 ///
+/// The shape is exact per kind:
+///
+/// ```text
+/// identity       token only          a "matrix" key is refused
+/// redBlueSwap    token only          a "matrix" key is refused
+/// matrix         token + nine finite coefficients
+/// ```
+///
+/// A built-in carrying a `matrix` is refused rather than read with the numbers
+/// ignored, even when the numbers are the built-in's own. Only the `matrix`
+/// key is policed this way, because it is the one that contradicts the token;
+/// an unrelated extra key is not this type's concern.
+///
 /// The matrix is nine `Double`s, **row-major**, in the convention
 /// `RAWColorMatrix3x3` fixes: `[m00, m01, m02, m10, m11, m12, m20, m21, m22]`.
 /// A record with any other number of coefficients is refused, and so is one
@@ -250,10 +263,19 @@ extension UserChannelMixAdjustment: Codable {
         }
 
         switch kind {
-        case .identity:
-            self = .identity
-        case .redBlueSwap:
-            self = .redBlueSwap
+        case .identity, .redBlueSwap:
+            // A built-in is its token and nothing else. A record that names
+            // one and carries coefficients says two different things about
+            // one matrix, and there is no reading of it that is not a guess:
+            // ignoring the numbers renders the token, trusting them renders
+            // something the token does not name. Refused, whatever the
+            // numbers are — even the built-in's own.
+            guard !container.contains(.matrix) else {
+                throw ImageAdjustmentError.unexpectedChannelMixField(
+                    field: CodingKeys.matrix.stringValue, kind: token
+                )
+            }
+            self = kind == .identity ? .identity : .redBlueSwap
         case .matrix:
             guard let coefficients = try container.decodeIfPresent(
                 [Double].self, forKey: .matrix

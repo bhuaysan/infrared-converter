@@ -294,6 +294,33 @@ struct JSONSidecarImageAdjustmentStoreTests {
         }
     }
 
+    /// The built-in-plus-matrix contradiction, through a real file: refused
+    /// with its typed reason intact, and neither the sidecar nor the RAW file
+    /// is changed by the refusal.
+    @Test("A sidecar whose built-in mix carries a matrix is refused, not read around")
+    func aBuiltInMixWithAMatrixIsRefused() throws {
+        for kind in ["identity", "redBlueSwap"] {
+            try Self.withSandbox { sandbox in
+                let body = """
+                    {
+                      "schemaVersion": 2,
+                      "orientation": "none",
+                      "channelMix": { "kind": "\(kind)", "matrix": [9,9,9,9,9,9,9,9,9] }
+                    }
+                    """
+                try sandbox.writeSidecar(body)
+
+                let refusal = try #require(Self.loadRefusal(sandbox.raw))
+                #expect(
+                    refusal.adjustment
+                        == .unexpectedChannelMixField(field: "matrix", kind: kind)
+                )
+                try #expect(sandbox.sidecarText() == body)
+                #expect(sandbox.rawIsUnchanged)
+            }
+        }
+    }
+
     // MARK: - Identity is written, not implied
 
     @Test("Identity is saved as an ordinary sidecar, and the file stays")

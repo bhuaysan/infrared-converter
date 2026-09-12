@@ -55,6 +55,15 @@ public enum ImageAdjustmentError: Error, Equatable {
     /// A persisted channel mix is missing a field its kind requires — the
     /// `kind` token itself, or the coefficients an explicit matrix is.
     case missingChannelMixField(field: String)
+    /// A persisted channel mix carries a field its kind does not have — a
+    /// built-in (`identity`, `redBlueSwap`) carrying `matrix` coefficients.
+    ///
+    /// The mirror image of `missingChannelMixField`. A built-in's matrix is
+    /// derived from its token, so a record carrying one says two things about
+    /// the same nine numbers. Ignoring the coefficients would silently discard
+    /// part of what was written; trusting them would render something the
+    /// token does not name. Neither is a reading, so the record is refused.
+    case unexpectedChannelMixField(field: String, kind: String)
     /// A persisted explicit channel mix does not carry nine coefficients.
     ///
     /// The shape is part of the matrix: a 3×3 map is nine numbers in row-major
@@ -84,6 +93,8 @@ extension ImageAdjustmentError: LocalizedError {
             return "The saved channel mix could not be understood."
         case .missingChannelMixField:
             return "The saved channel mix is incomplete."
+        case .unexpectedChannelMixField:
+            return "The saved channel mix contradicts itself."
         case .malformedChannelMixMatrix:
             return "The saved channel-mix matrix is not a 3×3 matrix."
         case .nonFiniteChannelMixCoefficient:
@@ -128,6 +139,12 @@ extension ImageAdjustmentError: LocalizedError {
         case .missingChannelMixField(let field):
             return """
                 The saved channel mix does not contain "\(field)", which its kind requires.
+                """
+        case .unexpectedChannelMixField(let field, let kind):
+            return """
+                The saved channel mix is "\(kind)", which is defined by its name alone, and \
+                it also contains "\(field)". The record says two different things about one \
+                matrix, so it is refused rather than read with part of it ignored.
                 """
         case .malformedChannelMixMatrix(let count, let expected):
             return """
