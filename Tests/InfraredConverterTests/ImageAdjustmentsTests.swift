@@ -233,6 +233,61 @@ struct ImageAdjustmentsTests {
         }
     }
 
+    // MARK: - The set of readable versions is closed
+
+    /// The migration switches over `PersistedSchemaVersion` with no `default`,
+    /// which is what makes adding a version a compile error there. That
+    /// guarantee holds only while the enum and the numbers agree, so the
+    /// agreement is pinned here: the cases are exactly `1...current`, with no
+    /// gap, and `current` is the highest of them. Bumping the written version
+    /// without adding a case — or adding a case without deciding it is the one
+    /// written — fails this test.
+    @Test("The readable schema versions are exactly 1 through the current one")
+    func theReadableVersionsAreClosedAndContiguous() {
+        let raw = ImageAdjustments.PersistedSchemaVersion.allCases.map(\.rawValue)
+        #expect(raw == Array(1...ImageAdjustments.currentSchemaVersion))
+        #expect(
+            ImageAdjustments.PersistedSchemaVersion.current
+                == ImageAdjustments.PersistedSchemaVersion.allCases.last
+        )
+        #expect(ImageAdjustments.PersistedSchemaVersion.first.rawValue == 1)
+    }
+
+    /// The behavioural half of the same claim: every version in the set
+    /// decodes through its own branch. A version routed through another
+    /// version's branch by a catch-all would refuse its own minimal record
+    /// here — version 1 carrying no mix, or version 2 missing one.
+    @Test("Every readable version decodes its own minimal record, and only that")
+    func everyReadableVersionHasItsOwnBranch() throws {
+        for version in ImageAdjustments.PersistedSchemaVersion.allCases {
+            switch version {
+            case .orientationOnly:
+                let own = Data(#"{"schemaVersion":1,"orientation":"rotate180"}"#.utf8)
+                #expect(
+                    try JSONDecoder().decode(ImageAdjustments.self, from: own)
+                        == ImageAdjustments(orientation: .halfTurn)
+                )
+            case .channelMix:
+                let own = Data(
+                    #"{"schemaVersion":2,"orientation":"rotate180","channelMix":{"kind":"redBlueSwap"}}"#.utf8
+                )
+                #expect(
+                    try JSONDecoder().decode(ImageAdjustments.self, from: own)
+                        == ImageAdjustments(orientation: .halfTurn, channelMix: .redBlueSwap)
+                )
+                // Version 1's record is not a version 2 record.
+                let older = Data(#"{"schemaVersion":2,"orientation":"rotate180"}"#.utf8)
+                #expect(
+                    throws: ImageAdjustmentError.missingAdjustment(
+                        field: "channelMix", schemaVersion: 2
+                    )
+                ) {
+                    try JSONDecoder().decode(ImageAdjustments.self, from: older)
+                }
+            }
+        }
+    }
+
     // MARK: - The schema version is wire-format metadata
 
     @Test(

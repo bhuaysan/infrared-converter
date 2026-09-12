@@ -59,14 +59,11 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// the rule below says an image-affecting field needs its own version. A
     /// version 1 record still reads, as the migration in `init(from:)`
     /// describes.
-    public static let currentSchemaVersion = 2
-
-    /// The first persisted schema: `orientation` alone.
     ///
-    /// Named rather than written as `1` in the migration, so the one place
-    /// that knows what version 1 lacked says which version it is talking
-    /// about.
-    static let orientationOnlySchemaVersion = 1
+    /// Derived from `PersistedSchemaVersion.current` rather than written as a
+    /// literal, so the list of versions this build reads and the version it
+    /// writes cannot disagree.
+    public static let currentSchemaVersion = PersistedSchemaVersion.current.rawValue
 
     /// The wire-format version this record belongs to.
     ///
@@ -179,6 +176,43 @@ public struct ImageAdjustments: Equatable, Sendable {
 /// rather than opening it with no mix. In the other direction, version 1 is
 /// still read, because what its absent mix meant is known exactly: no
 /// remapping at all.
+extension ImageAdjustments {
+    /// Every schema version this build reads, as a closed set.
+    ///
+    /// The migration in `init(from:)` switches over this type, **exhaustively
+    /// and with no `default`**. That is the point of it. The version on the
+    /// wire used to be dispatched as a bare `Int`:
+    ///
+    /// ```text
+    /// switch version {
+    /// case 1:   … migrate
+    /// default:  … decode as version 2
+    /// }
+    /// ```
+    ///
+    /// which compiles unchanged the day a version 3 is added and quietly sends
+    /// every version 3 record through version 2's decoding. A new case here is
+    /// a compile error in the migration until someone decides what that
+    /// version's record contains.
+    ///
+    /// Internal rather than private so a test can pin the set: the raw values
+    /// are contiguous from 1 and `current` is the highest of them.
+    enum PersistedSchemaVersion: Int, CaseIterable, Sendable {
+        /// `orientation` alone.
+        case orientationOnly = 1
+        /// `orientation` and `channelMix`.
+        case channelMix = 2
+
+        /// The version this build writes. Named explicitly, so adding a case
+        /// does not by itself change what is written; a test asserts that it
+        /// is the highest case.
+        static let current = PersistedSchemaVersion.channelMix
+
+        /// The first version any build of this project wrote.
+        static let first = PersistedSchemaVersion.orientationOnly
+    }
+}
+
 extension ImageAdjustments: Codable {
     private enum CodingKeys: String, CodingKey {
         case schemaVersion
@@ -223,19 +257,26 @@ extension ImageAdjustments: Codable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
-        let version = try container.decodeIfPresent(Int.self, forKey: .schemaVersion)
-        guard let version else {
+        let rawVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion)
+        guard let rawVersion else {
             throw ImageAdjustmentError.missingAdjustment(
                 field: "schemaVersion", schemaVersion: 0
             )
         }
-        guard version >= Self.orientationOnlySchemaVersion,
-              version <= Self.currentSchemaVersion
+        // Range first, then the closed set. The two refusals are the same
+        // error because they are the same fact — this build does not read
+        // that version — but the order matters for what a reader learns: a
+        // version above the current one is a newer record, not a malformed
+        // one.
+        guard rawVersion >= PersistedSchemaVersion.first.rawValue,
+              rawVersion <= PersistedSchemaVersion.current.rawValue,
+              let schema = PersistedSchemaVersion(rawValue: rawVersion)
         else {
             throw ImageAdjustmentError.unsupportedSchemaVersion(
-                found: version, supported: Self.currentSchemaVersion
+                found: rawVersion, supported: Self.currentSchemaVersion
             )
         }
+        let version = schema.rawValue
 
         guard let orientation = try container.decodeIfPresent(
             UserOrientationAdjustment.self, forKey: .orientation
@@ -246,11 +287,11 @@ extension ImageAdjustments: Codable {
         }
 
         // Every version from the first onward has `orientation`; only version 2
-        // has `channelMix`. The switch is over the versions this build reads,
-        // so adding version 3 is a compile error here rather than a silent
-        // fall-through.
-        switch version {
-        case Self.orientationOnlySchemaVersion:
+        // has `channelMix`. The switch is over `PersistedSchemaVersion`, with
+        // no `default`, so adding a version is a compile error here rather
+        // than a silent fall-through into an older version's decoding.
+        switch schema {
+        case .orientationOnly:
             guard !container.contains(.channelMix) else {
                 throw ImageAdjustmentError.unexpectedAdjustment(
                     field: "channelMix", schemaVersion: version
@@ -261,7 +302,7 @@ extension ImageAdjustments: Codable {
             // rendered no remapping at all.
             self.init(orientation: orientation, channelMix: .identity)
 
-        default:
+        case .channelMix:
             guard let channelMix = try container.decodeIfPresent(
                 UserChannelMixAdjustment.self, forKey: .channelMix
             ) else {
