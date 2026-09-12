@@ -50,8 +50,10 @@ infrared white balance           WhiteBalancedRAWMosaic
 bilinear Bayer demosaic          DemosaicedRAWRGBImage (camera-native RGB)
    ↓                             RAWWorkingColorConverter
 explicit camera → working 3×3    WorkingColorRGBImage (extended linear sRGB)
+   ↓                             SceneLinearPreviewReducer
+reduce to preview resolution     SceneLinearPreviewImage (same space, fewer pixels)
    ↓                             IRChannelMixer
-IR channel mixing                IRChannelMixedRGBImage (same space, remixed)
+IR channel mixing                SceneLinearPreviewImage, mixed
    ↓                             ImageOrienter
 recorded orientation + user      OrientedSceneLinearRGBImage (viewing order)
 adjustment = effective
@@ -63,8 +65,18 @@ tagged sRGB                      CGImage → SwiftUI
 
 Everything above the last two rows is **scene-linear**, and stays that way: the
 display stage reads it and never touches it. After a preview is rendered the
-`IRChannelMixedRGBImage` is bit-identical, every value below `0` and above `1`
-still in it.
+retained scene-linear buffer is bit-identical, every value below `0` and above
+`1` still in it.
+
+Everything above the reduction runs at sensor resolution and is **released when
+the file finishes opening**. Everything below it runs on the reduced buffer,
+which is the only thing an open document keeps. On the Olympus E-PL3 fixture
+that is 2048 × 1535 rather than 4056 × 3040: 36 MB held open instead of 400 MB,
+and 3.9× less work for every adjustment. The reduced preview is a **disposable
+cache** — the RAW file plus its canonical adjustments remain the source of
+truth, and a future full-resolution render will start from the file, never from
+these pixels. See
+[ADR 0015](docs/decisions/0015-reduced-resolution-preview.md).
 
 Every stage is application-owned, non-destructive and provenance-carrying:
 each result keeps the state it was produced from, so gains, algorithm,
@@ -84,6 +96,12 @@ records what it did and explicitly did not do.
   3×3 remix inside the working colour space, with identity, red/blue swap and
   explicit-matrix mixes. It changes no colour space and is recorded as creative
   intent, never as a calibration.
+- **Preview reduction** caps the longest edge of the unoriented image at 2048
+  pixels by exact area-weighted averaging of scene-linear `Float32`, per
+  channel, in `Double`. No nearest-neighbour, no 8-bit round trip, no implicit
+  colour management, and no clamping. A CFA mosaic is never resized: averaging
+  neighbouring mosaic samples averages across colour filters, so the reduction
+  waits until every pixel carries all three channels.
 - **Display rendering** is exposure in the linear domain, hard display-range
   clipping to `0...1`, the piecewise sRGB transfer function and 8-bit
   quantisation — in that order, with the settings named at the call site and
@@ -458,11 +476,19 @@ See [RAW/README.md](RAW/README.md).
   written to a file as though it were one.
 - Exposure is not adjustable from the UI. The renderer takes any EV and the
   workspace passes `0`.
-- The scene-linear chain is retained for as long as a file is open, so that a
-  change of orientation reprocesses instead of decoding. For a 4056 × 3040
-  frame that is roughly half a gigabyte of `Float32` buffers. Nothing has
-  measured it, and there is no eviction, no cache policy and no
-  reduced-resolution path.
+- **The interactive preview is a reduced rendition, and softer than the file.**
+  It is capped at 2048 pixels on the longest edge, so a window maximised on a
+  large display shows it mildly upscaled. There is no zoom and no 1:1
+  inspection path.
+- **Changing anything upstream of the reduction means re-opening the file.**
+  White balance, the demosaic algorithm and the camera transform all live above
+  the reduction point, and none of them is adjustable today; when they become
+  adjustable they will re-prepare from the RAW file rather than from the
+  retained preview.
+- A reduced preview is held for as long as a file is open, so that a change of
+  orientation reprocesses instead of decoding: 2048 × 1535 × 3 `Float32`, about
+  36 MB for the E-PL3 fixture. There is still no eviction and no cache across
+  opens.
 - No transform in the project is a validated infrared colour calibration. The
   file's own `rgbFromCamera` is visible-light data and is opt-in and
   diagnostic only.
@@ -479,9 +505,10 @@ See [RAW/README.md](RAW/README.md).
   sRGB with no white balance, so a visible-light frame shows the sensor's
   native channel imbalance. That is expected, and it is a reference thumbnail
   rather than the workspace image.
-- The owned preview renders the full frame on the CPU on every open, and
-  re-orients and re-encodes the full frame on every adjustment, with no cache
-  and no reduced-resolution path. Preview strategy is a later decision.
+- The owned preview decodes and processes the **full** frame on the CPU on
+  every open — the reduction is the last step of that, not a way to avoid it —
+  and there is no cache across opens. Each adjustment re-orients and re-encodes
+  the reduced frame only.
 - Infrared white balance, channel mixing and a display boundary exist; no
   false-colour mapping, hue remapping, filter profiles or recipes, no develop
   controls, no export.

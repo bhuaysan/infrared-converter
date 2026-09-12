@@ -14,7 +14,8 @@ CAMERA-NATIVE RGB DOMAIN    three Float32 per pixel; linear; NOT a colour space
     DemosaicedRAWRGBImage
 
 WORKING-COLOUR RGB DOMAIN   three Float32 per pixel; linear; extended linear sRGB
-    WorkingColorRGBImage
+    WorkingColorRGBImage        full resolution; the processing truth
+    SceneLinearPreviewImage     reduced for the interactive workspace
     IRChannelMixedRGBImage
 
 DISPLAY-REFERRED DOMAIN     three UInt8 per pixel; sRGB-encoded; clipped
@@ -50,10 +51,14 @@ Demosaicing is decided — one application-owned reference algorithm, see
 `docs/decisions/0005-application-owned-bayer-demosaicing.md` — so is the
 working colour space, see `docs/decisions/0006-working-color-space.md`, so is
 creative channel mixing, see
-`docs/decisions/0007-infrared-channel-mixing.md`, and so now is the first
-display boundary, see `docs/decisions/0008-display-preview-rendering.md`. What
-is still undecided is a real tone pipeline: the display stage clips and
-encodes, and nothing more.
+`docs/decisions/0007-infrared-channel-mixing.md`, and so is the first
+display boundary, see `docs/decisions/0008-display-preview-rendering.md`. So
+now is the resolution the interactive workspace works at, see
+`docs/decisions/0015-reduced-resolution-preview.md`: the workspace holds a
+**reduced** scene-linear rendition and re-renders only that, while the RAW file
+plus its canonical adjustments remain the source of truth. What is still
+undecided is a real tone pipeline: the display stage clips and encodes, and
+nothing more.
 
 `CLAUDE.md` holds the project invariants; this file records the concrete
 implementation as it currently stands.
@@ -136,14 +141,27 @@ three Float32 per pixel; linear; NOT a colour space
 extended linear sRGB; unclamped Float32; still linear
 
                   ↓
+       PreviewResolutionPolicy: cap the longest edge  ┐
+                  ↓                                   ├ SceneLinearPreviewReducer
+       exact area-weighted average, per channel       │
+                  ↓                                   │
+       SceneLinearPreviewImage (reduced)              ┘
+
+═══════════ the full-resolution path ends here ═════════
+everything above is transient and released when preparation
+returns; everything below runs on the reduced buffer, which
+is what the workspace retains and re-renders
+
+                  ↓
        explicit IRChannelMix                       ┐
                   ↓                                ├ IRChannelMixer
-       IRChannelMixedRGBImage                      ┘
+       SceneLinearPreviewImage, mixed              ┘
 
 ═══════════ CREATIVE IR WORKING RGB DOMAIN ═════════════
 the SAME extended linear sRGB; unclamped Float32; linear
 a different PROCESSING STATE, not a different space
 pixels are still in SENSOR reading order
+resolution is now the preview's, not the sensor's
 
                   ↓
        recorded orientation (metadata)   ┐
@@ -1982,8 +2000,19 @@ everything downstream of *that*, plus image quality:
   patch, the camera transform and the channel mix are still fixed
   application-layer choices with no controls, and the recipe format that
   would hold them is deliberately undefined.
-- **Preview resolution strategy, caching and cancellation.** The workspace
-  renders the full frame every time it opens a file.
+- **Preview caching and eviction.** Preview *resolution* is decided (ADR 0015):
+  the workspace reduces once, immediately after the camera-to-working
+  transform, and retains only that reduced scene-linear buffer. Cancellation is
+  decided too (ADR 0011). What remains open is keeping a reduced preview across
+  opens, evicting one, or persisting one to disk — none of which exists.
+- **A CFA-aware mosaic reduction.** Reducing before demosaicing would let the
+  white-balance and demosaic stages run on fewer samples, which is the only way
+  to make white balance interactive. It needs its own invariant and per-layout
+  handling, and until it exists a CFA mosaic is never resized at all (ADR
+  0015).
+- **A full-resolution render path.** The reduced preview is explicitly a cache;
+  a full-resolution render re-runs from the RAW file. Nothing implements one
+  yet.
 - **Export**, which needs its own bit depth, its own colour decisions and its
   own ADR, and must not reuse the 8-bit preview buffer.
 - The **final production-quality Bayer algorithm**. `.bilinearBayer` is a
