@@ -157,14 +157,9 @@ public struct IRChannelMixer: Sendable {
             workingColorProcessing: image.processing
         )
 
-        let values: [Float]
-        if mix.matrix.isIdentity {
-            values = try Self.identityValues(image)
-        } else if mix.matrix == IRChannelMix.redBlueSwap.matrix {
-            values = try Self.redBlueSwappedValues(image)
-        } else {
-            values = try Self.mixedValues(image, matrix: mix.matrix)
-        }
+        let values = try Self.mixedValues(
+            image.values, width: image.width, height: image.height, mix: mix
+        )
 
         return IRChannelMixedRGBImage(
             width: image.width,
@@ -203,6 +198,80 @@ public struct IRChannelMixer: Sendable {
         try apply(to: previous.source, mix: newMix)
     }
 
+    // MARK: - Path selection
+
+    /// Chooses among the three exact paths and runs the chosen one.
+    ///
+    /// The execution path is decided by the **matrix value**; the provenance
+    /// is decided by how the `IRChannelMix` was constructed, and the two are
+    /// never allowed to contaminate each other. Shared by the
+    /// full-resolution and the preview-resolution entry points, so a reduced
+    /// image and a sensor-resolution one go through identical arithmetic.
+    private static func mixedValues(
+        _ values: [Float], width: Int, height: Int, mix: IRChannelMix
+    ) throws -> [Float] {
+        if mix.matrix.isIdentity {
+            return try identityValues(values, width: width, height: height)
+        }
+        if mix.matrix == IRChannelMix.redBlueSwap.matrix {
+            return try redBlueSwappedValues(values, width: width, height: height)
+        }
+        return try mixedValues(values, width: width, height: height, matrix: mix.matrix)
+    }
+
+    // MARK: - Preview resolution
+
+    /// Applies a creative channel mix to a **reduced** scene-linear preview.
+    ///
+    /// Identical arithmetic to the full-resolution entry point — the same
+    /// three exact paths, the same `Double` accumulation, the same refusal of
+    /// non-finite values — over fewer pixels. That is the whole difference,
+    /// and it is why the reduction is allowed to happen before this stage:
+    /// a 3x3 matrix distributes over the weighted sums an area average is
+    /// made of, so mixing a reduced image and reducing a mixed one agree.
+    ///
+    /// - Throws: `PreviewReductionError.channelMixAlreadyApplied` when the
+    ///   preview has already been through this stage. Mixes never compose,
+    ///   and here that is enforced rather than made structurally impossible:
+    ///   the reduced domain has one image type, so the guard lives in the
+    ///   provenance record it carries.
+    public func apply(
+        to preview: SceneLinearPreviewImage,
+        mix: IRChannelMix
+    ) throws -> SceneLinearPreviewImage {
+        guard preview.isGeometryConsistent else {
+            throw PreviewReductionError.invalidGeometry(
+                reason: """
+                    Preview scene-linear RGB geometry \(preview.width)x\(preview.height) needs \
+                    \(preview.expectedValueCount.map(String.init) ?? "an unrepresentable number of") \
+                    values, buffer holds \(preview.values.count).
+                    """
+            )
+        }
+        if let existing = preview.processing.mix {
+            throw PreviewReductionError.channelMixAlreadyApplied(
+                existing: existing, requested: mix
+            )
+        }
+        guard preview.processing.workingColorSpace == mix.workingColorSpace else {
+            throw IRProcessingError.channelMixWorkingColorSpaceMismatch(
+                image: preview.processing.workingColorSpace,
+                mix: mix.workingColorSpace
+            )
+        }
+
+        let values = try Self.mixedValues(
+            preview.values, width: preview.width, height: preview.height, mix: mix
+        )
+
+        return SceneLinearPreviewImage(
+            width: preview.width,
+            height: preview.height,
+            values: values,
+            processing: preview.processing.mixed(mix)
+        )
+    }
+
     // MARK: - Identity
 
     /// The identity path: the same numbers, in a different processing state.
@@ -219,9 +288,11 @@ public struct IRChannelMixer: Sendable {
     /// defended by the other paths is defended here too: an
     /// `IRChannelMixedRGBImage` this stage produced holds finite values
     /// whichever path made it. That sweep reads, and allocates nothing.
-    private static func identityValues(_ image: WorkingColorRGBImage) throws -> [Float] {
-        try validateFinite(image)
-        return image.values
+    private static func identityValues(
+        _ values: [Float], width: Int, height: Int
+    ) throws -> [Float] {
+        try validateFinite(values, width: width, height: height)
+        return values
     }
 
     // MARK: - Red/blue permutation
@@ -244,14 +315,14 @@ public struct IRChannelMixer: Sendable {
     ///
     /// One owned output buffer is allocated, because the values genuinely have
     /// to be reordered; copy-on-write cannot help when the contents change.
-    private static func redBlueSwappedValues(_ image: WorkingColorRGBImage) throws -> [Float] {
-        let outputCount = image.values.count
-        let width = image.width
-        let height = image.height
+    private static func redBlueSwappedValues(
+        _ values: [Float], width: Int, height: Int
+    ) throws -> [Float] {
+        let outputCount = values.count
 
         return try [Float](unsafeUninitializedCapacity: outputCount) { buffer, initializedCount in
             initializedCount = 0
-            try image.values.withUnsafeBufferPointer { input in
+            try values.withUnsafeBufferPointer { input in
                 var base = 0
                 for row in 0..<height {
                     for column in 0..<width {
@@ -305,7 +376,9 @@ public struct IRChannelMixer: Sendable {
     /// property access, and the row and column are tracked by the loop rather
     /// than recomputed by division.
     private static func mixedValues(
-        _ image: WorkingColorRGBImage,
+        _ values: [Float],
+        width: Int,
+        height: Int,
         matrix: RAWColorMatrix3x3
     ) throws -> [Float] {
         // Loaded once, outside the per-pixel loop.
@@ -313,13 +386,11 @@ public struct IRChannelMixer: Sendable {
         let m10 = matrix.m10, m11 = matrix.m11, m12 = matrix.m12
         let m20 = matrix.m20, m21 = matrix.m21, m22 = matrix.m22
 
-        let outputCount = image.values.count
-        let width = image.width
-        let height = image.height
+        let outputCount = values.count
 
         return try [Float](unsafeUninitializedCapacity: outputCount) { buffer, initializedCount in
             initializedCount = 0
-            try image.values.withUnsafeBufferPointer { input in
+            try values.withUnsafeBufferPointer { input in
                 var base = 0
                 for row in 0..<height {
                     for column in 0..<width {
@@ -396,11 +467,13 @@ public struct IRChannelMixer: Sendable {
 
     /// Sweeps the input for non-finite values, reporting the first with its
     /// coordinate and channel. Reads only; allocates nothing.
-    private static func validateFinite(_ image: WorkingColorRGBImage) throws {
-        try image.values.withUnsafeBufferPointer { input in
+    private static func validateFinite(
+        _ values: [Float], width: Int, height: Int
+    ) throws {
+        try values.withUnsafeBufferPointer { input in
             var base = 0
-            for row in 0..<image.height {
-                for column in 0..<image.width {
+            for row in 0..<height {
+                for column in 0..<width {
                     let red = input[base]
                     let green = input[base + 1]
                     let blue = input[base + 2]
@@ -419,7 +492,7 @@ public struct IRChannelMixer: Sendable {
                             row: row, column: column, channel: .blue, value: blue
                         )
                     }
-                    base += WorkingColorRGBImage.channelCount
+                    base += IRChannelMixedRGBImage.channelCount
                 }
             }
         }

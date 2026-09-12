@@ -170,12 +170,89 @@ public struct ImageOrienter: Sendable {
             values: orientation.isIdentity
                 ? image.values
                 : try Self.permutedValues(
-                    image,
+                    image.values,
+                    sourceWidth: image.width,
+                    sourceHeight: image.height,
                     orientation: orientation,
                     output: output,
                     cancellation: cancellation
                 ),
             processing: processing
+        )
+    }
+
+    /// Applies an orientation to a **reduced** scene-linear preview.
+    ///
+    /// The only entry point the interactive workspace uses. It permutes the
+    /// preview-resolution buffer — 3.1 megapixels on the E-PL3 rather than
+    /// 12.3 — and nothing upstream runs: no channel mix, no camera
+    /// conversion, no demosaic, no white balance, no decode, and no
+    /// resampling. The size was decided once, on the unoriented image, and an
+    /// orientation can only exchange the two dimensions, never re-open the
+    /// question.
+    ///
+    /// The reduction is recorded on the result's provenance, so a finished
+    /// preview says that its pixels are a smaller rendition rather than the
+    /// sensor's own.
+    ///
+    /// - Throws: `PreviewReductionError.channelMixNotApplied` when the preview
+    ///   has not been through the creative stage yet. The orientation record
+    ///   carries the whole upstream chain, and a preview with no mix on it
+    ///   has no complete chain to carry.
+    public func apply(
+        to preview: SceneLinearPreviewImage,
+        orientation: RAWImageOrientation,
+        cancellation: ProcessingCancellation = .none
+    ) throws -> OrientedSceneLinearRGBImage {
+        guard preview.isGeometryConsistent else {
+            throw OrientationError.invalidGeometry(
+                reason: """
+                    Preview scene-linear RGB geometry \(preview.width)x\(preview.height) needs \
+                    \(preview.expectedValueCount.map(String.init) ?? "an unrepresentable number of") \
+                    values, buffer holds \(preview.values.count).
+                    """
+            )
+        }
+        guard let channelMixProcessing = preview.processing.channelMixProcessing else {
+            throw PreviewReductionError.channelMixNotApplied
+        }
+
+        try cancellation.check()
+
+        let output = orientation.outputDimensions(
+            sourceWidth: preview.width, sourceHeight: preview.height
+        )
+        guard let outputCount = OrientedSceneLinearRGBImage.expectedValueCount(
+            width: output.width, height: output.height
+        ), outputCount == preview.values.count else {
+            throw OrientationError.unrepresentableOrientedGeometry(
+                reason: """
+                    Orienting \(preview.width)x\(preview.height) as \
+                    \(orientation.diagnosticDescription) gives \(output.width)x\
+                    \(output.height), which does not yield the source's \
+                    \(preview.values.count) values.
+                    """
+            )
+        }
+
+        return OrientedSceneLinearRGBImage(
+            width: output.width,
+            height: output.height,
+            values: orientation.isIdentity
+                ? preview.values
+                : try Self.permutedValues(
+                    preview.values,
+                    sourceWidth: preview.width,
+                    sourceHeight: preview.height,
+                    orientation: orientation,
+                    output: output,
+                    cancellation: cancellation
+                ),
+            processing: ImageOrientationProcessing(
+                orientation: orientation,
+                channelMixProcessing: channelMixProcessing,
+                previewResolution: preview.processing.resolution
+            )
         )
     }
 
@@ -237,18 +314,18 @@ public struct ImageOrienter: Sendable {
     /// source buffer's element count — `sourceWidth * sourceHeight * 3` — is a
     /// representable `Int`, and every index computed below is bounded by it.
     private static func permutedValues(
-        _ image: IRChannelMixedRGBImage,
+        _ values: [Float],
+        sourceWidth: Int,
+        sourceHeight: Int,
         orientation: RAWImageOrientation,
         output: (width: Int, height: Int),
         cancellation: ProcessingCancellation
     ) throws -> [Float] {
-        let sourceWidth = image.width
-        let sourceHeight = image.height
         let channels = OrientedSceneLinearRGBImage.channelCount
-        let outputCount = image.values.count
+        let outputCount = values.count
 
         return try [Float](unsafeUninitializedCapacity: outputCount) { buffer, initializedCount in
-            try image.values.withUnsafeBufferPointer { input in
+            try values.withUnsafeBufferPointer { input in
                 var destination = 0
                 for row in 0..<output.height {
                     // One poll per destination row. Throwing here abandons the

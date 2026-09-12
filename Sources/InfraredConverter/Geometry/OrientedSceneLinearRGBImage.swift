@@ -21,6 +21,17 @@ public struct ImageOrientationProcessing: Equatable, Sendable {
     /// forward so the whole chain from unpacked samples to here is readable
     /// from one record.
     public let channelMixProcessing: IRChannelMixProcessing
+    /// How the scene-linear image this stage consumed was reduced for
+    /// interactive preview, or `nil` when it was not reduced at all —
+    /// when the values came straight from a sensor-resolution chain.
+    ///
+    /// This is the one fact the upstream stage records cannot carry.
+    /// `IRChannelMixProcessing` and everything below it describe stages
+    /// that are exactly as true of a reduced image as of a full one; the
+    /// reduction happened *between* two of them, and a reader of a
+    /// finished preview has to be able to learn that the pixels are a
+    /// smaller rendition rather than the sensor's own.
+    public let previewResolution: PreviewResolution?
 
     /// The orientation stage ran. Which arrangement it applied is
     /// `orientation` — this flag says only that the stage was traversed, and
@@ -60,6 +71,10 @@ public struct ImageOrientationProcessing: Equatable, Sendable {
     public let displayEncodingApplied: Bool = false
 
     /// Whether the applied orientation exchanged width and height.
+    /// Whether the values this stage oriented had already been reduced for
+    /// interactive preview.
+    public var sourceReducedForPreview: Bool { previewResolution != nil }
+
     public var dimensionsSwapped: Bool { orientation.swapsDimensions }
     /// Whether the applied orientation was a reflection rather than a
     /// rotation. Read through `orientation`, never stored twice.
@@ -122,10 +137,12 @@ public struct ImageOrientationProcessing: Equatable, Sendable {
     /// `OrientedProcessedRAWImage`, whose initialiser is module-internal.
     public init(
         orientation: RAWImageOrientation,
-        channelMixProcessing: IRChannelMixProcessing
+        channelMixProcessing: IRChannelMixProcessing,
+        previewResolution: PreviewResolution? = nil
     ) {
         self.orientation = orientation
         self.channelMixProcessing = channelMixProcessing
+        self.previewResolution = previewResolution
     }
 }
 
