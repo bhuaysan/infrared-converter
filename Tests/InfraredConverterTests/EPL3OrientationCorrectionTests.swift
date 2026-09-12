@@ -31,8 +31,21 @@ import Foundation
 )
 struct EPL3OrientationCorrectionTests {
 
+    /// The full-resolution active image area. Every claim about what the
+    /// file *contains* is in these coordinates.
     static let sourceWidth = 4056
     static let sourceHeight = 3040
+
+    /// The interactive preview the workspace actually re-renders, under
+    /// `PreviewResolutionPolicy.workspace`: 2048 on the longest edge, and
+    /// 3040 x 2048/4056 rounded to nearest on the other. Every claim about
+    /// what the workspace *shows* is in these coordinates.
+    ///
+    /// They are written out rather than recomputed from the policy, so that a
+    /// change to the default limit fails this suite loudly instead of silently
+    /// re-deriving whatever the new limit produces.
+    static let previewWidth = 2048
+    static let previewHeight = 1535
 
     /// The adjustment that makes this particular photograph upright. Chosen
     /// by looking at it, not derived from the camera model.
@@ -52,8 +65,15 @@ struct EPL3OrientationCorrectionTests {
 
         #expect(source.metadata.geometry.flip == 0)
         #expect(source.metadata.geometry.orientation == .upright)
-        #expect(source.channelMixed.image.width == Self.sourceWidth)
-        #expect(source.channelMixed.image.height == Self.sourceHeight)
+        // What was prepared is the reduced preview, and it records what it
+        // was reduced from.
+        #expect(source.preview.width == Self.previewWidth)
+        #expect(source.preview.height == Self.previewHeight)
+        #expect(source.resolution.sourceWidth == Self.sourceWidth)
+        #expect(source.resolution.sourceHeight == Self.sourceHeight)
+        #expect(source.resolution.isReduced)
+        #expect(source.resolution.method == .areaAverage)
+        #expect(source.resolution.policy == .workspace)
     }
 
     // MARK: - 2. Identity preserves the sideways result
@@ -66,15 +86,20 @@ struct EPL3OrientationCorrectionTests {
         #expect(preview.sourceOrientation == .upright)
         #expect(preview.userOrientationAdjustment == .identity)
         #expect(preview.effectiveOrientation == .upright)
-        #expect(preview.pixelWidth == 4056)
-        #expect(preview.pixelHeight == 3040)
-        #expect(preview.image.width == 4056)
-        #expect(preview.image.height == 3040)
+        #expect(preview.pixelWidth == Self.previewWidth)
+        #expect(preview.pixelHeight == Self.previewHeight)
+        #expect(preview.image.width == Self.previewWidth)
+        #expect(preview.image.height == Self.previewHeight)
 
         // The whole chain below orientation is untouched by the adjustment
-        // model: these are the same reference values the earlier milestones
-        // pinned.
-        #expect(preview.processing.clippedLowSampleCount == 11)
+        // model. The clip counts are reference values for the **reduced**
+        // frame and are lower than the 11 low samples the full-resolution
+        // frame carried: an area-weighted mean of a slightly negative sample
+        // and its non-negative neighbours is not itself negative, so those
+        // few samples no longer reach the display stage as clipped. Nothing
+        // was clamped to produce that — the reduction clamps nothing — the
+        // samples simply averaged back into range.
+        #expect(preview.processing.clippedLowSampleCount == 0)
         #expect(preview.processing.clippedHighSampleCount == 0)
         #expect(preview.processing.exposureEV == 0)
         #expect(preview.processing.mixSource == .identity)
@@ -95,13 +120,17 @@ struct EPL3OrientationCorrectionTests {
         #expect(preview.effectiveOrientation == .rotated270Clockwise)
         #expect(source.metadata.geometry.flip == 0)
 
-        // 4. The dimensions exchange.
-        #expect(preview.sourcePixelWidth == 4056)
-        #expect(preview.sourcePixelHeight == 3040)
-        #expect(preview.pixelWidth == 3040)
-        #expect(preview.pixelHeight == 4056)
-        #expect(preview.image.width == 3040)
-        #expect(preview.image.height == 4056)
+        // 4. The dimensions exchange — the preview's, which is the only
+        // buffer the turn touches. The full-resolution dimensions it was
+        // reduced from are recorded unchanged and in sensor order.
+        #expect(preview.sourcePixelWidth == Self.previewWidth)
+        #expect(preview.sourcePixelHeight == Self.previewHeight)
+        #expect(preview.pixelWidth == Self.previewHeight)
+        #expect(preview.pixelHeight == Self.previewWidth)
+        #expect(preview.image.width == Self.previewHeight)
+        #expect(preview.image.height == Self.previewWidth)
+        #expect(preview.resolution.sourceWidth == Self.sourceWidth)
+        #expect(preview.resolution.sourceHeight == Self.sourceHeight)
 
         // Provenance says all three, and agrees with the stage that ran.
         #expect(preview.orientationProvenance.isUserAdjusted)
@@ -116,28 +145,30 @@ struct EPL3OrientationCorrectionTests {
     /// against the source coordinate the written-out formula gives.
     ///
     /// For `.rotated270Clockwise` on a `w × h` source, destination `(r, c)`
-    /// comes from source `(c, w − 1 − r)`. The corrected image is 3040 wide
-    /// and 4056 high.
+    /// comes from source `(c, w − 1 − r)`. The source is the **reduced**
+    /// preview, 2048 × 1535, so the corrected image is 1535 wide and 2048
+    /// high. The permutation claim is independent of resolution: it is about
+    /// where a pixel goes, and the preview is the buffer it goes in.
     @Test("Named destination coordinates map to the expected source pixels")
     func namedCoordinatesMapCorrectly() throws {
         let source = try Self.prepared()
-        let mixed = source.channelMixed.image
+        let mixed = source.preview
         let oriented = try ImageOrienter().apply(
-            to: source.channelMixed, orientation: .rotated270Clockwise
-        ).image
+            to: source.preview, orientation: .rotated270Clockwise
+        )
 
-        #expect(oriented.width == 3040)
-        #expect(oriented.height == 4056)
+        #expect(oriented.width == Self.previewHeight)
+        #expect(oriented.height == Self.previewWidth)
 
-        let lastColumn = Self.sourceWidth - 1   // 4055
+        let lastColumn = Self.previewWidth - 1   // 2047
 
         let coordinates: [(row: Int, column: Int)] = [
             (row: 0, column: 0),          // top-left of the corrected frame
-            (row: 0, column: 3039),       // top-right
-            (row: 4055, column: 0),       // bottom-left
-            (row: 4055, column: 3039),    // bottom-right
-            (row: 2000, column: 1500),
-            (row: 1024, column: 2048),
+            (row: 0, column: 1534),       // top-right
+            (row: 2047, column: 0),       // bottom-left
+            (row: 2047, column: 1534),    // bottom-right
+            (row: 1000, column: 700),
+            (row: 512, column: 1024),
         ]
 
         for destination in coordinates {
@@ -149,8 +180,8 @@ struct EPL3OrientationCorrectionTests {
             let mapped = RAWImageOrientation.rotated270Clockwise.sourceCoordinate(
                 row: destination.row,
                 column: destination.column,
-                sourceWidth: Self.sourceWidth,
-                sourceHeight: Self.sourceHeight
+                sourceWidth: Self.previewWidth,
+                sourceHeight: Self.previewHeight
             )
             #expect(mapped.row == expectedSource.row)
             #expect(mapped.column == expectedSource.column)
@@ -175,11 +206,11 @@ struct EPL3OrientationCorrectionTests {
     func theCorrectionIsNotAReflection() throws {
         let source = try Self.prepared()
         let rotated = try ImageOrienter().apply(
-            to: source.channelMixed, orientation: .rotated270Clockwise
-        ).image
+            to: source.preview, orientation: .rotated270Clockwise
+        )
         let reflected = try ImageOrienter().apply(
-            to: source.channelMixed, orientation: .transposed
-        ).image
+            to: source.preview, orientation: .transposed
+        )
 
         // Same geometry, different pixels.
         #expect(rotated.width == reflected.width)
@@ -231,7 +262,7 @@ struct EPL3OrientationCorrectionTests {
     func repeatedCorrectionsRestartFromTheSource() throws {
         let source = try Self.prepared()
         let pipeline = WorkspacePreviewPipeline()
-        let originalValues = source.channelMixed.image.values
+        let originalValues = source.preview.values
 
         var adjustment = UserOrientationAdjustment.identity
         var reached: [UserOrientationAdjustment] = []
@@ -245,9 +276,9 @@ struct EPL3OrientationCorrectionTests {
         #expect(reached == [.quarterTurnRight, .halfTurn])
 
         // The retained source is untouched, bit for bit.
-        #expect(source.channelMixed.image.values.count == originalValues.count)
+        #expect(source.preview.values.count == originalValues.count)
         #expect(
-            zip(source.channelMixed.image.values, originalValues)
+            zip(source.preview.values, originalValues)
                 .allSatisfy { $0.bitPattern == $1.bitPattern }
         )
 
@@ -277,8 +308,10 @@ struct EPL3OrientationCorrectionTests {
         let initial = try #require(
             await WorkspaceStubs.waitForPreview(state, adjustment: .identity, timeout: .seconds(300))
         )
-        #expect(initial.pixelWidth == 4056)
-        #expect(initial.pixelHeight == 3040)
+        #expect(initial.pixelWidth == Self.previewWidth)
+        #expect(initial.pixelHeight == Self.previewHeight)
+        #expect(initial.resolution.sourceWidth == Self.sourceWidth)
+        #expect(initial.resolution.sourceHeight == Self.sourceHeight)
         let initialBytes = try #require(WorkspaceStubs.pixelBytes(initial.image))
 
         state.rotateOrientationLeft()
@@ -286,8 +319,8 @@ struct EPL3OrientationCorrectionTests {
             await WorkspaceStubs.waitForPreview(state, adjustment: .quarterTurnLeft, timeout: .seconds(300))
         )
         #expect(corrected.effectiveOrientation == .rotated270Clockwise)
-        #expect(corrected.pixelWidth == 3040)
-        #expect(corrected.pixelHeight == 4056)
+        #expect(corrected.pixelWidth == Self.previewHeight)
+        #expect(corrected.pixelHeight == Self.previewWidth)
 
         state.resetOrientation()
         let reset = try #require(

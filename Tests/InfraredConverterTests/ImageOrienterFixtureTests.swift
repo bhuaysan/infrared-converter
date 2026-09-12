@@ -152,10 +152,17 @@ struct ImageOrienterFixtureTests {
         #expect(preview.sourceOrientation == .upright)
         #expect(preview.userOrientationAdjustment == .identity)
         #expect(preview.effectiveOrientation == .upright)
-        #expect(preview.sourcePixelWidth == Self.sourceWidth)
-        #expect(preview.sourcePixelHeight == Self.sourceHeight)
-        #expect(preview.pixelWidth == 4056)
-        #expect(preview.pixelHeight == 3040)
+        // The preview is reduced, and says what it was reduced from. The
+        // orientation is the identity here, so the viewed dimensions equal the
+        // preview source's.
+        #expect(preview.resolution.sourceWidth == Self.sourceWidth)
+        #expect(preview.resolution.sourceHeight == Self.sourceHeight)
+        #expect(preview.resolution.isReduced)
+        #expect(preview.resolution.method == .areaAverage)
+        #expect(preview.sourcePixelWidth == 2048)
+        #expect(preview.sourcePixelHeight == 1535)
+        #expect(preview.pixelWidth == 2048)
+        #expect(preview.pixelHeight == 1535)
 
         // The record says the stage ran, which is a different fact from the
         // arrangement it applied.
