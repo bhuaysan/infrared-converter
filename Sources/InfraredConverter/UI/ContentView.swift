@@ -23,13 +23,15 @@ struct ContentView: View {
                 Divider().frame(height: 18)
                 ChannelMixControl(documentState: documentState)
                 Divider().frame(height: 18)
+                ExposureControl(documentState: documentState)
+                Divider().frame(height: 18)
                 OrientationControls(documentState: documentState)
                 Spacer()
                 AdjustmentSaveStatus(documentState: documentState)
             }
             .padding(12)
         }
-        .frame(minWidth: 720, minHeight: 520)
+        .frame(minWidth: 1080, minHeight: 520)
     }
 
     @ViewBuilder
@@ -298,7 +300,14 @@ private struct RAWInspectorView: View {
                     processing.cameraToWorkingTransformSource
                 ))
                 row("Channel mix", Self.mixDescription(preview))
-                row("Exposure", String(format: "%+.2f EV", processing.exposureEV))
+                // The exposure the display stage applied, from its own
+                // provenance — not the slider's value. While a render is
+                // pending the slider is already ahead of this row, and that is
+                // correct: the controls show the requested state, the
+                // inspector describes the image on screen.
+                row("Exposure", String(
+                    format: "%+.2f EV", preview.renderedExposureEV == 0 ? 0 : preview.renderedExposureEV
+                ))
                 row("Out-of-range", Self.clippingDescription(processing))
                 row("Encoding", "sRGB, 8 bit, no alpha")
                 Text("""
@@ -595,6 +604,84 @@ private struct ChannelMixControl: View {
         .accessibilityLabel(
             "Channel mix: \(documentState.channelMixAdjustment.diagnosticDescription)"
         )
+        .disabled(!documentState.canAdjust)
+    }
+}
+
+
+/// The exposure control: a slider, the numeric value, and a reset.
+///
+/// It changes one field of `DocumentState`'s canonical adjustment record and
+/// nothing else. No view here multiplies a pixel, touches a `CGImage` or knows
+/// what `2^EV` is: each slider write becomes a `UserExposureAdjustment`, the
+/// workspace asks its coalescing renderer for the complete state, and the
+/// display stage applies it to the retained scene-linear preview.
+///
+/// ## What the control shows
+///
+/// The **requested** exposure, read from `DocumentState` — never the exposure
+/// of the last preview that happened to be delivered. A drag that outruns the
+/// renderer therefore does not snap the thumb back to an older value while a
+/// render is pending; the inspector, which reads the preview's provenance, is
+/// the place that describes the image actually on screen.
+///
+/// ## Values the slider cannot reach
+///
+/// A saved exposure beyond `ExposureControlScale.range` pins the thumb to the
+/// end stop and shows its real value in orange, and it is not changed until
+/// the user moves the slider. See `ExposureControlScale`.
+///
+/// Deliberately absent: tone curves, contrast, highlights, a histogram and
+/// automatic exposure.
+private struct ExposureControl: View {
+    let documentState: DocumentState
+
+    var body: some View {
+        let exposure = documentState.exposureAdjustment
+        let beyond = ExposureControlScale.isBeyondSlider(exposure)
+
+        HStack(spacing: 6) {
+            Slider(
+                value: Binding(
+                    get: { ExposureControlScale.sliderPosition(for: documentState.exposureAdjustment) },
+                    set: { value in
+                        if let requested = ExposureControlScale.adjustment(
+                            forSliderValue: value, current: documentState.exposureAdjustment
+                        ) {
+                            documentState.setExposure(requested)
+                        }
+                    }
+                ),
+                in: ExposureControlScale.range
+            ) {
+                Text("Exposure")
+            } minimumValueLabel: {
+                Text("−4").font(.caption2).foregroundStyle(.secondary)
+            } maximumValueLabel: {
+                Text("+4").font(.caption2).foregroundStyle(.secondary)
+            }
+            .frame(width: 240)
+            .help("Exposure compensation in stops, applied to linear light before display clipping")
+
+            Text(exposure.signedDescription)
+                .monospacedDigit()
+                .frame(minWidth: 64, alignment: .trailing)
+                .foregroundStyle(beyond ? AnyShapeStyle(.orange) : AnyShapeStyle(.primary))
+                .help(beyond
+                    ? "The saved exposure is beyond the slider's ±4 EV; it is kept as saved"
+                    : "The requested exposure")
+
+            Button(action: documentState.resetExposure) {
+                Label("Reset Exposure", systemImage: "arrow.counterclockwise")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .help("Return the exposure to 0 EV — the channel mix and orientation are unchanged")
+            .accessibilityLabel("Reset exposure to zero")
+            .disabled(exposure.isIdentity)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Exposure \(exposure.signedDescription)")
         .disabled(!documentState.canAdjust)
     }
 }
