@@ -72,10 +72,23 @@ import Observation
 /// made for is still the one the user wants — so a superseded render can no
 /// more write the sidecar than it can reach the screen.
 ///
+/// ## Two adjustments, one state
+///
+/// ```text
+/// orientation    the eight discrete arrangements, composed onto the file's own
+/// channelMix     the creative infrared remix: identity, red/blue swap, matrix
+/// ```
+///
+/// They are fields of one `ImageAdjustments` record, and every render request
+/// is that whole record. Nothing here renders "the new mix" or "the new
+/// rotation": a burst of changes to either control collapses to one newest
+/// complete state, and the sidecar receives that state or nothing. See
+/// `docs/decisions/0016-interactive-channel-mixer.md`.
+///
 /// ## A decision is tracked from the press to the disk
 ///
 /// ```text
-/// user presses rotate     adjustments updated, persistence = .pending
+/// user changes either     adjustments updated, persistence = .pending
 /// render succeeds         preview installed, sidecar written, = .saved
 /// render refuses          nothing written,                    = .renderRefused
 /// write refuses           preview kept,                       = .saveFailed
@@ -88,6 +101,8 @@ import Observation
 /// ## Leaving a file does not throw a decision away
 ///
 /// A render still running when the user opens the next file is not cancelled.
+/// What it persists is the complete state it was asked for — both adjustments,
+/// as one record.
 /// It is handed over: the document keeps its render slot, loses its screen,
 /// and may do exactly one thing more — write its own sidecar once its own
 /// render succeeds. Everything a decision could not survive is recorded in
@@ -206,6 +221,17 @@ final class DocumentState {
         let adjustments: ImageAdjustments
         let reason: Reason
 
+        /// The decision itself in one line, both adjustments named.
+        ///
+        /// Both, because the record that was not written is the complete state
+        /// and reporting only the rotation would describe the wrong loss.
+        var adjustmentDescription: String {
+            """
+            orientation \(adjustments.orientation.persistedToken), \
+            mix \(adjustments.channelMix.kind.rawValue)
+            """
+        }
+
         /// One line for a log or a tooltip.
         var reasonDescription: String {
             switch reason {
@@ -240,18 +266,22 @@ final class DocumentState {
         /// The retained scene-linear state every reprocess starts from, or
         /// `nil` when the owned pipeline could not get that far.
         ///
-        /// This is what makes an orientation change non-destructive: it is
-        /// the **unoriented** scene-linear image, so a new adjustment is
+        /// This is what makes an adjustment non-destructive: it is the
+        /// **unmixed, unoriented** scene-linear image, so a new adjustment is
         /// always applied to it rather than to whatever is currently on
-        /// screen.
+        /// screen. Its type says so — the mixer's output is a different one —
+        /// so a mix cannot be composed onto a previous mix even by mistake.
         ///
         /// It is held at **preview resolution**, not the sensor's. Nothing
         /// full-resolution is reachable from it: the mosaics, the
         /// camera-native image and the working-colour image all go out of
-        /// scope when `prepare` returns. A document therefore costs roughly
-        /// 36 MB rather than roughly 420 MB on the E-PL3 fixture, which is
+        /// scope when `prepare` returns. A document's application-owned
+        /// scene-linear buffer is therefore roughly 36 MB rather than the
+        /// roughly 420 MB chain it replaced on the E-PL3 fixture, which is
         /// what makes it acceptable for two documents to hold one each during
-        /// a file switch. See
+        /// a file switch. Those numbers are that buffer alone: `legacy`, the
+        /// preview `CGImage`s and the metadata are held beside it and are not
+        /// counted. See
         /// `docs/decisions/0015-reduced-resolution-preview.md`.
         ///
         /// It is retained even when the initial render refused it, because a
@@ -272,15 +302,17 @@ final class DocumentState {
         /// does not model prepares perfectly well and then refuses at the
         /// geometry stage — for every adjustment equally, because the
         /// effective orientation cannot be derived at all — so offering
-        /// rotate and flip there would offer a button that cannot work.
+        /// rotate, flip or a channel mix there would offer a control that
+        /// cannot work. One fact gates all of them, for that reason.
         ///
         /// It is a stored fact rather than a reading of `owned` for a reason:
         /// a render that fails *after* the file is open must not disable the
         /// controls, or the user could not undo the adjustment that caused it.
         let isAdjustable: Bool
 
-        /// The user's editing decisions: what the sidecar held when the file
-        /// was opened, plus whatever has been asked for since.
+        /// The user's editing decisions — orientation and channel mix
+        /// together: what the sidecar held when the file was opened, plus
+        /// whatever has been asked for since.
         var adjustments: ImageAdjustments
 
         /// The application-owned pipeline's result, or the reason it failed.
@@ -505,8 +537,22 @@ final class DocumentState {
         return loaded.adjustments.orientation
     }
 
-    /// Whether the orientation controls can do anything right now.
-    var canAdjustOrientation: Bool {
+    /// The user's creative channel mix for the open file, or `.identity` when
+    /// nothing is open.
+    var channelMixAdjustment: UserChannelMixAdjustment {
+        guard case .decoded(let loaded) = status else { return .identity }
+        return loaded.adjustments.channelMix
+    }
+
+    /// Whether the adjustment controls can do anything right now.
+    ///
+    /// One fact, not one per control, because the thing it depends on is one
+    /// fact: whether the owned pipeline rendered this file at least once. A
+    /// file that prepares and then refuses at the geometry stage refuses for
+    /// **every** adjustment equally — the effective orientation cannot be
+    /// derived at all — so no control may be offered, not merely the rotate
+    /// ones. See `Loaded.isAdjustable`.
+    var canAdjust: Bool {
         guard case .decoded(let loaded) = status else { return false }
         return loaded.isAdjustable
     }
@@ -710,7 +756,7 @@ final class DocumentState {
         Log.ui.error(
             """
             Left \(unsaved.url.lastPathComponent, privacy: .public) with an unsaved \
-            adjustment \(unsaved.adjustments.orientation.persistedToken, privacy: .public): \
+            adjustment \(unsaved.adjustmentDescription, privacy: .public): \
             \(unsaved.reasonDescription, privacy: .public)
             """
         )
@@ -929,52 +975,98 @@ final class DocumentState {
     /// Not "make upright": a file whose metadata records a rotation gets that
     /// rotation back. The reset is itself a decision, and it is saved like any
     /// other once it has rendered.
+    ///
+    /// It resets the **orientation** and nothing else. The creative channel
+    /// mix is a separate decision and is left exactly as it was; there is
+    /// deliberately no "reset everything" here, because a control that
+    /// silently discarded a rendering choice along with a rotation would be
+    /// the least recoverable button in the application.
     func resetOrientation() { adjustOrientation { _ in .reset } }
 
-    /// Applies a transformation to the current adjustment and re-renders.
+    /// Applies a transformation to the current orientation correction and
+    /// re-renders.
     ///
     /// The new adjustment is the **canonical composition** of the old one and
     /// the operation, so pressing a button repeatedly never accumulates a
-    /// history — and the render that follows always starts from the retained,
-    /// unoriented channel-mixed image, never from what is on screen.
+    /// history.
+    private func adjustOrientation(
+        _ transform: (UserOrientationAdjustment) -> UserOrientationAdjustment
+    ) {
+        adjust { $0.orientation = transform($0.orientation) }
+    }
+
+    // MARK: - Channel-mix adjustment
+
+    /// Chooses the creative infrared channel mix and re-renders.
+    ///
+    /// The mix is a **state, not an operation**: this replaces whatever was
+    /// asked for before rather than composing onto it, which is the editing
+    /// model's half of "mixes never compose". The render that follows starts
+    /// from the retained pre-mix preview, so the new matrix is applied to the
+    /// working-colour values themselves and never to a previous mix's result.
+    ///
+    /// Asking for the mix that is already in force does nothing at all — no
+    /// render, no write, no change of persistence state.
+    ///
+    /// - Parameter mix: the decision. `.identity` is a real choice and is
+    ///   saved like any other; it is the mix control's way of undoing a swap,
+    ///   and it does not touch the orientation.
+    func setChannelMix(_ mix: UserChannelMixAdjustment) {
+        adjust { $0.channelMix = mix }
+    }
+
+    // MARK: - Requesting a render of one complete state
+
+    /// Records a change to the canonical adjustment state and asks for a
+    /// render of **the whole of it**.
+    ///
+    /// The one path every control goes through, and the reason there is one:
+    /// a render request is always one complete `ImageAdjustments`, never a
+    /// field. A user who swaps the channels and immediately rotates has asked
+    /// for one state, not two operations to be applied in order, so the burst
+    /// collapses to that state and nothing in between is rendered, installed
+    /// or written.
     ///
     /// Nothing is saved here, and the state says so: it becomes `.pending`
     /// until a render of exactly this adjustment has been delivered. A state
     /// that has not been rendered is not known to be renderable, and writing
     /// it would let a broken state be restored automatically on the next
     /// launch.
-    private func adjustOrientation(
-        _ transform: (UserOrientationAdjustment) -> UserOrientationAdjustment
-    ) {
+    private func adjust(_ change: (inout ImageAdjustments) -> Void) {
         guard case .decoded(var loaded) = status, loaded.isAdjustable,
               let renderer
         else { return }
 
-        let updated = transform(loaded.adjustments.orientation)
-        guard updated != loaded.adjustments.orientation else { return }
+        var updated = loaded.adjustments
+        change(&updated)
+        guard updated != loaded.adjustments else { return }
 
         // Record the intent immediately, so the controls reflect what the
-        // user pressed even while the render is still running — and say, in
+        // user asked for even while the render is still running — and say, in
         // the same breath, that this state is not on disk. The state that was
         // saved a moment ago is no longer the state on screen, and reporting
         // it as saved would be a claim about the wrong adjustment.
-        loaded.adjustments.orientation = updated
+        loaded.adjustments = updated
         loaded.persistence = .pending
         status = .decoded(loaded)
 
-        // One slot, newest state wins. A burst of presses produces one
+        // One slot, newest state wins. A burst of changes produces one
         // cancellation and one render, not a queue.
         renderer.request(loaded.adjustments)
     }
 
     /// Builds the single render slot for a freshly opened file.
     ///
-    /// The closure captures that file's retained, **unoriented**,
+    /// The closure captures that file's retained, **unmixed and unoriented**,
     /// preview-resolution scene-linear source, so every re-render starts from
     /// it rather than from whatever is on screen. Nothing upstream reruns: no
-    /// reduction, no channel mix, no camera conversion, no demosaic, no white
-    /// balance, no decode — and nothing full-resolution is reachable through
-    /// the capture, which is what keeps the closure cheap to hold.
+    /// reduction, no camera conversion, no demosaic, no white balance, no
+    /// decode — and nothing full-resolution is reachable through the capture,
+    /// which is what keeps the closure cheap to hold.
+    ///
+    /// The creative mix is inside the closure rather than above it, which is
+    /// the whole of this milestone: a change of mix is a re-render of this
+    /// source, not a re-preparation of the file.
     ///
     /// It also captures the file's URL and the generation of the open it
     /// belongs to. Those two are what let a delivery find its way back to the

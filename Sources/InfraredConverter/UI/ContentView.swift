@@ -21,6 +21,8 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 Button("Open RAW…", action: openRAW)
                 Divider().frame(height: 18)
+                ChannelMixControl(documentState: documentState)
+                Divider().frame(height: 18)
                 OrientationControls(documentState: documentState)
                 Spacer()
                 AdjustmentSaveStatus(documentState: documentState)
@@ -295,7 +297,7 @@ private struct RAWInspectorView: View {
                 row("Camera → working", Self.transformDescription(
                     processing.cameraToWorkingTransformSource
                 ))
-                row("Channel mix", Self.mixDescription(processing.mixSource))
+                row("Channel mix", Self.mixDescription(preview))
                 row("Exposure", String(format: "%+.2f EV", processing.exposureEV))
                 row("Out-of-range", Self.clippingDescription(processing))
                 row("Encoding", "sRGB, 8 bit, no alpha")
@@ -385,12 +387,20 @@ private struct RAWInspectorView: View {
         }
     }
 
-    private static func mixDescription(_ source: IRChannelMixSource) -> String {
-        switch source {
-        case .identity: return "Identity (no remap)"
-        case .redBlueSwap: return "Red/blue swap"
-        case .explicit: return "Explicit matrix"
+    /// What the creative stage applied, and that a person chose it.
+    ///
+    /// Read from the preview's own provenance, so the panel cannot describe a
+    /// mix the renderer did not apply. The wording says "creative" because
+    /// this row sits two lines below a colour transform and is emphatically
+    /// not one.
+    private static func mixDescription(_ preview: WorkspacePreview) -> String {
+        let applied: String
+        switch preview.channelMix.source {
+        case .identity: applied = "Identity (no remap)"
+        case .redBlueSwap: applied = "Red/blue swap"
+        case .explicit: applied = "Explicit matrix"
         }
+        return "\(applied) — creative, your choice"
     }
 
     /// How much the display-range clipping destroyed, as a count rather than
@@ -488,6 +498,7 @@ private struct OrientationControls: View {
 
     var body: some View {
         HStack(spacing: 8) {
+            Group {
             Button(action: documentState.rotateOrientationLeft) {
                 Label("Rotate Left", systemImage: "rotate.left")
             }
@@ -511,15 +522,80 @@ private struct OrientationControls: View {
             }
             .help("Exchange top and bottom")
             .accessibilityLabel("Flip vertically")
+            }
+            .labelStyle(.iconOnly)
 
-            Button("Reset", action: documentState.resetOrientation)
+            // Named for what it resets. There is a second adjustment now, and
+            // a button labelled "Reset" beside a channel-mix control would
+            // read as resetting both — which it deliberately does not do.
+            Button("Reset Orientation", action: documentState.resetOrientation)
                 .help("Return to the orientation the file records — not necessarily upright")
                 .accessibilityLabel("Reset orientation to the file's own")
                 .disabled(documentState.orientationAdjustment.isIdentity)
         }
-        .labelStyle(.iconOnly)
         .buttonStyle(.bordered)
-        .disabled(!documentState.canAdjustOrientation)
+        .disabled(!documentState.canAdjust)
+    }
+}
+
+
+/// The creative infrared channel-mix control.
+///
+/// Two choices, because there are two the project can honestly offer: traverse
+/// the creative stage and remap nothing, or perform the canonical infrared
+/// operation and exchange red with blue. Neither is a calibration and the
+/// control does not suggest otherwise.
+///
+/// It changes one field of `DocumentState`'s canonical adjustment record and
+/// nothing else. No view here multiplies a matrix, touches a pixel buffer or
+/// knows that `IRChannelMix` exists: the workspace re-renders the retained
+/// pre-mix preview with whatever state it now holds.
+///
+/// ## Why a menu rather than a segmented picker
+///
+/// Because the adjustment has a third state the workspace can load and this
+/// milestone deliberately cannot author: an explicit 3x3 matrix, which a
+/// sidecar may carry. A menu shows the current state in its label whatever it
+/// is, where a segmented control with no matching segment would simply render
+/// nothing selected and say the file has no mix.
+///
+/// Deliberately absent: a matrix editor, per-channel percentage sliders,
+/// presets, filter profiles, and anything that would pick a mix for the user.
+/// A freshly opened file with no saved decision is `.identity`, and it stays
+/// that way until a person chooses otherwise — nothing here inspects the
+/// photograph to guess whether it is infrared.
+private struct ChannelMixControl: View {
+    let documentState: DocumentState
+
+    var body: some View {
+        Menu {
+            ForEach(UserChannelMixAdjustment.selectableCases, id: \.kind) { mix in
+                Button {
+                    documentState.setChannelMix(mix)
+                } label: {
+                    // The current state is marked as well as shown in the
+                    // label, so the menu says which of the two is in force
+                    // rather than only what can be picked.
+                    if mix == documentState.channelMixAdjustment {
+                        Label(mix.shortDescription, systemImage: "checkmark")
+                    } else {
+                        Text(mix.shortDescription)
+                    }
+                }
+            }
+        } label: {
+            Label(
+                documentState.channelMixAdjustment.shortDescription,
+                systemImage: "circle.lefthalf.filled"
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Creative infrared channel mix — not a colour calibration")
+        .accessibilityLabel(
+            "Channel mix: \(documentState.channelMixAdjustment.diagnosticDescription)"
+        )
+        .disabled(!documentState.canAdjust)
     }
 }
 

@@ -39,7 +39,7 @@ struct WorkspaceOrientationAdjustmentTests {
         let preview = try Self.preview(state)
 
         #expect(state.orientationAdjustment == .identity)
-        #expect(state.canAdjustOrientation)
+        #expect(state.canAdjust)
         #expect(preview.userOrientationAdjustment == .identity)
         #expect(preview.sourceOrientation == .upright)
         #expect(preview.effectiveOrientation == .upright)
@@ -337,7 +337,7 @@ struct WorkspaceOrientationAdjustmentTests {
         // orientation from a flip this application cannot read, so the
         // controls stay inert rather than offering a button that must fail.
         #expect(!loaded.isAdjustable)
-        #expect(!state.canAdjustOrientation)
+        #expect(!state.canAdjust)
         #expect(state.orientationAdjustment.isIdentity)
     }
 }

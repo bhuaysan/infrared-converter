@@ -9,22 +9,29 @@ import Foundation
 /// the store, the decoder and the render seam all append to is the smallest
 /// thing that can do that.
 final class WorkspaceEventLog: @unchecked Sendable {
+    /// Every event carries the **complete** adjustment record, not one field
+    /// of it.
+    ///
+    /// That is the whole point of the log now that there are two adjustments:
+    /// a render request is one complete state, so a log that recorded only the
+    /// orientation could not tell "swap, then rotate" from "rotate" and could
+    /// not show that no intermediate state was rendered or written.
     enum Event: Equatable {
         /// The store was asked for a file's saved adjustments, and what it
         /// answered.
-        case loadedAdjustments(UserOrientationAdjustment?)
+        case loadedAdjustments(ImageAdjustments?)
         /// The store refused.
         case adjustmentLoadRefused
         /// The expensive half of the pipeline ran.
         case decodedMosaic
-        /// A full render ran, for this adjustment.
-        case rendered(UserOrientationAdjustment)
-        /// A render refused, for this adjustment.
-        case renderRefused(UserOrientationAdjustment)
-        /// The store was asked to write this adjustment.
-        case saved(UserOrientationAdjustment)
+        /// A full render ran, for this complete state.
+        case rendered(ImageAdjustments)
+        /// A render refused, for this complete state.
+        case renderRefused(ImageAdjustments)
+        /// The store was asked to write this complete state.
+        case saved(ImageAdjustments)
         /// The store refused to write it.
-        case saveRefused(UserOrientationAdjustment)
+        case saveRefused(ImageAdjustments)
     }
 
     private let lock = NSLock()
@@ -44,13 +51,24 @@ final class WorkspaceEventLog: @unchecked Sendable {
 
     /// Every render that actually ran, in order. One element after an open is
     /// the whole "no double render" claim.
-    var renders: [UserOrientationAdjustment] {
+    var renders: [ImageAdjustments] {
         all.compactMap { if case .rendered(let state) = $0 { return state } else { return nil } }
     }
 
     /// Every adjustment that reached the store, in order.
-    var saves: [UserOrientationAdjustment] {
+    var saves: [ImageAdjustments] {
         all.compactMap { if case .saved(let state) = $0 { return state } else { return nil } }
+    }
+
+    /// The orientation term of every render, for the suites whose subject is
+    /// geometry alone.
+    var renderedOrientations: [UserOrientationAdjustment] {
+        renders.map(\.orientation)
+    }
+
+    /// The orientation term of every save.
+    var savedOrientations: [UserOrientationAdjustment] {
+        saves.map(\.orientation)
     }
 
     var decodeCount: Int {
@@ -117,11 +135,20 @@ final class StubImageAdjustmentStore: ImageAdjustmentStore, @unchecked Sendable 
     /// invisible in the first and obvious in the second.
     private(set) var writes: [(url: URL, adjustments: ImageAdjustments)] = []
 
-    /// The writes, as a comparable list of file name and orientation token.
+    /// The writes, as a comparable list of file name and complete state.
+    ///
+    /// Both adjustments, because a write is the whole record: a summary that
+    /// named only the orientation would show two different complete states as
+    /// the same string.
     var writeSummary: [String] {
         lock.lock()
         defer { lock.unlock() }
-        return writes.map { "\($0.url.lastPathComponent):\($0.adjustments.orientation.persistedToken)" }
+        return writes.map {
+            """
+            \($0.url.lastPathComponent):\($0.adjustments.orientation.persistedToken)\
+            :\($0.adjustments.channelMix.kind.rawValue)
+            """
+        }
     }
 
     func load(for url: URL) throws(ImageAdjustmentPersistenceError) -> ImageAdjustments? {
@@ -140,7 +167,7 @@ final class StubImageAdjustmentStore: ImageAdjustmentStore, @unchecked Sendable 
             defer { lock.unlock() }
             return stored[url]
         }()
-        log.append(.loadedAdjustments(adjustments?.orientation))
+        log.append(.loadedAdjustments(adjustments))
         return adjustments
     }
 
@@ -153,7 +180,7 @@ final class StubImageAdjustmentStore: ImageAdjustmentStore, @unchecked Sendable 
             return saveRefusal
         }()
         if let refusal {
-            log.append(.saveRefused(adjustments.orientation))
+            log.append(.saveRefused(adjustments))
             throw refusal
         }
 
@@ -161,7 +188,7 @@ final class StubImageAdjustmentStore: ImageAdjustmentStore, @unchecked Sendable 
         stored[url] = adjustments
         writes.append((url: url, adjustments: adjustments))
         lock.unlock()
-        log.append(.saved(adjustments.orientation))
+        log.append(.saved(adjustments))
     }
 }
 
@@ -178,19 +205,41 @@ struct RecordingRender: Sendable {
     }
 
     let log: WorkspaceEventLog
-    /// Adjustments this render refuses. Everything else renders normally.
-    var refusing: [UserOrientationAdjustment] = []
+    /// Which complete states this render refuses. Everything else renders
+    /// normally.
+    ///
+    /// A predicate over the **whole** adjustment record, because that is what
+    /// a render is asked for. `refusing(orientations:)` spells the common
+    /// case for a suite whose subject is geometry.
+    var refuses: @Sendable (ImageAdjustments) -> Bool = { _ in false }
+
+    init(log: WorkspaceEventLog) {
+        self.log = log
+    }
+
+    init(log: WorkspaceEventLog, refusing orientations: [UserOrientationAdjustment]) {
+        self.log = log
+        self.refuses = { orientations.contains($0.orientation) }
+    }
+
+    init(
+        log: WorkspaceEventLog,
+        refuses: @escaping @Sendable (ImageAdjustments) -> Bool
+    ) {
+        self.log = log
+        self.refuses = refuses
+    }
 
     var render: DocumentState.PreviewRender {
         let log = self.log
-        let refusing = self.refusing
+        let refuses = self.refuses
         return { source, adjustments, cancellation in
-            if refusing.contains(adjustments.orientation) {
-                log.append(.renderRefused(adjustments.orientation))
+            if refuses(adjustments) {
+                log.append(.renderRefused(adjustments))
                 throw Refused()
             }
             let preview = try DocumentState.pipelineRender(source, adjustments, cancellation)
-            log.append(.rendered(adjustments.orientation))
+            log.append(.rendered(adjustments))
             return preview
         }
     }
@@ -248,41 +297,67 @@ final class GatedRender: @unchecked Sendable {
     }
 
     /// Deliberately far longer than anything healthy. It exists so a genuine
-    /// deadlock fails the run instead of hanging it.
-    static let waitLimit = DispatchTimeInterval.seconds(600)
+    /// deadlock fails the run instead of hanging it, and it is thirty minutes
+    /// rather than ten for the reason `RenderProbe.waitLimit` gives: a full
+    /// run with the RAW fixture takes minutes, so a guard of the same order
+    /// reports contention as a deadlock.
+    static let waitLimit = DispatchTimeInterval.seconds(1800)
 
     private let lock = NSLock()
-    private var holding: [UserOrientationAdjustment]
-    private var refusing: [UserOrientationAdjustment]
+    private let holds: @Sendable (ImageAdjustments) -> Bool
+    private let refuses: @Sendable (ImageAdjustments) -> Bool
     private let didStart = DispatchSemaphore(value: 0)
     private let release = DispatchSemaphore(value: 0)
     let log: WorkspaceEventLog
 
+    /// Gates and refusals are predicates over the **complete** adjustment
+    /// record, because that is what a render is asked for.
     init(
         log: WorkspaceEventLog,
-        holding: [UserOrientationAdjustment] = [],
-        refusing: [UserOrientationAdjustment] = []
+        holds: @escaping @Sendable (ImageAdjustments) -> Bool,
+        refuses: @escaping @Sendable (ImageAdjustments) -> Bool
     ) {
         self.log = log
-        self.holding = holding
-        self.refusing = refusing
+        self.holds = holds
+        self.refuses = refuses
+    }
+
+    /// A gate with no refusals.
+    convenience init(
+        log: WorkspaceEventLog,
+        holds: @escaping @Sendable (ImageAdjustments) -> Bool
+    ) {
+        self.init(log: log, holds: holds, refuses: { _ in false })
+    }
+
+    /// The common case for a suite whose subject is geometry: gate or refuse
+    /// by the orientation term alone.
+    convenience init(
+        log: WorkspaceEventLog,
+        holding orientations: [UserOrientationAdjustment] = [],
+        refusing refusals: [UserOrientationAdjustment] = []
+    ) {
+        self.init(
+            log: log,
+            holds: { orientations.contains($0.orientation) },
+            refuses: { refusals.contains($0.orientation) }
+        )
     }
 
     var render: DocumentState.PreviewRender {
         { [self] source, adjustments, cancellation in
-            let state = adjustments.orientation
-            if withLock({ holding.contains(state) }) {
+            if withLock({ holds(adjustments) }) {
                 didStart.signal()
                 guard release.wait(timeout: .now() + Self.waitLimit) == .success else {
                     throw Stalled()
                 }
             }
-            if withLock({ refusing.contains(state) }) {
-                log.append(.renderRefused(state))
+            if withLock({ refuses(adjustments) }) {
+                log.append(.renderRefused(adjustments))
                 throw Refused()
             }
             let preview = try DocumentState.pipelineRender(source, adjustments, cancellation)
-            log.append(.rendered(state))
+            log.append(.rendered(adjustments))
             return preview
         }
     }

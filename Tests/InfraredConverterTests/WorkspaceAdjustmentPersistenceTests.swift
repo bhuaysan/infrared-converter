@@ -86,7 +86,9 @@ struct WorkspaceAdjustmentPersistenceTests {
 
         // The absence of a sidecar is not a failure, and the store was still
         // consulted before anything was decoded.
-        #expect(log.all == [.loadedAdjustments(nil), .decodedMosaic, .rendered(.identity)])
+        #expect(log.all == [
+            .loadedAdjustments(nil), .decodedMosaic, .rendered(.none)
+        ])
         // Opening writes nothing. Nothing was decided.
         #expect(store.saved(for: Self.url) == nil)
         if case .unchanged = state.adjustmentPersistence {} else {
@@ -110,9 +112,9 @@ struct WorkspaceAdjustmentPersistenceTests {
         // first, the expensive decode came second, and the only render that
         // ever ran was the one with the saved adjustment.
         #expect(log.all == [
-            .loadedAdjustments(.quarterTurnRight),
+            .loadedAdjustments(ImageAdjustments(orientation: .quarterTurnRight)),
             .decodedMosaic,
-            .rendered(.quarterTurnRight)
+            .rendered(ImageAdjustments(orientation: .quarterTurnRight))
         ])
 
         let preview = try Self.preview(state)
@@ -122,7 +124,7 @@ struct WorkspaceAdjustmentPersistenceTests {
         #expect(preview.pixelWidth == 6)
         #expect(preview.pixelHeight == 8)
         #expect(state.orientationAdjustment == .quarterTurnRight)
-        #expect(state.canAdjustOrientation)
+        #expect(state.canAdjust)
     }
 
     /// The strongest form of "no identity image was ever on screen": there was
@@ -137,11 +139,11 @@ struct WorkspaceAdjustmentPersistenceTests {
         state.open(Self.url)
         try await Self.waitUntilSettled(state)
 
-        #expect(log.renders == [.halfTurn])
-        #expect(log.renders.count == 1)
+        #expect(log.renderedOrientations == [.halfTurn])
+        #expect(log.renderedOrientations.count == 1)
         // The preparation still happens exactly once, as it always did.
         #expect(log.decodeCount == 1)
-        #expect(!log.all.contains(.rendered(.identity)))
+        #expect(!log.all.contains(.rendered(.none)))
     }
 
     /// And the pixels are the saved state's pixels — bit for bit the same as
@@ -194,8 +196,9 @@ struct WorkspaceAdjustmentPersistenceTests {
         }
         #expect(state.adjustmentSaveFailure == nil)
         // The save follows the render, never precedes it.
-        let renderIndex = try #require(log.firstIndex { $0 == .rendered(.quarterTurnRight) })
-        let saveIndex = try #require(log.firstIndex { $0 == .saved(.quarterTurnRight) })
+        let turned = ImageAdjustments(orientation: .quarterTurnRight)
+        let renderIndex = try #require(log.firstIndex { $0 == .rendered(turned) })
+        let saveIndex = try #require(log.firstIndex { $0 == .saved(turned) })
         #expect(renderIndex < saveIndex)
     }
 
@@ -224,7 +227,7 @@ struct WorkspaceAdjustmentPersistenceTests {
         // A reset is a decision, so it is written like any other. Identity is
         // stored, not implied by an absent record.
         #expect(store.saved(for: Self.url) != nil)
-        #expect(log.saves == [.quarterTurnRight, .halfTurn, .verticalFlip, .identity])
+        #expect(log.savedOrientations == [.quarterTurnRight, .halfTurn, .verticalFlip, .identity])
     }
 
     // MARK: - E. Superseded renders never persist
@@ -251,11 +254,11 @@ struct WorkspaceAdjustmentPersistenceTests {
         // Let any superseded render finish unwinding and try to deliver.
         try await Task.sleep(nanoseconds: 50_000_000)
 
-        #expect(log.saves == [settled])
+        #expect(log.savedOrientations == [settled])
         #expect(store.saved(for: Self.url)?.orientation == settled)
         // Intermediate states were requested and are nowhere on disk.
-        #expect(!log.saves.contains(.quarterTurnRight))
-        #expect(!log.saves.contains(.halfTurn))
+        #expect(!log.savedOrientations.contains(.quarterTurnRight))
+        #expect(!log.savedOrientations.contains(.halfTurn))
     }
 
     // MARK: - F. A failed re-render persists nothing
@@ -280,11 +283,11 @@ struct WorkspaceAdjustmentPersistenceTests {
         // The state that could not be rendered was not written. Restoring it
         // on the next launch would restore a broken workspace.
         #expect(store.saved(for: Self.url)?.orientation == .quarterTurnRight)
-        #expect(log.saves == [.quarterTurnRight])
+        #expect(log.savedOrientations == [.quarterTurnRight])
         // The user's intent is still recorded in memory; only the durable copy
         // lags, and it lags on the last state that actually worked.
         #expect(state.orientationAdjustment == .halfTurn)
-        #expect(state.canAdjustOrientation)
+        #expect(state.canAdjust)
     }
 
     // MARK: - Render succeeded, save failed
@@ -322,7 +325,7 @@ struct WorkspaceAdjustmentPersistenceTests {
         }
         #expect(failure.errorDescription?.isEmpty == false)
         #expect(store.saved(for: Self.url) == nil)
-        #expect(log.saves.isEmpty)
+        #expect(log.savedOrientations.isEmpty)
     }
 
     // MARK: - G. An unreadable sidecar
@@ -360,13 +363,13 @@ struct WorkspaceAdjustmentPersistenceTests {
         // No identity image was rendered, and the expensive decode never ran:
         // the refusal happens before any of it.
         #expect(log.all == [.adjustmentLoadRefused])
-        #expect(log.renders.isEmpty)
+        #expect(log.renderedOrientations.isEmpty)
         #expect(log.decodeCount == 0)
         // Nothing was repaired, reset or written over.
-        #expect(log.saves.isEmpty)
+        #expect(log.savedOrientations.isEmpty)
         #expect(store.saved(for: Self.url) == nil)
         // And the controls offer nothing, because nothing is open.
-        #expect(!state.canAdjustOrientation)
+        #expect(!state.canAdjust)
         #expect(state.selectedFileURL == Self.url)
     }
 
@@ -397,7 +400,7 @@ struct WorkspaceAdjustmentPersistenceTests {
         // rotation is exactly as it was loaded.
         #expect(store.saved(for: Self.otherURL)?.orientation == .verticalFlip)
         #expect(store.saved(for: Self.url)?.orientation == .quarterTurnRight)
-        #expect(log.saves == [.verticalFlip])
+        #expect(log.savedOrientations == [.verticalFlip])
     }
 
     // MARK: - End to end, through the real sidecar file

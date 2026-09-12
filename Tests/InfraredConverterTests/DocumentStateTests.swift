@@ -202,7 +202,7 @@ struct DocumentStateTests {
         // owned pipeline rendered this source rather than merely prepared it.
         #expect(loaded.isAdjustable)
         #expect(loaded.adjustableSource != nil)
-        #expect(state.canAdjustOrientation)
+        #expect(state.canAdjust)
     }
 
     @Test("A file whose LibRaw reference is missing can still be corrected")
@@ -254,7 +254,7 @@ struct DocumentStateTests {
         #expect(loaded.source == nil)
         #expect(!loaded.isAdjustable)
         #expect(loaded.adjustableSource == nil)
-        #expect(!state.canAdjustOrientation)
+        #expect(!state.canAdjust)
     }
 
     // MARK: - Prepare succeeds, the initial render fails
@@ -292,7 +292,7 @@ struct DocumentStateTests {
         // adjustment would refuse exactly as this one did.
         #expect(!loaded.isAdjustable)
         #expect(loaded.adjustableSource == nil)
-        #expect(!state.canAdjustOrientation)
+        #expect(!state.canAdjust)
     }
 
     @Test("Orientation controls do nothing on a file whose orientation cannot be read")
@@ -347,7 +347,7 @@ struct DocumentStateTests {
         #expect(reason.contains("LibRaw"))
 
         // And nothing claims the file is open.
-        #expect(!state.canAdjustOrientation)
+        #expect(!state.canAdjust)
     }
 
     // MARK: - Both fail

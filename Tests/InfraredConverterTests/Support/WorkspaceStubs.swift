@@ -172,21 +172,55 @@ enum WorkspaceStubs {
         image.dataProvider?.data as Data?
     }
 
-    /// Waits until the workspace has a rendered preview for `adjustment`.
+    /// Waits until the workspace has a rendered preview for `adjustment`,
+    /// matching the **orientation** term only.
     ///
     /// Polls rather than observes, because the render is detached and the
     /// point of the test is the settled result rather than the transition.
+    ///
+    /// For a suite whose subject is geometry this is the right question; for
+    /// one whose subject is the mix, or the pair, use the overload below. A
+    /// preview that matches the orientation may still carry an older mix.
     @MainActor
     static func waitForPreview(
         _ state: DocumentState,
         adjustment: UserOrientationAdjustment,
         timeout: Duration = .seconds(2)
     ) async throws -> WorkspacePreview? {
+        try await waitForPreview(state, timeout: timeout) {
+            $0.userOrientationAdjustment == adjustment
+        }
+    }
+
+    /// Waits until the workspace has a rendered preview for one **complete**
+    /// adjustment state: both the orientation and the channel mix.
+    ///
+    /// The mix is compared as the user's adjustment rather than as the
+    /// `IRChannelMix` the stage applied, so an `.explicit` matrix equal to a
+    /// built-in is not mistaken for the built-in.
+    @MainActor
+    static func waitForPreview(
+        _ state: DocumentState,
+        adjustments: ImageAdjustments,
+        timeout: Duration = .seconds(2)
+    ) async throws -> WorkspacePreview? {
+        try await waitForPreview(state, timeout: timeout) {
+            $0.userOrientationAdjustment == adjustments.orientation
+                && $0.channelMixAdjustment == adjustments.channelMix
+        }
+    }
+
+    @MainActor
+    private static func waitForPreview(
+        _ state: DocumentState,
+        timeout: Duration,
+        matching: (WorkspacePreview) -> Bool
+    ) async throws -> WorkspacePreview? {
         let attempts = max(1, Int(timeout / .milliseconds(5)))
         for _ in 0..<attempts {
             if case .decoded(let loaded) = state.status,
                case .rendered(let preview) = loaded.owned,
-               preview.userOrientationAdjustment == adjustment {
+               matching(preview) {
                 return preview
             }
             try await Task.sleep(nanoseconds: 5_000_000)
