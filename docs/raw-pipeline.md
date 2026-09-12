@@ -287,6 +287,13 @@ nothing full-resolution may be reachable from what a document retains — so the
 is the pre-mix type, the output is not, and nothing accepts the output back.
 See `docs/decisions/0016-interactive-channel-mixer.md`.
 
+Exposure joined the render half the same way. The display stage's
+`exposureEV` was always `0 EV` in the workspace; it is now the user's
+`ImageAdjustments.exposure`, passed unchanged, so the `× 2^EV` described under
+the display stage below acts on the unclamped mixed and oriented preview before
+the range policy. No stage was added and none moved. The sidecar is at schema
+version 3. See `docs/decisions/0017-interactive-exposure.md`.
+
 `ImageOrienter` takes an `IRChannelMixedProcessedRAWImage` (or a bare
 `IRChannelMixedRGBImage`, or a reduced `IRChannelMixedPreviewImage`) **and an
 explicit orientation** and returns an `OrientedProcessedRAWImage`, which keeps

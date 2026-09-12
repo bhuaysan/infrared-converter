@@ -59,7 +59,7 @@ IR channel mixing (user choice)  IRChannelMixedPreviewImage
 recorded orientation + user      OrientedSceneLinearRGBImage (viewing order)
 adjustment = effective
    ↓                             DisplayPreviewRenderer
-exposure, clip, sRGB, 8 bit      DisplayEncodedPreviewImage (display referred)
+EV (user), clip, sRGB, 8 bit     DisplayEncodedPreviewImage (display referred)
    ↓                             DisplayPreviewCGImageAdapter
 tagged sRGB                      CGImage → SwiftUI
 ```
@@ -120,6 +120,14 @@ records what it did and explicitly did not do.
   quantisation — in that order, with the settings named at the call site and
   the number of clipped samples recorded. It is deliberately **not** a tone
   pipeline.
+- **Exposure** is the third user adjustment and the first continuous one: a
+  slider (−4 to +4 EV, in twentieths of a stop) whose value the display stage
+  applies as `× 2^EV` to the unclamped scene-linear preview, before clipping.
+  It reruns only the mix, orientation and display stages; a drag is coalesced
+  by the same renderer as every other control, with no debounce. A sidecar may
+  hold any finite value from −10 to +10 EV; a value beyond the slider is shown
+  as saved and not altered. See
+  [ADR 0017](docs/decisions/0017-interactive-exposure.md).
 
 What the app-owned pipeline puts on screen, for a freshly opened file with no
 saved decisions: a centred neutral-patch white balance, bilinear demosaicing,
@@ -205,7 +213,7 @@ small labelled reference thumbnail, and is kept because comparing the two paths
 is useful while the owned one is young.
 
 Still absent: any tone control — contrast, curves, highlight recovery,
-saturation; a white-balance or exposure control; a channel-mix matrix editor;
+saturation, automatic exposure, a histogram; a white-balance control; a channel-mix matrix editor;
 arbitrary rotation, straightening and crop; undo/redo; filter and capture
 profiles, recipes and presets beyond the two built-in mixes, so a saved record
 belongs to one photograph and cannot be reused; export of any kind; a cache

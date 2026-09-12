@@ -348,7 +348,9 @@ The pipeline's "Display or Export Transform" step is now partly implemented, and
 
 Between the working representation and the creative channel mix there is now one more boundary, and it is the only stage in the pipeline that changes how many pixels there are: the **preview reduction**. It produces the reduced scene-linear rendition the interactive workspace holds, leaves the colour space, the linearity and the numeric range unchanged, and is deliberately absent from any full-resolution path. See `docs/decisions/0015-reduced-resolution-preview.md`.
 
-The creative channel mix that follows it is a **user adjustment**, not a fixed application choice. It is applied in the interactive half of the pipeline, to the retained **pre-mix** reduced preview — never composed onto a previous mix, and never baked into what a document holds open — and it forms one complete render state with the user's orientation correction. See `docs/decisions/0016-interactive-channel-mixer.md`.
+The creative channel mix that follows it is a **user adjustment**, not a fixed application choice. It is applied in the interactive half of the pipeline, to the retained **pre-mix** reduced preview — never composed onto a previous mix, and never baked into what a document holds open — and it forms one complete render state with the user's orientation correction and exposure. See `docs/decisions/0016-interactive-channel-mixer.md`.
+
+Exposure is the third user adjustment. It has no stage of its own: the display boundary's existing `× 2^EV`, in the linear domain and before the range policy, is given the user's value instead of a constant `0 EV`. It is not tone mapping. See `docs/decisions/0017-interactive-exposure.md`.
 
 Image orientation is a stage of its own, between the infrared channel/color transform and the display or export transform. It is **discrete geometry**: the eight standard orientations, applied as an exact permutation of whole pixels, lossless and with every component's bit pattern preserved. It is the only stage that changes where a pixel is, or that can exchange the image's width and height. See `docs/decisions/0009-application-owned-orientation.md`.
 
@@ -1077,7 +1079,7 @@ Examples:
 ```text
 docs/decisions/0001-use-libraw.md
 docs/decisions/0006-working-color-space.md
-docs/decisions/0017-metal-render-pipeline.md
+docs/decisions/0018-metal-render-pipeline.md
 ```
 
 The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`. The creative channel-mix stage that depends on it is `docs/decisions/0007-infrared-channel-mixing.md`, the display boundary that turns its result into pixels is `docs/decisions/0008-display-preview-rendering.md`, the geometry stage between them is `docs/decisions/0009-application-owned-orientation.md`, and the user-owned orientation adjustment composed onto that is `docs/decisions/0010-user-owned-orientation-adjustment.md`.
@@ -1088,7 +1090,9 @@ Where the user's adjustments are kept between sessions, how an open reads them b
 
 That the interactive workspace re-renders a **reduced** scene-linear rendition rather than the sensor's own, where in the pipeline it is reduced and why not a step either side of that, why a CFA mosaic is never resized, and what the RAW file plus its canonical adjustments still are, is `docs/decisions/0015-reduced-resolution-preview.md`.
 
-That the creative channel mix is a canonical **user adjustment**, that the retained preview is therefore pre-mix, that the mix moved from `prepare` to `render` and forms one complete render state with the orientation, that the reduced domain has two image types so mixes cannot compose, and that the sidecar schema is at version 2 with a tested version 1 migration, is `docs/decisions/0016-interactive-channel-mixer.md`.
+That the creative channel mix is a canonical **user adjustment**, that the retained preview is therefore pre-mix, that the mix moved from `prepare` to `render` and forms one complete render state with the orientation, that the reduced domain has two image types so mixes cannot compose, and that the sidecar schema is at version 2 with a tested version 1 migration, is `docs/decisions/0016-interactive-channel-mixer.md` — whose amendment makes schema dispatch exhaustive and refuses a built-in mix that carries a matrix.
+
+That exposure is the third canonical user adjustment and the first continuous one, that it is applied by the existing display-stage primitive as `× 2^EV` before the range policy, that its persisted range is `−10…+10 EV` while the slider offers `−4…+4`, that a slider drag is handled by the existing coalescing renderer with no debounce, and that the sidecar schema is at version 3 with tested version 1 and 2 migrations, is `docs/decisions/0017-interactive-exposure.md`.
 
 ADR numbers are assigned in the order decisions are actually made; do not reuse a number that is already taken.
 
@@ -1468,6 +1472,12 @@ Pause and reconsider when code begins to show any of these patterns:
 - schema-version decoding through a `default` or other catch-all case, rather than an exhaustive switch over a closed version type
 - a built-in persisted channel mix carrying matrix coefficients that are silently ignored
 - an image-affecting field added to an existing schema version with `decodeIfPresent` and a default
+- an exposure slider directly manipulating rendered pixels, a display buffer or a `CGImage`
+- a continuous adjustment bypassing the complete-state coalescing renderer, or given its own timer, debounce or queue
+- clamping scene-linear exposure results before the display stage's explicit range policy
+- first rendering `0 EV` and then restoring a saved exposure
+- a second exposure primitive beside `DisplayPreviewRenderer`'s, or exposure arithmetic in a view or in `DocumentState`
+- a saved exposure outside the slider's range silently changed because a control displayed it
 - full RAW decode on every slider move without measurement or caching rationale
 - every feature depending directly on LibRaw
 - direct Metal shader calls from UI views
