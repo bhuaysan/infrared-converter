@@ -135,9 +135,9 @@ struct WorkspaceReprocessingTests {
             Issue.record("Expected an adjustable file")
             return
         }
-        let originalValues = source.channelMixed.image.values
-        let originalWidth = source.channelMixed.image.width
-        let originalHeight = source.channelMixed.image.height
+        let originalValues = source.preview.values
+        let originalWidth = source.preview.width
+        let originalHeight = source.preview.height
 
         state.rotateOrientationRight()
         state.flipOrientationVertically()
@@ -151,9 +151,9 @@ struct WorkspaceReprocessingTests {
             Issue.record("Expected the source to still be retained")
             return
         }
-        #expect(settled.channelMixed.image.values == originalValues)
-        #expect(settled.channelMixed.image.width == originalWidth)
-        #expect(settled.channelMixed.image.height == originalHeight)
+        #expect(settled.preview.values == originalValues)
+        #expect(settled.preview.width == originalWidth)
+        #expect(settled.preview.height == originalHeight)
         // And the file's own recorded orientation is still a fact about the
         // file, not a record of what the user pressed.
         #expect(settled.metadata.geometry.flip == before.metadata.geometry.flip)

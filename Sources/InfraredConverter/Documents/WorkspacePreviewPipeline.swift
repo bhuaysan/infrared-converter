@@ -14,9 +14,11 @@ import Foundation
 ///     ↓  RAWDemosaicer (bilinear Bayer)
 /// DemosaicedRAWRGBImage
 ///     ↓  RAWWorkingColorConverter (.sensorRGBIdentityFalseColor)
-/// WorkingColorRGBImage
+/// WorkingColorRGBImage                       ← full resolution; released here
+///     ↓  SceneLinearPreviewReducer (area average, PreviewResolutionPolicy)
+/// SceneLinearPreviewImage                    ← reduced
 ///     ↓  IRChannelMixer (.identity)
-/// IRChannelMixedRGBImage                     ← retained, for reprocessing
+/// SceneLinearPreviewImage, mixed             ← retained, for reprocessing
 ///     ↓  EffectiveImageOrientation (metadata orientation + user adjustment)
 ///     ↓  ImageOrienter (one permutation, by the effective orientation)
 /// OrientedSceneLinearRGBImage
@@ -80,11 +82,36 @@ import Foundation
 /// None of this is a colour claim. The result is displayable, which is a
 /// strictly weaker property than correct.
 ///
+/// ## Two resolutions, and which one is the truth
+///
+/// ```text
+/// full resolution     the processing truth; transient, rebuilt from the file
+/// preview resolution  the interactive working representation; retained
+/// ```
+///
+/// `prepare` runs the RAW path at sensor resolution — decoding, normalising,
+/// white-balancing and demosaicing a mosaic is not something a smaller buffer
+/// can stand in for — and reduces exactly once, at the point where the working
+/// representation has just been established. What it keeps is the reduced
+/// image; the full-resolution chain goes out of scope with the call.
+///
+/// The canonical editing state is unchanged and is **not** these pixels:
+///
+/// ```text
+/// the RAW file  +  ImageAdjustments
+/// ```
+///
+/// The reduced preview is a cache derived from those two. A full-resolution
+/// render — for export, when there is one — will start from the file again. It
+/// will not, and must not, start here. See
+/// `docs/decisions/0015-reduced-resolution-preview.md`.
+///
 /// ## Cost
 ///
-/// Full resolution, on the CPU, with no cache and no reduced-resolution path:
-/// preview strategy is a later decision. Every call decodes and runs the whole
-/// chain, so this belongs off the main thread — `DocumentState` runs it there.
+/// On the CPU, with no cache. `prepare` is the expensive half and runs once
+/// per file; `render` is the interactive half and works on the reduced buffer
+/// only — on the E-PL3 fixture, 3.1 megapixels rather than 12.3. Both belong
+/// off the main thread, and `DocumentState` runs them there.
 struct WorkspacePreviewPipeline {
 
     /// The creative mix a freshly opened file gets. See the note above: the
@@ -94,6 +121,14 @@ struct WorkspacePreviewPipeline {
 
     /// The camera-to-working transform a freshly opened file gets.
     static let initialTransform = RAWCameraToWorkingColorTransform.sensorRGBIdentityFalseColor
+
+    /// How large the interactive preview a freshly opened file gets may be.
+    ///
+    /// A product decision like every other choice on this type, spelled out
+    /// here rather than defaulted inside a processing stage — and injectable,
+    /// so a test can ask for a limit small enough to exercise the reduction on
+    /// a modest image.
+    static let previewPolicy = PreviewResolutionPolicy.workspace
 
     /// The orientation a file gets when its metadata names one this
     /// application models, or `nil` when it does not.
@@ -180,7 +215,11 @@ struct WorkspacePreviewPipeline {
     /// - Throws: whatever the stage that failed reports —
     ///   `RAWDecodingError`, `RAWProcessingError` or `IRProcessingError`.
     ///   Nothing is caught and turned into a plausible-looking picture here.
-    func prepare(decoding url: URL, using decoder: RAWDecoder) throws -> Source {
+    func prepare(
+        decoding url: URL,
+        using decoder: RAWDecoder,
+        policy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy
+    ) throws -> Source {
         let decoded = try decoder.decodeMosaic(at: url)
         let normalized = try RAWMosaicNormalizer().process(decoded)
 
@@ -194,10 +233,28 @@ struct WorkspacePreviewPipeline {
         let balanced = try RAWWhiteBalancer().apply(to: normalized, estimate: estimate)
         let demosaiced = try RAWDemosaicer().demosaic(balanced)
         let working = try RAWWorkingColorConverter()
-            .convert(demosaiced, using: Self.initialTransform)
-        let mixed = try IRChannelMixer().apply(to: working, mix: Self.initialMix)
+            .convert(demosaiced.image, using: Self.initialTransform)
 
-        return Source(channelMixed: mixed, neutralPatch: region)
+        // The reduction point. Everything above this line is full resolution
+        // and every buffer it produced — the decoded mosaic, the normalised
+        // mosaic, the white-balanced mosaic, the camera-native image and the
+        // working-colour image — becomes unreachable when this function
+        // returns. Nothing below this line is ever full resolution again.
+        //
+        // The bare-image overloads are used deliberately from here on: the
+        // wrapper overloads exist to keep a stage's whole upstream chain
+        // reachable through `source`, which is exactly what must not survive
+        // into the retained value.
+        let reduced = try SceneLinearPreviewReducer()
+            .reduce(working, policy: policy)
+        let mixed = try IRChannelMixer().apply(to: reduced, mix: Self.initialMix)
+
+        return Source(
+            preview: mixed,
+            metadata: decoded.metadata,
+            url: url,
+            neutralPatch: region
+        )
     }
 
     /// Orients a prepared source and encodes it for display.
@@ -224,26 +281,27 @@ struct WorkspacePreviewPipeline {
             for: source.metadata, adjustments: adjustments
         )
         let oriented = try ImageOrienter().apply(
-            to: source.channelMixed,
+            to: source.preview,
             orientation: orientation.applied,
             cancellation: cancellation
         )
 
-        let preview = try DisplayPreviewRenderer().render(
+        let encoded = try DisplayPreviewRenderer().render(
             oriented, settings: Self.initialSettings, cancellation: cancellation
         )
 
         return WorkspacePreview(
-            image: try DisplayPreviewCGImageAdapter.makeCGImage(from: preview.image),
-            processing: preview.processing,
+            image: try DisplayPreviewCGImageAdapter.makeCGImage(from: encoded),
+            processing: encoded.processing,
             neutralPatch: source.neutralPatch,
             orientationProvenance: OrientationProvenance(
-                orientation: orientation, stage: oriented.image.processing
+                orientation: orientation, stage: oriented.processing
             ),
-            sourcePixelWidth: oriented.source.image.width,
-            sourcePixelHeight: oriented.source.image.height,
-            pixelWidth: preview.image.width,
-            pixelHeight: preview.image.height
+            resolution: source.resolution,
+            sourcePixelWidth: source.preview.width,
+            sourcePixelHeight: source.preview.height,
+            pixelWidth: encoded.width,
+            pixelHeight: encoded.height
         )
     }
 
@@ -255,10 +313,11 @@ struct WorkspacePreviewPipeline {
         decoding url: URL,
         using decoder: RAWDecoder,
         adjustments: ImageAdjustments = .none,
+        policy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy,
         cancellation: ProcessingCancellation = .none
     ) throws -> WorkspacePreview {
         try render(
-            prepare(decoding: url, using: decoder),
+            prepare(decoding: url, using: decoder, policy: policy),
             adjustments: adjustments,
             cancellation: cancellation
         )
@@ -266,42 +325,67 @@ struct WorkspacePreviewPipeline {
 }
 
 extension WorkspacePreviewPipeline {
-    /// The scene-linear state a workspace holds on to so that a change of
-    /// orientation does not decode the file again.
+    /// The reduced scene-linear state a workspace holds on to so that a change
+    /// of adjustment does not decode the file again.
     ///
-    /// ## Why this is retained, and what it costs
+    /// ## What is retained, and what is not
     ///
-    /// Non-destructive reprocessing needs the **unoriented** channel-mixed
+    /// Non-destructive reprocessing needs the **unoriented** scene-linear
     /// image: an adjustment must be applied to it, never to whatever is
-    /// currently on screen. Keeping it is the alternative to a full RAW
-    /// decode on every button press, which the project's own architecture
-    /// notes name as a red flag.
+    /// currently on screen. What it does not need is that image at sensor
+    /// resolution, and it does not need the chain that produced it.
     ///
-    /// It is not free, and the cost should be stated rather than discovered.
-    /// `IRChannelMixedProcessedRAWImage` reaches the working-colour image,
-    /// the camera-native image and both mosaics through its `source` chain,
-    /// so a 4056 × 3040 frame retains roughly half a gigabyte of Float32
-    /// buffers for as long as the file is open. Reduced-resolution previews,
-    /// caching and eviction are all undecided; this is the simple thing, and
-    /// it is measured by nothing yet.
+    /// This type therefore holds exactly one buffer, at preview resolution,
+    /// and reaches nothing upstream. The mosaics, the camera-native image and
+    /// the full-resolution working-colour image are unreachable from here by
+    /// construction: `prepare` uses the bare-image overloads after the
+    /// reduction precisely so that no `source` chain survives into this value.
+    ///
+    /// On the E-PL3 fixture that is the difference between roughly 420 MB of
+    /// Float32 buffers held open for as long as the file is open and roughly
+    /// 36 MB.
+    ///
+    /// ## Why that is safe
+    ///
+    /// Because these pixels are not the document. The canonical editing state
+    /// is the RAW file plus `ImageAdjustments`, and this is a cache derived
+    /// from the pair — cheap to throw away, and rebuildable by opening the
+    /// file again. An adjustment that needs a stage upstream of the reduction
+    /// — a different white balance, a different demosaic, a different camera
+    /// transform — re-prepares from the file rather than from here, and an
+    /// eventual full-resolution export does the same. See
+    /// `docs/decisions/0015-reduced-resolution-preview.md`.
     struct Source: Sendable {
-        /// Everything up to and including the creative mix, unoriented, with
-        /// the whole upstream chain reachable through it.
-        let channelMixed: IRChannelMixedProcessedRAWImage
-        /// The region the white balance was estimated from, in sensor
-        /// (pre-orientation) active-area coordinates.
+        /// The reduced, unoriented, channel-mixed scene-linear image. The one
+        /// buffer every interactive re-render reads.
+        let preview: SceneLinearPreviewImage
+        /// The RAW-state metadata the chain was processed against.
+        ///
+        /// Stored, rather than read through the image as it used to be: the
+        /// image no longer reaches the decoded mosaic that carried it, which
+        /// is the point.
+        let metadata: RAWMetadata
+        /// The file these pixels came from.
+        let url: URL
+        /// The region the white balance was estimated from, in **full
+        /// resolution** sensor (pre-orientation) active-area coordinates.
+        ///
+        /// Deliberately not rescaled to preview coordinates. It describes
+        /// where the estimate was taken from, which happened before the
+        /// reduction and in the sensor's own coordinates; restating it in the
+        /// preview's would make it look like something that could be sampled
+        /// again from the reduced buffer, which it cannot.
         let neutralPatch: RAWActiveAreaRegion
 
-        /// The RAW-state metadata the chain was processed against, read
-        /// through the retained image rather than stored twice.
-        var metadata: RAWMetadata { channelMixed.metadata }
-        var url: URL { channelMixed.url }
+        /// What resolution this preview is, what it was reduced from, and by
+        /// what rule.
+        var resolution: PreviewResolution { preview.resolution }
     }
 }
 
 /// What the workspace shows, plus enough of its provenance to describe it.
 ///
-/// The scene-linear chain is **not** retained here. It is retained one level
+/// The scene-linear image is **not** retained here. It is retained one level
 /// up, on `WorkspacePreviewPipeline.Source`, which is where reprocessing
 /// starts from: a preview is a finished result, and holding the state that
 /// could produce a different one on the result itself would invite someone to
@@ -320,13 +404,23 @@ struct WorkspacePreview {
     /// Why the image has the geometry it has: what the file recorded, what
     /// the user asked for, and what `ImageOrienter` actually applied.
     let orientationProvenance: OrientationProvenance
-    /// Active-area dimensions before orientation, in pixels.
+    /// What resolution these pixels are, what full resolution they were
+    /// reduced from, by which policy and by which method.
+    ///
+    /// The one thing the stage-by-stage provenance chain cannot say on its
+    /// own. Without it a reader of a finished preview would have to compare
+    /// its width against the sensor's to learn that it is a smaller rendition.
+    let resolution: PreviewResolution
+    /// Preview-source dimensions before orientation, in pixels — the
+    /// **reduced** ones. The full-resolution active area is
+    /// `resolution.sourceWidth` by `resolution.sourceHeight`.
     let sourcePixelWidth: Int
     let sourcePixelHeight: Int
     /// Preview dimensions in pixels, **as viewed**. Equal to the source
     /// dimensions exchanged for a quarter-turn-family orientation, and to them
-    /// unchanged otherwise; orientation is the only stage in this chain that
-    /// touches geometry at all.
+    /// unchanged otherwise; orientation is the only stage after the reduction
+    /// that touches geometry at all, and it exchanges the two dimensions
+    /// rather than changing either.
     let pixelWidth: Int
     let pixelHeight: Int
 
@@ -342,4 +436,8 @@ struct WorkspacePreview {
     var effectiveOrientation: RAWImageOrientation {
         orientationProvenance.effectiveOrientation
     }
+    /// Width of the full-resolution, unoriented active image area, in pixels.
+    var fullResolutionSourcePixelWidth: Int { resolution.sourceWidth }
+    /// Height of that same area.
+    var fullResolutionSourcePixelHeight: Int { resolution.sourceHeight }
 }

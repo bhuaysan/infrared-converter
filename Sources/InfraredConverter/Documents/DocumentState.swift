@@ -241,9 +241,18 @@ final class DocumentState {
         /// `nil` when the owned pipeline could not get that far.
         ///
         /// This is what makes an orientation change non-destructive: it is
-        /// the **unoriented** channel-mixed image, so a new adjustment is
+        /// the **unoriented** scene-linear image, so a new adjustment is
         /// always applied to it rather than to whatever is currently on
         /// screen.
+        ///
+        /// It is held at **preview resolution**, not the sensor's. Nothing
+        /// full-resolution is reachable from it: the mosaics, the
+        /// camera-native image and the working-colour image all go out of
+        /// scope when `prepare` returns. A document therefore costs roughly
+        /// 36 MB rather than roughly 420 MB on the E-PL3 fixture, which is
+        /// what makes it acceptable for two documents to hold one each during
+        /// a file switch. See
+        /// `docs/decisions/0015-reduced-resolution-preview.md`.
         ///
         /// It is retained even when the initial render refused it, because a
         /// prepared source is genuinely useful for diagnosis — but its
@@ -397,6 +406,15 @@ final class DocumentState {
     private let decoder: RAWDecoder
     private let store: any ImageAdjustmentStore
     private let render: PreviewRender
+
+    /// How large the interactive preview each opened file gets may be.
+    ///
+    /// Injected for the same reason `render` is: a test needs to exercise the
+    /// reduction on an image far smaller than any production default, and the
+    /// alternative — making test fixtures thousands of pixels wide — would put
+    /// minutes of full-resolution work into suites that are about scheduling.
+    /// Production passes the workspace policy and nothing else ever does.
+    private let previewPolicy: PreviewResolutionPolicy
     private var decodeTask: Task<Void, Never>?
 
     /// Which open this is. Incremented by every `open(_:)`.
@@ -461,11 +479,13 @@ final class DocumentState {
     init(
         decoder: RAWDecoder = LibRawDecoder(),
         store: any ImageAdjustmentStore = JSONSidecarImageAdjustmentStore(),
-        render: @escaping PreviewRender = DocumentState.pipelineRender
+        render: @escaping PreviewRender = DocumentState.pipelineRender,
+        previewPolicy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy
     ) {
         self.decoder = decoder
         self.store = store
         self.render = render
+        self.previewPolicy = previewPolicy
     }
 
     var selectedFileURL: URL? {
@@ -578,6 +598,7 @@ final class DocumentState {
         let decoder = self.decoder
         let store = self.store
         let render = self.render
+        let previewPolicy = self.previewPolicy
         // LibRaw decoding is a long, blocking C++ call. Detaching keeps it off
         // both the main actor and the caller's cooperative context.
         decodeTask = Task.detached(priority: .userInitiated) {
@@ -585,7 +606,11 @@ final class DocumentState {
             // is nothing to install and nothing to report: a cancelled open is
             // not a failed one.
             guard let outcome = Self.decode(
-                url, using: decoder, store: store, render: render
+                url,
+                using: decoder,
+                store: store,
+                render: render,
+                previewPolicy: previewPolicy
             ) else { return }
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
@@ -635,7 +660,10 @@ final class DocumentState {
     /// The cost is stated rather than discovered: a settling document holds its
     /// scene-linear source until it settles, so a switch made mid-render
     /// briefly retains two of them. It is released the moment the render
-    /// delivers.
+    /// delivers — and each of them is now one reduced buffer rather than a
+    /// whole sensor-resolution chain, so the overlap costs roughly 72 MB on
+    /// the E-PL3 fixture rather than roughly 840 MB. That is the difference
+    /// between an overlap worth arguing about and one worth allowing.
     private func handOverCurrentDocument() {
         defer { renderer = nil }
         guard case .decoded(let loaded) = status else {
@@ -714,7 +742,8 @@ final class DocumentState {
         _ url: URL,
         using decoder: RAWDecoder,
         store: any ImageAdjustmentStore,
-        render: PreviewRender
+        render: PreviewRender,
+        previewPolicy: PreviewResolutionPolicy
     ) -> Result<Loaded, OpenFailure>? {
         let adjustments: ImageAdjustments
         do {
@@ -732,6 +761,7 @@ final class DocumentState {
             using: decoder,
             adjustments: adjustments,
             render: render,
+            previewPolicy: previewPolicy,
             cancellation: .enclosingTask
         ) else { return nil }
         let legacy = legacyReference(for: url, using: decoder)
@@ -811,13 +841,16 @@ final class DocumentState {
         using decoder: RAWDecoder,
         adjustments: ImageAdjustments,
         render: PreviewRender,
+        previewPolicy: PreviewResolutionPolicy,
         cancellation: ProcessingCancellation
     ) -> OwnedOutcome? {
         let pipeline = WorkspacePreviewPipeline()
 
         let source: WorkspacePreviewPipeline.Source
         do {
-            source = try pipeline.prepare(decoding: url, using: decoder)
+            source = try pipeline.prepare(
+                decoding: url, using: decoder, policy: previewPolicy
+            )
         } catch is CancellationError {
             // `prepare` polls nothing today, so this is defensive rather than
             // reachable; it is here so that adding a poll cannot turn a
@@ -936,10 +969,12 @@ final class DocumentState {
 
     /// Builds the single render slot for a freshly opened file.
     ///
-    /// The closure captures that file's retained, **unoriented** scene-linear
-    /// source, so every re-render starts from it rather than from whatever is
-    /// on screen. Nothing upstream reruns: no channel mix, no camera
-    /// conversion, no demosaic, no white balance, no decode.
+    /// The closure captures that file's retained, **unoriented**,
+    /// preview-resolution scene-linear source, so every re-render starts from
+    /// it rather than from whatever is on screen. Nothing upstream reruns: no
+    /// reduction, no channel mix, no camera conversion, no demosaic, no white
+    /// balance, no decode — and nothing full-resolution is reachable through
+    /// the capture, which is what keeps the closure cheap to hold.
     ///
     /// It also captures the file's URL and the generation of the open it
     /// belongs to. Those two are what let a delivery find its way back to the

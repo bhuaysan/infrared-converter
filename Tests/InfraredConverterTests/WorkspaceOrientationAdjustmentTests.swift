@@ -208,9 +208,9 @@ struct WorkspaceOrientationAdjustmentTests {
             Issue.record("Expected a retained source")
             return
         }
-        let originalValues = source.channelMixed.image.values
-        let originalWidth = source.channelMixed.image.width
-        let originalHeight = source.channelMixed.image.height
+        let originalValues = source.preview.values
+        let originalWidth = source.preview.width
+        let originalHeight = source.preview.height
 
         for step in [UserOrientationAdjustment.quarterTurnRight, .halfTurn, .quarterTurnLeft] {
             state.rotateOrientationRight()
@@ -221,14 +221,14 @@ struct WorkspaceOrientationAdjustmentTests {
             Issue.record("Expected the source to still be retained")
             return
         }
-        #expect(retained.channelMixed.image.width == originalWidth)
-        #expect(retained.channelMixed.image.height == originalHeight)
-        #expect(retained.channelMixed.image.values.count == originalValues.count)
+        #expect(retained.preview.width == originalWidth)
+        #expect(retained.preview.height == originalHeight)
+        #expect(retained.preview.values.count == originalValues.count)
         // Bit patterns, not approximate equality: a permutation that wrote
         // back into its input would show here even if the values looked
         // plausible.
         #expect(
-            zip(retained.channelMixed.image.values, originalValues)
+            zip(retained.preview.values, originalValues)
                 .allSatisfy { $0.bitPattern == $1.bitPattern }
         )
     }

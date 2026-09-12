@@ -24,6 +24,56 @@ struct WorkspaceStubDecoder: RAWDecoder {
     }
 }
 
+/// A decoder that counts what it is asked to do.
+///
+/// The point is the count. Asserting that an orientation change produces the
+/// right picture says nothing about what it cost; asserting that
+/// `decodeMosaic` ran exactly once across an open and five rotations says that
+/// nothing below the retained preview source ran again — no decode, and
+/// therefore no normalisation, no white-balance estimate, no demosaic, no
+/// camera conversion and no reduction, because every one of those is reachable
+/// only through `WorkspacePreviewPipeline.prepare`, which begins with this
+/// call.
+final class CountingStubDecoder: RAWDecoder, @unchecked Sendable {
+    private let lock = NSLock()
+    private var mosaicDecodes = 0
+    private var processedDecodes = 0
+
+    private let result: Result<DecodedRAW, RAWDecodingError>
+    private let mosaicResult: Result<DecodedRAWMosaic, RAWDecodingError>
+
+    init(
+        result: Result<DecodedRAW, RAWDecodingError>,
+        mosaic: Result<DecodedRAWMosaic, RAWDecodingError>
+    ) {
+        self.result = result
+        self.mosaicResult = mosaic
+    }
+
+    /// How many times the application-owned pipeline read the file.
+    var mosaicDecodeCount: Int { withLock { mosaicDecodes } }
+    /// How many times the LibRaw diagnostic reference read it.
+    var processedDecodeCount: Int { withLock { processedDecodes } }
+
+    func readMetadata(at url: URL) throws -> RAWMetadata { try result.get().metadata }
+
+    func decode(at url: URL, options: RAWDecodeOptions) throws -> DecodedRAW {
+        withLock { processedDecodes += 1 }
+        return try result.get()
+    }
+
+    func decodeMosaic(at url: URL) throws -> DecodedRAWMosaic {
+        withLock { mosaicDecodes += 1 }
+        return try mosaicResult.get()
+    }
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+}
+
 enum WorkspaceStubs {
     /// A deliberately **non-square** RGGB mosaic whose samples all differ, so
     /// every one of the eight orientations produces a distinguishable result
@@ -36,7 +86,12 @@ enum WorkspaceStubs {
     ) -> DecodedRAWMosaic {
         var samples = [UInt16]()
         for index in 0..<(width * height) {
-            samples.append(UInt16(500 + index * 37))
+            // Wrapped into the 12-bit range the metadata's white level
+            // declares, so a mosaic large enough to be worth reducing does not
+            // run past what a `UInt16` sample may legitimately hold. The
+            // stride is coprime with the modulus, so neighbouring samples
+            // still differ and every orientation stays distinguishable.
+            samples.append(UInt16((500 + index * 37) % 4096))
         }
         var metadata = RAWTestData.metadata()
         metadata.levels = .init(black: 0, perPlaneBlack: [0, 0, 0, 0], maximum: 4095)
@@ -77,14 +132,37 @@ enum WorkspaceStubs {
         width: Int = 8,
         height: Int = 6,
         flip: Int = 0,
-        store: any ImageAdjustmentStore = StubImageAdjustmentStore()
+        store: any ImageAdjustmentStore = StubImageAdjustmentStore(),
+        previewPolicy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy
     ) -> DocumentState {
         DocumentState(
             decoder: WorkspaceStubDecoder(
                 result: .success(RAWTestData.decodedRAW(url: url)),
                 mosaic: .success(mosaic(url: url, width: width, height: height, flip: flip))
             ),
-            store: store
+            store: store,
+            previewPolicy: previewPolicy
+        )
+    }
+
+    /// A `DocumentState` whose decoder counts, so a test can prove what an
+    /// adjustment did **not** rerun.
+    @MainActor
+    static func countingDocumentState(
+        url: URL,
+        width: Int = 8,
+        height: Int = 6,
+        flip: Int = 0,
+        store: any ImageAdjustmentStore = StubImageAdjustmentStore(),
+        previewPolicy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy
+    ) -> (DocumentState, CountingStubDecoder) {
+        let decoder = CountingStubDecoder(
+            result: .success(RAWTestData.decodedRAW(url: url)),
+            mosaic: .success(mosaic(url: url, width: width, height: height, flip: flip))
+        )
+        return (
+            DocumentState(decoder: decoder, store: store, previewPolicy: previewPolicy),
+            decoder
         )
     }
 

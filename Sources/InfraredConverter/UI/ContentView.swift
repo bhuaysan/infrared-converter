@@ -287,6 +287,7 @@ private struct RAWInspectorView: View {
             case .rendered(let preview):
                 let processing = preview.processing
                 row("Size", "\(preview.pixelWidth) × \(preview.pixelHeight)")
+                row("Preview resolution", Self.resolutionDescription(preview.resolution))
                 row("Recorded orientation", Self.recordedOrientationDescription(preview))
                 row("Your correction", Self.userOrientationDescription(preview))
                 row("Orientation applied", Self.orientationDescription(preview))
@@ -321,9 +322,27 @@ private struct RAWInspectorView: View {
     /// anything. A file recording `.upright` is shown as it was stored, and
     /// this row says so rather than leaving the reader to wonder whether a
     /// stage was skipped.
+    /// What resolution the displayed pixels are, and what they were reduced
+    /// from.
+    ///
+    /// Shown because a reader who is looking at a 2048-pixel rendition of a
+    /// 4056-pixel photograph should be told so, rather than left to compare
+    /// the Size row against the decoder's own dimensions further down the
+    /// panel.
+    private static func resolutionDescription(_ resolution: PreviewResolution) -> String {
+        let full = "\(resolution.sourceWidth) × \(resolution.sourceHeight) active area"
+        guard resolution.isReduced else {
+            return "Full resolution (\(full))"
+        }
+        let factor = resolution.pixelReductionFactor.map {
+            String(format: "%.1f× fewer pixels", $0)
+        } ?? "reduced"
+        return "Reduced from \(full), \(factor)"
+    }
+
     private static func orientationDescription(_ preview: WorkspacePreview) -> String {
         let orientation = preview.effectiveOrientation
-        let source = "\(preview.sourcePixelWidth) × \(preview.sourcePixelHeight) sensor"
+        let source = "\(preview.sourcePixelWidth) × \(preview.sourcePixelHeight) preview source"
         guard !orientation.isIdentity else {
             return "Upright (\(source))"
         }
