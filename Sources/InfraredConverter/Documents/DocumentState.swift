@@ -8,25 +8,42 @@ import Observation
 /// the decode task and the resulting state, and it is the only place that knows
 /// a `RAWDecoder` exists. Views read `status` and never touch a decoder.
 ///
-/// It is not `ImageDocument` yet, but it is closer: it now owns an
-/// `ImageAdjustments` record alongside the decoded state, and the preview is
-/// derived from `source + adjustments` rather than from the source alone.
+/// It is not `ImageDocument` yet, but it is closer: it owns an
+/// `ImageAdjustments` record alongside the decoded state, the preview is
+/// derived from `source + adjustments` rather than from the source alone, and
+/// that record now outlives the session.
 ///
 /// ## Where the adjustment lives, and for how long
 ///
-/// **In memory, here, for as long as the file is open.** `ImageAdjustments` is
-/// `Codable` and round-trips, and that is a different fact from being saved:
-/// nothing writes it to disk, there is no sidecar, no document format and no
-/// restore on relaunch. Opening the same file again starts from
-/// `ImageAdjustments.none`.
-///
-/// The three layers are deliberately separate, and only the first two exist:
+/// **In memory here while the file is open, and in a sidecar beside the RAW
+/// file between sessions.** All three layers now exist:
 ///
 /// ```text
-/// 1. a serialisable adjustment model     ImageAdjustments — exists, tested
-/// 2. in-memory ownership                 here, per open file — exists
-/// 3. durable on-disk persistence         does not exist
+/// 1. a serialisable adjustment model     ImageAdjustments
+/// 2. in-memory ownership                 here, per open file
+/// 3. durable on-disk persistence         ImageAdjustmentStore — one sidecar per photograph
 /// ```
+///
+/// The RAW file is not one of them. It is an immutable input: nothing here
+/// writes to it, appends to it, re-tags it or replaces it, and the sidecar is
+/// the only place a user's decisions are ever recorded. See
+/// `docs/decisions/0013-adjustment-sidecar.md`.
+///
+/// ## Opening reads the saved adjustments before it renders anything
+///
+/// ```text
+/// load sidecar → prepare RAW → initial render WITH the loaded adjustments → .decoded
+/// ```
+///
+/// Not prepare, render the identity, show it, then load. A saved rotation is
+/// part of the document's opening state, not a later UI event: rendering the
+/// unadjusted image first would put a photograph on screen that the user did
+/// not ask for, and pay for a full-frame render to do it.
+///
+/// A sidecar that exists and cannot be read stops the open instead
+/// (`Status.adjustmentsUnreadable`), because the alternative — rendering with
+/// no adjustments — looks exactly like success while silently discarding the
+/// user's decisions.
 ///
 /// ## Two RAW paths, and only one of them is the photograph
 ///
@@ -49,6 +66,11 @@ import Observation
 /// full-frame render works at a time, a burst collapses to its newest state,
 /// and the render being replaced is cancelled inside its pass rather than left
 /// to finish work nobody will see.
+///
+/// Saving rides on exactly the same guard. A render is persisted only where it
+/// is installed — after it has succeeded, and only while the adjustment it was
+/// made for is still the one the user wants — so a superseded render can no
+/// more write the sidecar than it can reach the screen.
 @MainActor
 @Observable
 final class DocumentState {
@@ -57,7 +79,31 @@ final class DocumentState {
         case empty
         case decoding(URL)
         case decoded(Loaded)
+        /// Neither RAW path could produce an image.
         case failed(URL, DocumentOpenError)
+        /// The photograph was never decoded, because its saved adjustments
+        /// exist and could not be read. A separate case from `failed` because
+        /// it is a separate problem with a separate remedy — one small file
+        /// the user owns, rather than the RAW file or its support.
+        case adjustmentsUnreadable(URL, DocumentAdjustmentError)
+    }
+
+    /// Whether the user's current adjustments are safely on disk.
+    ///
+    /// Diagnostic state, deliberately small. There is no retry engine and no
+    /// queue: a failure is reported and the next successful adjustment tries
+    /// again, because that is what the user's next action does anyway.
+    enum AdjustmentPersistence {
+        /// Nothing has been adjusted since the file was opened, so there has
+        /// been nothing to write. The sidecar, if any, still holds what was
+        /// loaded from it.
+        case unchanged
+        /// The adjustment currently on screen is the one on disk.
+        case saved
+        /// The image is correct and the sidecar is not. Kept as a value so a
+        /// reader can be told which file and why — and so the preview is not
+        /// rolled back to pretend the edit never happened.
+        case failed(ImageAdjustmentPersistenceError)
     }
 
     /// A successfully opened file: the application-owned preview the
@@ -113,12 +159,19 @@ final class DocumentState {
         /// controls, or the user could not undo the adjustment that caused it.
         let isAdjustable: Bool
 
-        /// The user's editing decisions. In memory only; see the note on the
-        /// type.
+        /// The user's editing decisions: what the sidecar held when the file
+        /// was opened, plus whatever has been asked for since.
         var adjustments: ImageAdjustments
 
         /// The application-owned pipeline's result, or the reason it failed.
         var owned: OwnedPreview
+
+        /// Whether the current adjustments have reached the sidecar.
+        ///
+        /// Independent of `owned` on purpose: a render that succeeded and a
+        /// save that failed are two different facts, and the image is not
+        /// withdrawn because the file system refused.
+        var persistence: AdjustmentPersistence = .unchanged
 
         /// The retained source, but only when re-rendering from it can
         /// actually work. The one thing a render slot may be built from.
@@ -192,9 +245,36 @@ final class DocumentState {
         case unprepared(RAWPathFailure)
     }
 
+    /// Why an open ended without a document. Two unrelated problems, kept
+    /// apart all the way to `Status`.
+    private enum OpenFailure: Error {
+        /// Neither RAW path produced an image.
+        case raw(DocumentOpenError)
+        /// The saved adjustments could not be read, so nothing was decoded.
+        case adjustments(DocumentAdjustmentError)
+    }
+
+    /// Orients a prepared source and encodes it for display.
+    ///
+    /// Injected so a test can count the renders an open performs and can make
+    /// one refuse; production passes `pipelineRender` and nothing else ever
+    /// does.
+    typealias PreviewRender = @Sendable (
+        WorkspacePreviewPipeline.Source, ImageAdjustments, ProcessingCancellation
+    ) throws -> WorkspacePreview
+
+    /// The real thing: the second half of `WorkspacePreviewPipeline`.
+    nonisolated static let pipelineRender: PreviewRender = { source, adjustments, cancellation in
+        try WorkspacePreviewPipeline().render(
+            source, adjustments: adjustments, cancellation: cancellation
+        )
+    }
+
     private(set) var status: Status = .empty
 
     private let decoder: RAWDecoder
+    private let store: any ImageAdjustmentStore
+    private let render: PreviewRender
     private var decodeTask: Task<Void, Never>?
 
     /// The single slot every re-render goes through, rebuilt for each opened
@@ -202,8 +282,14 @@ final class DocumentState {
     /// `nil` when nothing adjustable is open.
     private var renderer: CoalescingPreviewRenderer?
 
-    init(decoder: RAWDecoder = LibRawDecoder()) {
+    init(
+        decoder: RAWDecoder = LibRawDecoder(),
+        store: any ImageAdjustmentStore = JSONSidecarImageAdjustmentStore(),
+        render: @escaping PreviewRender = DocumentState.pipelineRender
+    ) {
         self.decoder = decoder
+        self.store = store
+        self.render = render
     }
 
     var selectedFileURL: URL? {
@@ -212,6 +298,7 @@ final class DocumentState {
         case .decoding(let url): return url
         case .decoded(let loaded): return loaded.url
         case .failed(let url, _): return url
+        case .adjustmentsUnreadable(let url, _): return url
         }
     }
 
@@ -228,6 +315,21 @@ final class DocumentState {
         return loaded.isAdjustable
     }
 
+    /// Whether what is on screen has been written to the sidecar.
+    var adjustmentPersistence: AdjustmentPersistence {
+        guard case .decoded(let loaded) = status else { return .unchanged }
+        return loaded.persistence
+    }
+
+    /// Why the last save failed, or `nil` when none did.
+    ///
+    /// The image is correct either way; this says only whether it will still
+    /// be there next time.
+    var adjustmentSaveFailure: ImageAdjustmentPersistenceError? {
+        guard case .failed(let error) = adjustmentPersistence else { return nil }
+        return error
+    }
+
     /// Selects a file and starts decoding it, replacing any decode in flight.
     func open(_ url: URL) {
         decodeTask?.cancel()
@@ -236,13 +338,17 @@ final class DocumentState {
         status = .decoding(url)
 
         let decoder = self.decoder
+        let store = self.store
+        let render = self.render
         // LibRaw decoding is a long, blocking C++ call. Detaching keeps it off
         // both the main actor and the caller's cooperative context.
         decodeTask = Task.detached(priority: .userInitiated) {
             // `nil` means the open was superseded while it was running. There
             // is nothing to install and nothing to report: a cancelled open is
             // not a failed one.
-            guard let outcome = Self.decode(url, using: decoder) else { return }
+            guard let outcome = Self.decode(
+                url, using: decoder, store: store, render: render
+            ) else { return }
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
                 self?.apply(outcome, for: url)
@@ -250,13 +356,20 @@ final class DocumentState {
         }
     }
 
-    /// Runs both RAW paths, independently, and decides what the six possible
-    /// pairings mean.
+    /// Reads the saved adjustments, then runs both RAW paths independently,
+    /// and decides what the six possible pairings mean.
     ///
-    /// The order is deliberate and so is the absence of a `try` around the
-    /// pair. The application-owned pipeline runs first because it is the
-    /// workspace image; the legacy processed-RGB decode runs beside it, never
-    /// in front of it. Each is allowed to fail on its own.
+    /// The saved adjustments come **first**, before anything is decoded. They
+    /// are part of the document's opening state, so the initial render is made
+    /// with them: there is no window in which the unadjusted image exists, and
+    /// no second full-frame render to replace it. A sidecar that cannot be
+    /// read ends the open here, before the expensive work, rather than
+    /// producing a photograph nobody asked for.
+    ///
+    /// The order of the two RAW paths is deliberate and so is the absence of a
+    /// `try` around the pair. The application-owned pipeline runs first
+    /// because it is the workspace image; the legacy processed-RGB decode runs
+    /// beside it, never in front of it. Each is allowed to fail on its own.
     ///
     /// The open succeeds when **an image exists**. A prepared scene-linear
     /// state is not an image: if the initial render refused it and the
@@ -267,11 +380,27 @@ final class DocumentState {
     ///   `nil` when the open was cancelled before it finished.
     private nonisolated static func decode(
         _ url: URL,
-        using decoder: RAWDecoder
-    ) -> Result<Loaded, DocumentOpenError>? {
-        let adjustments = ImageAdjustments.none
+        using decoder: RAWDecoder,
+        store: any ImageAdjustmentStore,
+        render: PreviewRender
+    ) -> Result<Loaded, OpenFailure>? {
+        let adjustments: ImageAdjustments
+        do {
+            // `nil` is the ordinary case: no sidecar, so no saved decisions,
+            // so the identity record. It is the only thing that becomes
+            // `.none` — a record that exists and cannot be read never does.
+            adjustments = try store.load(for: url) ?? .none
+        } catch {
+            log(error, path: "Saved adjustments", url: url)
+            return .failure(.adjustments(DocumentAdjustmentError(url: url, failure: error)))
+        }
+
         guard let owned = ownedOutcome(
-            for: url, using: decoder, adjustments: adjustments, cancellation: .enclosingTask
+            for: url,
+            using: decoder,
+            adjustments: adjustments,
+            render: render,
+            cancellation: .enclosingTask
         ) else { return nil }
         let legacy = legacyReference(for: url, using: decoder)
 
@@ -325,7 +454,7 @@ final class DocumentState {
         case (.unrenderable(_, let ownedFailure), .unavailable(let legacyFailure)),
              (.unprepared(let ownedFailure), .unavailable(let legacyFailure)):
             return .failure(
-                DocumentOpenError(url: url, owned: ownedFailure, legacy: legacyFailure)
+                .raw(DocumentOpenError(url: url, owned: ownedFailure, legacy: legacyFailure))
             )
         }
     }
@@ -340,12 +469,16 @@ final class DocumentState {
     /// a generic "preview failed". The error value itself is kept too, which
     /// is what lets the caller tell a preparation refusal from a render one.
     ///
+    /// Exactly one render happens here, with the adjustments the caller
+    /// loaded. There is no unadjusted first pass.
+    ///
     /// - Returns: the outcome, or `nil` when the work was cancelled.
     ///   Cancellation is not a failure and must never be shown as one.
     private nonisolated static func ownedOutcome(
         for url: URL,
         using decoder: RAWDecoder,
         adjustments: ImageAdjustments,
+        render: PreviewRender,
         cancellation: ProcessingCancellation
     ) -> OwnedOutcome? {
         let pipeline = WorkspacePreviewPipeline()
@@ -359,19 +492,17 @@ final class DocumentState {
             // cancelled open into a reported failure.
             return nil
         } catch {
-            log(error, stage: "preparation", url: url)
+            log(error, path: "Owned preparation", url: url)
             return .unprepared(RAWPathFailure(stage: .ownedPreparation, error))
         }
 
         do {
-            let preview = try pipeline.render(
-                source, adjustments: adjustments, cancellation: cancellation
-            )
+            let preview = try render(source, adjustments, cancellation)
             return .rendered(source, preview)
         } catch is CancellationError {
             return nil
         } catch {
-            log(error, stage: "render", url: url)
+            log(error, path: "Owned render", url: url)
             return .unrenderable(source, RAWPathFailure(stage: .ownedRender, error))
         }
     }
@@ -389,15 +520,21 @@ final class DocumentState {
             let decoded = try decoder.decode(at: url, options: .init(halfSize: true))
             return .decoded(decoded, preview: PreviewImageRenderer.makeCGImage(from: decoded.image))
         } catch {
-            log(error, stage: "LibRaw reference decode", url: url)
+            log(error, path: "LibRaw reference decode", url: url)
             return .unavailable(RAWPathFailure(stage: .legacyReference, error))
         }
     }
 
-    private nonisolated static func log(_ error: Error, stage: String, url: URL) {
+    /// Logs one path's refusal.
+    ///
+    /// `path` names the thing that refused, in full. It used to be a stage
+    /// name with "Owned" prefixed to it here, which labelled the LibRaw
+    /// reference decode — the one path that is emphatically not ours — as
+    /// "Owned LibRaw reference decode failed".
+    private nonisolated static func log(_ error: Error, path: String, url: URL) {
         Log.raw.error(
             """
-            Owned \(stage, privacy: .public) failed for \
+            \(path, privacy: .public) failed for \
             \(url.lastPathComponent, privacy: .public): \
             \(error.localizedDescription, privacy: .public)
             """
@@ -425,7 +562,8 @@ final class DocumentState {
     /// records.
     ///
     /// Not "make upright": a file whose metadata records a rotation gets that
-    /// rotation back.
+    /// rotation back. The reset is itself a decision, and it is saved like any
+    /// other once it has rendered.
     func resetOrientation() { adjustOrientation { _ in .reset } }
 
     /// Applies a transformation to the current adjustment and re-renders.
@@ -434,6 +572,10 @@ final class DocumentState {
     /// the operation, so pressing a button repeatedly never accumulates a
     /// history — and the render that follows always starts from the retained,
     /// unoriented channel-mixed image, never from what is on screen.
+    ///
+    /// Nothing is saved here. A state that has not been rendered is not known
+    /// to be renderable, and writing it would let a broken state be restored
+    /// automatically on the next launch.
     private func adjustOrientation(
         _ transform: (UserOrientationAdjustment) -> UserOrientationAdjustment
     ) {
@@ -464,11 +606,10 @@ final class DocumentState {
         for source: WorkspacePreviewPipeline.Source,
         url: URL
     ) -> CoalescingPreviewRenderer {
-        CoalescingPreviewRenderer(
+        let render = self.render
+        return CoalescingPreviewRenderer(
             render: { adjustments, cancellation in
-                try WorkspacePreviewPipeline().render(
-                    source, adjustments: adjustments, cancellation: cancellation
-                )
+                try render(source, adjustments, cancellation)
             },
             deliver: { [weak self] outcome, adjustments in
                 self?.applyReprocessed(outcome, adjustments: adjustments, for: url)
@@ -477,7 +618,7 @@ final class DocumentState {
     }
 
     /// Installs a re-rendered preview, unless a newer adjustment has already
-    /// superseded it.
+    /// superseded it — and saves the adjustment that produced it.
     ///
     /// The guard compares the adjustment the render was made for with the one
     /// currently requested. `CoalescingPreviewRenderer` already declines to
@@ -485,6 +626,19 @@ final class DocumentState {
     /// the render that finished before it noticed: a late result from a
     /// superseded adjustment would otherwise put the wrong geometry on screen
     /// while the controls showed the right one.
+    ///
+    /// Persistence sits **inside** that guard, and inside the success branch,
+    /// which is what makes the two rules true at once:
+    ///
+    /// ```text
+    /// a superseded render        neither installs nor saves
+    /// a failed render            neither installs nor saves; the sidecar keeps
+    ///                            the last state that did render
+    /// ```
+    ///
+    /// A save that fails does not withdraw the image. The render succeeded;
+    /// the file system is a separate question, and rolling the preview back
+    /// would answer it by lying about the first.
     private func applyReprocessed(
         _ outcome: Result<WorkspacePreview, Error>,
         adjustments: ImageAdjustments,
@@ -498,14 +652,36 @@ final class DocumentState {
         switch outcome {
         case .success(let preview):
             loaded.owned = .rendered(preview)
+            loaded.persistence = persist(adjustments, for: url)
         case .failure(let error):
-            Self.log(error, stage: "re-render", url: url)
+            Self.log(error, path: "Owned re-render", url: url)
             loaded.owned = .unavailable(RAWPathFailure(stage: .ownedRender, error))
+            // `persistence` is deliberately untouched: the last successfully
+            // saved state is still what is on disk, and it is still correct.
         }
         status = .decoded(loaded)
     }
 
-    private func apply(_ outcome: Result<Loaded, DocumentOpenError>, for url: URL) {
+    /// Writes one rendered adjustment to its sidecar.
+    ///
+    /// Synchronous, on the main actor, and small on purpose: one atomic write
+    /// of a few hundred bytes, ordered by construction because there is only
+    /// one place that writes and it cannot interleave with itself. Moving it
+    /// off the main actor would buy nothing measurable and would need its own
+    /// ordering guard to stop an older save landing after a newer one.
+    private func persist(
+        _ adjustments: ImageAdjustments, for url: URL
+    ) -> AdjustmentPersistence {
+        do {
+            try store.save(adjustments, for: url)
+            return .saved
+        } catch {
+            Self.log(error, path: "Saving adjustments", url: url)
+            return .failed(error)
+        }
+    }
+
+    private func apply(_ outcome: Result<Loaded, OpenFailure>, for url: URL) {
         // Ignore a result that a newer selection has already superseded.
         guard selectedFileURL == url else { return }
 
@@ -516,7 +692,8 @@ final class DocumentState {
             // which a control could request work that is known to fail.
             renderer = loaded.adjustableSource.map { makeRenderer(for: $0, url: loaded.url) }
             status = .decoded(loaded)
-        case .failure(let error):
+
+        case .failure(.raw(let error)):
             Log.ui.error(
                 """
                 Failed to open \(url.lastPathComponent, privacy: .public): \
@@ -524,6 +701,15 @@ final class DocumentState {
                 """
             )
             status = .failed(url, error)
+
+        case .failure(.adjustments(let error)):
+            Log.ui.error(
+                """
+                Did not open \(url.lastPathComponent, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """
+            )
+            status = .adjustmentsUnreadable(url, error)
         }
     }
 }

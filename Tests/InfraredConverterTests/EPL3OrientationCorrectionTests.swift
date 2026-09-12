@@ -268,7 +268,10 @@ struct EPL3OrientationCorrectionTests {
     @Test("The workspace performs the correction the user asks for")
     func theWorkspacePerformsTheCorrection() async throws {
         let url = try #require(RAWFixtures.olympusORF)
-        let state = DocumentState()
+        // An in-memory store, deliberately: the production one would write a
+        // sidecar beside the user's own RAW file, and a test must leave the
+        // fixture directory exactly as it found it.
+        let state = DocumentState(store: StubImageAdjustmentStore())
         state.open(url)
 
         let initial = try #require(

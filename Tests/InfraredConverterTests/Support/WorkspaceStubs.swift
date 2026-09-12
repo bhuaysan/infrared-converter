@@ -64,18 +64,27 @@ enum WorkspaceStubs {
 
     /// A `DocumentState` wired to the stub, with the owned pipeline able to
     /// run end to end.
+    ///
+    /// The adjustment store is in-memory and fresh for every call, and that is
+    /// not incidental. The production store writes a sidecar beside the RAW
+    /// file, so a test using it would leave a file next to a real photograph
+    /// and — because these suites share stand-in URLs — would hand one test's
+    /// saved rotation to the next test's open. A test that wants persistence
+    /// asks for it explicitly.
     @MainActor
     static func documentState(
         url: URL,
         width: Int = 8,
         height: Int = 6,
-        flip: Int = 0
+        flip: Int = 0,
+        store: any ImageAdjustmentStore = StubImageAdjustmentStore()
     ) -> DocumentState {
         DocumentState(
             decoder: WorkspaceStubDecoder(
                 result: .success(RAWTestData.decodedRAW(url: url)),
                 mosaic: .success(mosaic(url: url, width: width, height: height, flip: flip))
-            )
+            ),
+            store: store
         )
     }
 

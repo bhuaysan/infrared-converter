@@ -23,6 +23,7 @@ struct ContentView: View {
                 Divider().frame(height: 18)
                 OrientationControls(documentState: documentState)
                 Spacer()
+                AdjustmentSaveStatus(documentState: documentState)
             }
             .padding(12)
         }
@@ -71,6 +72,33 @@ struct ContentView: View {
                 Text("LibRaw reference: \(error.legacy.message)")
                     .font(.caption)
                     .multilineTextAlignment(.center)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(40)
+
+        case .adjustmentsUnreadable(let url, let error):
+            // A different problem from a file that will not decode, and shown
+            // as one: the photograph is presumed fine, the saved adjustments
+            // are not, and the file the user can act on is named. Nothing was
+            // repaired or deleted, and the text says so.
+            VStack(spacing: 8) {
+                Image(systemName: "doc.badge.gearshape")
+                    .font(.largeTitle)
+                    .foregroundStyle(.secondary)
+                Text(url.lastPathComponent)
+                    .font(.headline)
+                Text(error.errorDescription ?? "The saved adjustments could not be used.")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                if let reason = error.failureReason {
+                    Text(reason)
+                        .font(.caption)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.tertiary)
+                }
+                Text(error.sidecar.lastPathComponent)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
                     .foregroundStyle(.tertiary)
             }
             .padding(40)
@@ -473,5 +501,30 @@ private struct OrientationControls: View {
         .labelStyle(.iconOnly)
         .buttonStyle(.bordered)
         .disabled(!documentState.canAdjustOrientation)
+    }
+}
+
+
+/// Says when the photograph on screen has not reached its sidecar.
+///
+/// Silent while everything is saved, because a durable edit is the ordinary
+/// case and a permanent badge for it would be noise. It appears only for the
+/// one state a user needs to know about: the image is correct and the saved
+/// copy is not, so closing the file now would lose the edit.
+private struct AdjustmentSaveStatus: View {
+    let documentState: DocumentState
+
+    var body: some View {
+        if let failure = documentState.adjustmentSaveFailure {
+            Label {
+                Text("Adjustments not saved")
+            } icon: {
+                Image(systemName: "exclamationmark.triangle.fill")
+            }
+            .foregroundStyle(.orange)
+            .font(.caption)
+            .help(failure.failureReason ?? failure.localizedDescription)
+            .accessibilityLabel("The adjustments could not be saved")
+        }
     }
 }

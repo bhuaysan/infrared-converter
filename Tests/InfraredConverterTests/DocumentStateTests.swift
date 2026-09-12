@@ -62,7 +62,10 @@ struct DocumentStateTests {
                     ? .success(RAWTestData.decodedRAW(url: url))
                     : .failure(.fileNotFound(url)),
                 mosaic: ownedSucceeds ? .success(stubMosaic(url: url)) : nil
-            )
+            ),
+            // In-memory: this suite is about the two RAW paths, and must
+            // neither read nor write a sidecar on the way.
+            store: StubImageAdjustmentStore()
         )
     }
 
@@ -80,7 +83,8 @@ struct DocumentStateTests {
                     ? .success(RAWTestData.decodedRAW(url: url))
                     : .failure(.fileNotFound(url)),
                 mosaic: .success(WorkspaceStubs.mosaic(url: url, flip: 9))
-            )
+            ),
+            store: StubImageAdjustmentStore()
         )
     }
 
@@ -88,7 +92,10 @@ struct DocumentStateTests {
 
     @Test
     func startsWithNoSelection() {
-        let state = DocumentState(decoder: StubDecoder(result: .failure(.decoderUnavailable)))
+        let state = DocumentState(
+            decoder: StubDecoder(result: .failure(.decoderUnavailable)),
+            store: StubImageAdjustmentStore()
+        )
         #expect(state.selectedFileURL == nil)
         if case .empty = state.status {} else {
             Issue.record("Expected .empty, got \(state.status)")
