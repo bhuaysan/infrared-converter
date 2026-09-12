@@ -91,7 +91,20 @@ import Observation
 /// It is handed over: the document keeps its render slot, loses its screen,
 /// and may do exactly one thing more — write its own sidecar once its own
 /// render succeeds. Everything a decision could not survive is recorded in
-/// `unsavedAdjustments` rather than dropped. See
+/// `unsavedAdjustments` rather than dropped.
+///
+/// Opening a **different** file therefore costs nothing. Opening the **same**
+/// file waits, and only that case does:
+///
+/// ```text
+/// A pending → open B      B opens at once; A settles behind it
+/// A pending → reopen A    the reopen waits for A to settle, then reads its sidecar
+/// ```
+///
+/// Two generations of one RAW file share one sidecar, so a reopen that read it
+/// while an older generation still had a write to make would read a record
+/// about to change — and that older write could then land on top of a newer
+/// one. Two different files share nothing and race over nothing. See
 /// `docs/decisions/0014-adjustment-lifecycle.md`.
 @MainActor
 @Observable
@@ -422,7 +435,28 @@ final class DocumentState {
     ///
     /// Normally empty. An entry exists only between a file switch and the
     /// delivery of the render that was already running.
+    ///
+    /// At most one entry can exist per RAW file, and that is structural rather
+    /// than checked: a second entry for a file would need that file to be on
+    /// screen while an older generation of it is still settling, and a reopen
+    /// of a settling file does not start until the settling one is gone.
     private var settling: [Int: SettlingDocument] = [:]
+
+    /// An open that is waiting for an older generation of the **same** RAW
+    /// file to finish writing.
+    ///
+    /// One slot, newest wins — the same shape the render slot uses for a burst
+    /// of presses, and for the same reason: what a user wants now replaces what
+    /// they wanted a moment ago, and nothing replays the states in between.
+    private struct DeferredOpen {
+        let url: URL
+        /// The generation this open was given when it was requested. It is
+        /// already `status`'s generation; if a newer open arrives, this one is
+        /// obsolete and must never install anything.
+        let generation: Int
+    }
+
+    private var deferredOpen: DeferredOpen?
 
     init(
         decoder: RAWDecoder = LibRawDecoder(),
@@ -472,15 +506,25 @@ final class DocumentState {
         return error
     }
 
-    /// Whether any decision is still on its way to disk — the open document's
-    /// or a departed one's.
+    /// Whether asynchronous persistence work is still in flight — a decision
+    /// whose render has not been delivered, on the open document or on one the
+    /// workspace has left.
     ///
-    /// The seam a real close guard will need. There is no document lifecycle
-    /// to hang one on today, so nothing consumes this yet; it exists so that
-    /// when there is, the answer is already a single question with a single
-    /// answer rather than something to reconstruct. See
+    /// **This is not a close-safety predicate**, and the name says only what it
+    /// means: work is still moving. Two other things are equally "not durable"
+    /// and are deliberately not counted here, because nothing is in flight for
+    /// them and waiting would never make them safe:
+    ///
+    /// ```text
+    /// pending work        this property
+    /// known unsaved work  .renderRefused, .saveFailed, unsavedAdjustments
+    /// ```
+    ///
+    /// A future close guard has to consult both: the first says "wait", the
+    /// second says "tell the user". There is no document lifecycle to hang one
+    /// on today, so nothing consumes this yet. See
     /// `docs/decisions/0014-adjustment-lifecycle.md`.
-    var hasUnsettledAdjustments: Bool {
+    var hasPendingAdjustmentWork: Bool {
         if !settling.isEmpty { return true }
         if case .decoded(let loaded) = status, case .pending = loaded.persistence {
             return true
@@ -490,19 +534,50 @@ final class DocumentState {
 
     /// Selects a file and starts decoding it, replacing any decode in flight.
     ///
-    /// The new file appears as soon as it can; the previous one is never a
-    /// reason to make a user wait. What the previous document leaves behind is
-    /// settled in the background — see `handOverCurrentDocument`.
+    /// A **different** file appears as soon as it can: the document being left
+    /// is never a reason to make a user wait, and it settles in the background.
+    /// See `handOverCurrentDocument`.
+    ///
+    /// The **same** file is the exception, and the reason is the sidecar. Two
+    /// generations of one RAW file share one persistence destination, so a
+    /// reopen that read that file while an older generation of it still had a
+    /// write to make would read a record that is about to change — and the
+    /// older write could then land on top of a newer one. A reopen therefore
+    /// waits for its own file to settle before it reads anything. Nothing else
+    /// waits: two different RAW files have two different destinations and no
+    /// race between them. See `docs/decisions/0014-adjustment-lifecycle.md`.
     func open(_ url: URL) {
         decodeTask?.cancel()
         handOverCurrentDocument()
         generation += 1
         status = .decoding(url)
+        // At most one open is ever waiting, and it is always the newest one: a
+        // superseded deferred open is simply replaced here, which is how
+        // "newest user open wins" survives the wait.
+        deferredOpen = nil
 
+        guard !isSettling(url) else {
+            deferredOpen = DeferredOpen(url: url, generation: generation)
+            return
+        }
+        startDecoding(url, generation: generation)
+    }
+
+    /// Whether an older generation of this RAW file still has a write to make.
+    private func isSettling(_ url: URL) -> Bool {
+        settling.values.contains { $0.url == url }
+    }
+
+    /// Starts the decode for one open.
+    ///
+    /// Split from `open(_:)` because a same-URL reopen runs it later, after the
+    /// older generation of that file has finished writing. Everything the work
+    /// needs is passed in, so a deferred start is the same call as an immediate
+    /// one.
+    private func startDecoding(_ url: URL, generation: Int) {
         let decoder = self.decoder
         let store = self.store
         let render = self.render
-        let generation = self.generation
         // LibRaw decoding is a long, blocking C++ call. Detaching keeps it off
         // both the main actor and the caller's cooperative context.
         decodeTask = Task.detached(priority: .userInitiated) {
@@ -517,6 +592,25 @@ final class DocumentState {
                 self?.apply(outcome, generation: generation)
             }
         }
+    }
+
+    /// Starts the waiting open, if there is one and its file is now free.
+    ///
+    /// Called after a document settles. Two things can stop it, and both are
+    /// ordinary: the file still has another older generation to finish, or the
+    /// waiting open has been superseded by a newer one — in which case it is
+    /// dropped here without ever touching `status`, because the generation it
+    /// belongs to is no longer the one on screen.
+    private func startDeferredOpenIfReady() {
+        guard let deferred = deferredOpen else { return }
+        guard deferred.generation == generation else {
+            deferredOpen = nil
+            return
+        }
+        guard !isSettling(deferred.url) else { return }
+
+        deferredOpen = nil
+        startDecoding(deferred.url, generation: deferred.generation)
     }
 
     /// Decides what happens to the document being replaced.
@@ -956,10 +1050,6 @@ final class DocumentState {
         adjustments: ImageAdjustments
     ) {
         guard document.requested == adjustments else { return }
-        // Whatever happens below, this document is done: its newest state has
-        // now either been written or refused. Releasing the slot releases its
-        // scene-linear source with it.
-        defer { settling[generation] = nil }
 
         switch outcome {
         case .success:
@@ -978,6 +1068,16 @@ final class DocumentState {
                 )
             )
         }
+
+        // This document is done: its newest state has now either been written
+        // or refused. Releasing the slot releases its scene-linear source with
+        // it — and frees its file, which may be what an open is waiting for.
+        //
+        // The order matters and is the whole fix: the write above has already
+        // returned, so an open released here reads a sidecar that no older
+        // generation can still change.
+        settling[generation] = nil
+        startDeferredOpenIfReady()
     }
 
     /// Writes one rendered adjustment to its sidecar.
