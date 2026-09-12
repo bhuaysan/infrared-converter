@@ -44,9 +44,13 @@ public protocol ImageAdjustmentStore: Sendable {
 
     /// Saves the adjustments for a RAW file, replacing whatever was there.
     ///
-    /// The replacement must be atomic: a reader — this application on its next
-    /// launch, or a backup tool — must see either the whole previous record or
-    /// the whole new one, never a half-written file.
+    /// The replacement must be atomic **at the destination path**: a reader —
+    /// this application on its next launch, or a backup tool — must never
+    /// observe a half-written record there, and a write that fails partway
+    /// must leave the previous record in place.
+    ///
+    /// That is a statement about the replacement, not about durability. No
+    /// store is asked to promise what survives a power loss.
     ///
     /// The RAW file itself is never opened, let alone modified.
     ///

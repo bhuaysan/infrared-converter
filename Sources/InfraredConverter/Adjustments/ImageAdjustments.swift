@@ -78,7 +78,14 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// Not "the image is upright" — the file's own orientation still applies.
     public static let none = ImageAdjustments()
 
-    /// Whether the user has made any editing decision at all.
+    /// Whether this record asks for no net correction.
+    ///
+    /// **Not** "the user has decided nothing". Since the record is persisted,
+    /// identity is a decision a user can deliberately arrive at and save —
+    /// pressing Reset, or rotating four times — and it is written to the
+    /// sidecar like any other state. What is on disk and what a person chose
+    /// are questions this property cannot answer; it compares the adjustment
+    /// with the identity and nothing else.
     public var isIdentity: Bool { orientation.isIdentity }
 }
 

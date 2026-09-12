@@ -106,10 +106,15 @@ public struct JSONSidecarImageAdjustmentStore: ImageAdjustmentStore {
         }
 
         do {
-            // Atomic: Foundation writes a temporary file in the same directory
-            // and renames it over the target. A crash or a full disk leaves
-            // the previous record intact; it can never leave half a JSON
-            // document where a valid one was.
+            // Foundation writes the bytes to a temporary file in the same
+            // directory and renames it over the target. What that buys is the
+            // replacement: nothing ever observes a half-written record at the
+            // sidecar's path, and a write that fails partway leaves the
+            // previous record where it was.
+            //
+            // It is not a durability guarantee. Foundation promises nothing
+            // here about flushing to the device, so this says what the
+            // mechanism does and stops there.
             try data.write(to: sidecar, options: [.atomic])
         } catch {
             throw .cannotWrite(sidecar: sidecar, underlying: error)
