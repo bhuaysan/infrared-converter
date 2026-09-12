@@ -240,7 +240,7 @@ source + adjustments
 
 This architecture must make undo/redo, presets, recipes, batch processing, parameter comparison, and sidecars possible without modifying source data.
 
-The adjustment sidecar is the first of those to exist. A RAW file is an immutable input — never rewritten, appended to, re-tagged or replaced — and a user's decisions live in one application-owned JSON file beside it, named by one rule in one place. It is read **before** the file is decoded, so the first render is already the saved state; it is written only after a state has rendered successfully and is still the current one; and a record it cannot understand stops the open rather than becoming `ImageAdjustments.none`. See `docs/decisions/0013-adjustment-sidecar.md`.
+The adjustment sidecar is the first of those to exist. It holds the complete adjustment record — today the orientation correction and the creative channel mix — and it is written and read as a whole, never field by field. A RAW file is an immutable input — never rewritten, appended to, re-tagged or replaced — and a user's decisions live in one application-owned JSON file beside it, named by one rule in one place. It is read **before** the file is decoded, so the first render is already the saved state; it is written only after a state has rendered successfully and is still the current one; and a record it cannot understand stops the open rather than becoming `ImageAdjustments.none`. See `docs/decisions/0013-adjustment-sidecar.md`.
 
 ## Processing stages have explicit boundaries
 
@@ -347,6 +347,8 @@ The working representation is established **before** the infrared channel/color 
 The pipeline's "Display or Export Transform" step is now partly implemented, and only partly: a display preview boundary exists — exposure, hard display-range clipping, the sRGB transfer function, 8-bit quantisation — while export does not, and neither does any tone stage. See `docs/decisions/0008-display-preview-rendering.md`. Display and export remain separate decisions: an export path must choose its own bit depth and color handling and must never reuse the 8-bit preview buffer.
 
 Between the working representation and the creative channel mix there is now one more boundary, and it is the only stage in the pipeline that changes how many pixels there are: the **preview reduction**. It produces the reduced scene-linear rendition the interactive workspace holds, leaves the colour space, the linearity and the numeric range unchanged, and is deliberately absent from any full-resolution path. See `docs/decisions/0015-reduced-resolution-preview.md`.
+
+The creative channel mix that follows it is a **user adjustment**, not a fixed application choice. It is applied in the interactive half of the pipeline, to the retained **pre-mix** reduced preview — never composed onto a previous mix, and never baked into what a document holds open — and it forms one complete render state with the user's orientation correction. See `docs/decisions/0016-interactive-channel-mixer.md`.
 
 Image orientation is a stage of its own, between the infrared channel/color transform and the display or export transform. It is **discrete geometry**: the eight standard orientations, applied as an exact permutation of whole pixels, lossless and with every component's bit pattern preserved. It is the only stage that changes where a pixel is, or that can exchange the image's width and height. See `docs/decisions/0009-application-owned-orientation.md`.
 
@@ -536,7 +538,7 @@ The working representation is **extended linear sRGB**: sRGB primaries, the sRGB
 
 Choosing that space defines only the coordinate system. How camera-native sensor RGB is mapped into it is a separate decision, carried explicitly by a camera/IR color transform with its own provenance. Do not conflate the two, and do not treat a defined working space as a claim of colorimetric accuracy for an infrared capture.
 
-Creative infrared channel mixing is a **third** decision, distinct from both. It operates inside the working representation, leaves the color space unchanged, and carries its own provenance as creative intent — never as camera calibration, white balance, working-space establishment or filter calibration. That decision is recorded in `docs/decisions/0007-infrared-channel-mixing.md`.
+Creative infrared channel mixing is a **third** decision, distinct from both. It operates inside the working representation, leaves the color space unchanged, and carries its own provenance as creative intent — never as camera calibration, white balance, working-space establishment or filter calibration. That decision is recorded in `docs/decisions/0007-infrared-channel-mixing.md`, and that it is a **user adjustment** rather than a fixed application choice in `docs/decisions/0016-interactive-channel-mixer.md`.
 
 Arranging the pixels for viewing is a **fourth** decision, and it is not a colour decision at all: orientation moves whole pixels and changes no value, so it is kept out of every colour stage. That decision is recorded in `docs/decisions/0009-application-owned-orientation.md`, and the user-owned correction composed onto it in `docs/decisions/0010-user-owned-orientation-adjustment.md`.
 
@@ -746,6 +748,8 @@ RAW
 A cached full-resolution decode is also acceptable if measurement shows it is appropriate.
 
 That strategy is now decided, and it is the first of the two branches. The interactive workspace holds a **reduced-resolution scene-linear working representation** and re-renders only that; the RAW file plus `ImageAdjustments` remains the source of truth, and the reduced preview is a disposable cache derived from the pair. The reduction happens once, immediately after the camera-to-working transform and before the first creative stage, by exact area-weighted averaging of scene-linear Float32 values. The size rule lives in one value type, `PreviewResolutionPolicy`, and caps the longest edge of the unoriented image. See `docs/decisions/0015-reduced-resolution-preview.md`.
+
+The retained reduced preview is **pre-creative**: the reduction is the last thing that has happened to it. That is what makes a creative mix adjustable at all — a mix is applied to those values, never composed onto a previous mix — and it is enforced by the types rather than by a runtime check. The reduced domain has two image types, one for each side of the creative stage, so `M2 × (M1 × preview)` does not compile.
 
 A CFA mosaic is never resized by a general image filter. Neighbouring mosaic samples are different colours, so an ordinary downscale averages across colour filters and destroys the pattern semantics a demosaicer depends on. Reduce only after the representation has become ordinary multi-channel image data, unless a deliberately CFA-aware algorithm with a proven invariant and tests exists — and none does.
 
@@ -1073,7 +1077,7 @@ Examples:
 ```text
 docs/decisions/0001-use-libraw.md
 docs/decisions/0006-working-color-space.md
-docs/decisions/0016-metal-render-pipeline.md
+docs/decisions/0017-metal-render-pipeline.md
 ```
 
 The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`. The creative channel-mix stage that depends on it is `docs/decisions/0007-infrared-channel-mixing.md`, the display boundary that turns its result into pixels is `docs/decisions/0008-display-preview-rendering.md`, the geometry stage between them is `docs/decisions/0009-application-owned-orientation.md`, and the user-owned orientation adjustment composed onto that is `docs/decisions/0010-user-owned-orientation-adjustment.md`.
@@ -1083,6 +1087,8 @@ How those re-renders are scheduled and cancelled is `docs/decisions/0011-coalesc
 Where the user's adjustments are kept between sessions, how an open reads them before it renders, and when a state earns the right to be written, is `docs/decisions/0013-adjustment-sidecar.md`. How one adjustment is tracked from the button press to the disk — pending, saved, refused by the render, refused by the write — and what happens to it when the user leaves the photograph mid-render, is `docs/decisions/0014-adjustment-lifecycle.md`.
 
 That the interactive workspace re-renders a **reduced** scene-linear rendition rather than the sensor's own, where in the pipeline it is reduced and why not a step either side of that, why a CFA mosaic is never resized, and what the RAW file plus its canonical adjustments still are, is `docs/decisions/0015-reduced-resolution-preview.md`.
+
+That the creative channel mix is a canonical **user adjustment**, that the retained preview is therefore pre-mix, that the mix moved from `prepare` to `render` and forms one complete render state with the orientation, that the reduced domain has two image types so mixes cannot compose, and that the sidecar schema is at version 2 with a tested version 1 migration, is `docs/decisions/0016-interactive-channel-mixer.md`.
 
 ADR numbers are assigned in the order decisions are actually made; do not reuse a number that is already taken.
 
@@ -1451,6 +1457,14 @@ Pause and reconsider when code begins to show any of these patterns:
 - a reduced buffer wearing a full-resolution type, so that only `width < sensorWidth` distinguishes them
 - a preview size chosen inside a processing stage, or hard-coded anywhere but the size policy
 - a reduction performed after the creative channel mix, baking one mix into the retained buffer
+- retaining an already-mixed preview as the source for an adjustable mixer
+- composing a new IR mix onto a previously mixed preview
+- saving orientation and channel mix independently, or a render request naming one adjustment rather than the complete state
+- first rendering identity and then applying a saved channel mix
+- rerunning decode, demosaicing or the reduction for a channel-mix change
+- automatically assuming an opened RAW is infrared, or choosing the red/blue swap without a person asking
+- an interactive stage that does not poll cancellation at the documented granularity on every one of its paths
+- an image-affecting persisted field slipped into an existing schema version, or a migration that guesses rather than stating what the absent field meant
 - full RAW decode on every slider move without measurement or caching rationale
 - every feature depending directly on LibRaw
 - direct Metal shader calls from UI views

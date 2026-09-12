@@ -149,13 +149,13 @@ extended linear sRGB; unclamped Float32; still linear
 
 ═══════════ the full-resolution path ends here ═════════
 everything above is transient and released when preparation
-returns; everything below runs on the reduced buffer, which
-is what the workspace retains and re-renders
+returns; the reduced PRE-MIX buffer is what the workspace
+retains, and everything below it re-runs per adjustment
 
                   ↓
-       explicit IRChannelMix                       ┐
+       adjustments.channelMix → IRChannelMix       ┐
                   ↓                                ├ IRChannelMixer
-       SceneLinearPreviewImage, mixed              ┘
+       IRChannelMixedPreviewImage                  ┘
 
 ═══════════ CREATIVE IR WORKING RGB DOMAIN ═════════════
 the SAME extended linear sRGB; unclamped Float32; linear
@@ -279,12 +279,21 @@ receives no `RAWMetadata` and there is no default transform.
 reachable on `.source` so the mix can be changed without converting again. It
 receives no `RAWMetadata` either, and there is no default mix.
 
+It also has a **preview overload**, and that is the one the workspace uses:
+`SceneLinearPreviewImage` → `IRChannelMixedPreviewImage`, reduced in and
+reduced out. There is no wrapper chain in the reduced domain, deliberately —
+nothing full-resolution may be reachable from what a document retains — so the
+"mixes never compose" invariant is carried by the **types** instead: the input
+is the pre-mix type, the output is not, and nothing accepts the output back.
+See `docs/decisions/0016-interactive-channel-mixer.md`.
+
 `ImageOrienter` takes an `IRChannelMixedProcessedRAWImage` (or a bare
-`IRChannelMixedRGBImage`) **and an explicit orientation** and returns an
-`OrientedProcessedRAWImage`, which keeps the unoriented image reachable on
-`.source` so the orientation can be changed without mixing again. It receives
-no `RAWMetadata`: the orientation is chosen by the caller, normally from
-`RAWMetadata.Geometry.orientation`, and there is no default.
+`IRChannelMixedRGBImage`, or a reduced `IRChannelMixedPreviewImage`) **and an
+explicit orientation** and returns an `OrientedProcessedRAWImage`, which keeps
+the unoriented image reachable on `.source` so the orientation can be changed
+without mixing again. It receives no `RAWMetadata`: the orientation is chosen
+by the caller, normally from `RAWMetadata.Geometry.orientation`, and there is
+no default.
 
 `DisplayPreviewRenderer` takes an `OrientedProcessedRAWImage` (or a bare
 `OrientedSceneLinearRGBImage`) **and explicit settings** and returns a
@@ -735,9 +744,12 @@ replacing `M1` with `M2` gives `M2 × cameraRGB`, not `M2 × (M1 × cameraRGB)`.
 
 ### Working RGB → creative infrared RGB
 
-`IRChannelMixer` is the first explicitly **creative** stage. It takes a
-working-colour image and **one explicit mix**, and returns coordinates in the
-same space, remixed.
+`IRChannelMixer` is the first explicitly **creative** stage, and the first the
+user drives. It takes a working-colour image and **one explicit mix**, and
+returns coordinates in the same space, remixed. In the interactive workspace
+the mix comes from `ImageAdjustments.channelMix` — a canonical user decision,
+persisted with the orientation as one record — and the image it is applied to
+is the reduced, pre-mix buffer the document retains.
 
 #### A different question from the camera transform
 
@@ -838,6 +850,17 @@ crop, no resize, no orientation, no resampling.
 `apply(mix:replacing:)` reaches through it. Mixes never compose: replacing `M1`
 with `M2` gives `M2 × workingRGB`, not `M2 × (M1 × workingRGB)`. Two red/blue
 swaps in a row would otherwise cancel.
+
+In the reduced domain the same rule is enforced without a wrapper. The
+workspace retains the **pre-mix** `SceneLinearPreviewImage` and re-mixes it
+from scratch on every adjustment, and `IRChannelMixedPreviewImage` is accepted
+by no `apply` overload, so `M2 × (M1 × preview)` cannot be written at all.
+
+The mix is now on the **interactive** path, so it polls a
+`ProcessingCancellation` on the ADR 0011 contract: once before anything is
+allocated, once per row, `CancellationError` on refusal, and never a partially
+written buffer. All three execution paths poll, the identity path's finiteness
+sweep included.
 
 ### Creative infrared RGB → oriented scene-linear RGB
 
@@ -1111,8 +1134,8 @@ two colour spaces, two types, and no way to confuse them in a signature.
 
 `DisplayPreviewProcessedRAWImage` retains the scene-linear state, and
 `render(settings:replacing:)` reaches through it. Settings never compound:
-changing exposure re-renders from the `IRChannelMixedRGBImage`, never from the
-8-bit preview. Rendering an encoded buffer again would apply the transfer
+changing exposure re-renders from the channel-mixed scene-linear image, never
+from the 8-bit preview. Rendering an encoded buffer again would apply the transfer
 function twice, compound quantisation, recover no clipped highlight — and look
 entirely plausible.
 

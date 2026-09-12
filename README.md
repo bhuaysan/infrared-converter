@@ -52,8 +52,9 @@ bilinear Bayer demosaic          DemosaicedRAWRGBImage (camera-native RGB)
 explicit camera → working 3×3    WorkingColorRGBImage (extended linear sRGB)
    ↓                             SceneLinearPreviewReducer
 reduce to preview resolution     SceneLinearPreviewImage (same space, fewer pixels)
+                                   ← RETAINED; pre-creative
    ↓                             IRChannelMixer
-IR channel mixing                SceneLinearPreviewImage, mixed
+IR channel mixing (user choice)  IRChannelMixedPreviewImage
    ↓                             ImageOrienter
 recorded orientation + user      OrientedSceneLinearRGBImage (viewing order)
 adjustment = effective
@@ -70,13 +71,23 @@ retained scene-linear buffer is bit-identical, every value below `0` and above
 
 Everything above the reduction runs at sensor resolution and is **released when
 the file finishes opening**. Everything below it runs on the reduced buffer,
-which is the only thing an open document keeps. On the Olympus E-PL3 fixture
-that is 2048 × 1535 rather than 4056 × 3040: 36 MB held open instead of 400 MB,
-and 3.9× less work for every adjustment. The reduced preview is a **disposable
-cache** — the RAW file plus its canonical adjustments remain the source of
-truth, and a future full-resolution render will start from the file, never from
-these pixels. See
+which is the only scene-linear state an open document keeps. On the Olympus
+E-PL3 fixture that is 2048 × 1535 rather than 4056 × 3040: a 36 MB
+application-owned scene-linear buffer instead of a 400 MB chain, and 3.9× less
+work for every adjustment. Those figures are the scene-linear buffers alone — a
+document also holds the LibRaw diagnostic reference, the display images and the
+decoder metadata beside them, and no claim is made about their size. The
+reduced preview is a **disposable cache** — the RAW file plus its canonical
+adjustments remain the source of truth, and a future full-resolution render
+will start from the file, never from these pixels. See
 [ADR 0015](docs/decisions/0015-reduced-resolution-preview.md).
+
+The retained buffer is **pre-creative**: the reduction is the last thing that
+has happened to it. That is what makes the channel mix interactive — a mix the
+user chooses is applied to those values, never composed onto a previous mix —
+and it is enforced by the types rather than by a check: the mixer's input type
+is the pre-mix one and its output is a different type nothing retains. See
+[ADR 0016](docs/decisions/0016-interactive-channel-mixer.md).
 
 Every stage is application-owned, non-destructive and provenance-carrying:
 each result keeps the state it was produced from, so gains, algorithm,
@@ -92,10 +103,12 @@ records what it did and explicitly did not do.
 - **Camera → working conversion** always takes an explicit,
   provenance-carrying transform. There is no default and no automatic use of
   the file's visible-light colour matrix.
-- **Infrared channel mixing** is the first explicitly creative stage: a linear
-  3×3 remix inside the working colour space, with identity, red/blue swap and
-  explicit-matrix mixes. It changes no colour space and is recorded as creative
-  intent, never as a calibration.
+- **Infrared channel mixing** is the first explicitly creative stage and the
+  first one a user drives: a linear 3×3 remix inside the working colour space,
+  with identity, red/blue swap and explicit-matrix mixes. It changes no colour
+  space and is recorded as creative intent, never as a calibration. The
+  workspace offers Identity and Red/Blue Swap; a saved explicit matrix renders,
+  and there is no matrix editor.
 - **Preview reduction** caps the longest edge of the unoriented image at 2048
   pixels by exact area-weighted averaging of scene-linear `Float32`, per
   channel, in `Double`. No nearest-neighbour, no 8-bit round trip, no implicit
@@ -108,12 +121,18 @@ records what it did and explicitly did not do.
   the number of clipped samples recorded. It is deliberately **not** a tone
   pipeline.
 
-What the app-owned pipeline puts on screen, for a freshly opened file: a
-centred neutral-patch white balance, bilinear demosaicing, the identity
-false-colour camera transform, an identity channel mix, the orientation the
-file's own metadata names, `0 EV`, hard clipping and sRGB. Those choices are
-made in the application layer, visibly, because no processing API has a
-default to make them.
+What the app-owned pipeline puts on screen, for a freshly opened file with no
+saved decisions: a centred neutral-patch white balance, bilinear demosaicing,
+the identity false-colour camera transform, an identity channel mix, the
+orientation the file's own metadata names, `0 EV`, hard clipping and sRGB.
+Those choices are made in the application layer, visibly, because no processing
+API has a default to make them.
+
+The identity mix in that list is deliberate and is not a guess about the
+photograph. The red/blue swap is the canonical infrared rendering and it is
+**not** what a freshly opened file gets: nothing in this project knows whether
+a given RAW file is an infrared capture, and swapping a visible-light frame's
+channels would simply be wrong. Choosing the swap is creative user intent.
 
 Orientation is one of the eight standard arrangements, applied as an exact
 permutation of whole pixels by its own stage, lossless and with every `Float`
@@ -133,23 +152,52 @@ user orientation adjustment         an editing decision, one of eight states
 effective orientation               what the pixels are permuted by
 ```
 
-Rotate left, rotate right, flip horizontally, flip vertically and reset act on
-the adjustment, never on a pixel buffer and never on `RAWMetadata`. The
-adjustment is a **canonical single state**, not a history: four rotate-rights
-persist as "no correction", and the image is permuted exactly once, from the
-retained unoriented buffer, each time. Reset means "the user asked for no
-correction" — on a file whose metadata records a rotation, that restores the
-rotation rather than making the image upright. The adjustment is serialisable
-and versioned, and it is saved: one JSON sidecar beside the RAW file, written
-after a change has rendered and read back before the first render on the next
-open. See
-[ADR 0010](docs/decisions/0010-user-owned-orientation-adjustment.md) and
-[ADR 0013](docs/decisions/0013-adjustment-sidecar.md).
+Rotate left, rotate right, flip horizontally, flip vertically and Reset
+Orientation act on the adjustment, never on a pixel buffer and never on
+`RAWMetadata`. The adjustment is a **canonical single state**, not a history:
+four rotate-rights persist as "no correction", and the image is permuted
+exactly once, from the retained unoriented buffer, each time. Reset means "the
+user asked for no correction" — on a file whose metadata records a rotation,
+that restores the rotation rather than making the image upright, and it resets
+the orientation only. See
+[ADR 0010](docs/decisions/0010-user-owned-orientation-adjustment.md).
+
+### One record, two adjustments
+
+```text
+ImageAdjustments
+ ├── orientation    one of eight states, composed onto the file's own
+ └── channelMix     identity | red/blue swap | an explicit 3×3 matrix
+```
+
+Both are fields of one record, and every render request is that whole record —
+never one field. A burst across both controls therefore collapses to one newest
+complete state: nothing in between is rendered, put on screen or written. The
+record is serialisable and versioned, and it is saved: one JSON sidecar beside
+the RAW file, written after exactly that state has rendered and read back
+before the first render on the next open. See
+[ADR 0013](docs/decisions/0013-adjustment-sidecar.md) and
+[ADR 0016](docs/decisions/0016-interactive-channel-mixer.md).
 
 ```text
 OLYMPUS.ORF                        an immutable input; never written to
 OLYMPUS.ORF.iradjustments.json     the user's decisions, and the only place they live
 ```
+
+```json
+{
+  "schemaVersion" : 2,
+  "orientation" : "rotate90Clockwise",
+  "channelMix" : { "kind" : "redBlueSwap" }
+}
+```
+
+Schema version 2 added `channelMix`. A version 1 record — orientation alone —
+still reads, and migrates to the identity mix, because that is the state it was
+actually saved in rather than a guess about a missing field; it is written back
+as version 2 the next time it is saved. A version this build does not know is
+refused outright rather than read around, because a setting whose omission
+would change the photograph must never be silently ignored.
 
 Still legacy diagnostic behaviour: the LibRaw processed-RGB decode. It is no
 longer the workspace image. It supplies the inspector's decoder facts and a
@@ -157,11 +205,11 @@ small labelled reference thumbnail, and is kept because comparing the two paths
 is useful while the owned one is young.
 
 Still absent: any tone control — contrast, curves, highlight recovery,
-saturation; arbitrary rotation, straightening and crop; undo/redo; filter and
-capture profiles, recipes and presets beyond the two built-in mixes, so a
-saved record belongs to one photograph and cannot be reused; export of
-any kind; a reduced-resolution or cached preview path, so the workspace
-renders the full frame on every open; Metal.
+saturation; a white-balance or exposure control; a channel-mix matrix editor;
+arbitrary rotation, straightening and crop; undo/redo; filter and capture
+profiles, recipes and presets beyond the two built-in mixes, so a saved record
+belongs to one photograph and cannot be reused; export of any kind; a cache
+across opens; zoom or 1:1 inspection; Metal.
 
 There are two decode paths, and they are not interchangeable:
 
@@ -203,16 +251,23 @@ investigate, not a test to adjust:
 | Daylight pre-multipliers | `[2.2629104, 0.9284695, 1.2071348, 0.0]` |
 
 Through the whole owned pipeline — centred neutral patch, bilinear demosaic,
-identity false-colour transform, identity mix, `0 EV`:
+identity false-colour transform, area-averaged reduction to 2048 on the longest
+edge, identity mix, `0 EV`. The geometry rows describe the **reduced** preview,
+which is what the workspace shows; the active area it was reduced from is
+4056 × 3040 above.
 
 | | |
 | --- | --- |
 | Recorded orientation | EXIF 1 → LibRaw `flip 0` → `.upright` |
-| Preview geometry, no correction | 4056 × 3040 (`.upright` swaps nothing) |
-| Preview geometry, corrected | 3040 × 4056 (a user quarter turn left) |
-| Preview buffer | 36 990 720 bytes, 12 168 per row, 8-bit `R G B`, no alpha |
-| Samples clipped low / high | 11 / 0 |
+| Preview geometry, no correction | 2048 × 1535 (`.upright` swaps nothing) |
+| Preview geometry, corrected | 1535 × 2048 (a user quarter turn left) |
+| Retained scene-linear buffer | 9 431 040 `Float32` samples, 37 724 160 bytes |
+| Samples clipped low / high | 0 / 0 |
 | Non-finite intermediates | 0 |
+
+The clipped-low count is `0` where the full-resolution frame had `11`. Nothing
+was clamped — the reduction clamps nothing — those few slightly negative
+samples averaged back into range with their neighbours.
 
 The fixture photograph was taken with the camera turned, and the body recorded
 **upright anyway**. EXIF/TIFF tag 274 is physically present in the file's IFD0
@@ -466,9 +521,16 @@ See [RAW/README.md](RAW/README.md).
   records, and departing from that is a manual act. There is no camera-model
   table, no filename heuristic and no automatic straightening — the E-PL3
   fixture records EXIF 1 and is shown sideways until someone rotates it.
-- **Only orientation is adjustable.** Exposure, the white-balance patch, the
-  camera transform and the channel mix are still fixed application-layer
-  choices with no controls.
+- **Two things are adjustable: orientation and the channel mix.** Exposure, the
+  white-balance patch and the camera transform are still fixed
+  application-layer choices with no controls.
+- **The mix control offers two choices.** Identity and Red/Blue Swap. An
+  explicit 3×3 matrix is a persistable, renderable state and there is no editor
+  for one, so a saved matrix is shown and kept but cannot be authored in the
+  app.
+- **Nothing detects infrared.** A file with no saved decision opens with the
+  identity mix. There is no filter metadata, no conversion database and no
+  heuristic that would choose the red/blue swap for a photograph.
 - **Arbitrary rotation does not exist.** Orientation is a discrete permutation
   of whole pixels. Straightening, crop and perspective correction would need
   resampling, and none of that is implemented.
@@ -485,10 +547,12 @@ See [RAW/README.md](RAW/README.md).
   the reduction point, and none of them is adjustable today; when they become
   adjustable they will re-prepare from the RAW file rather than from the
   retained preview.
-- A reduced preview is held for as long as a file is open, so that a change of
-  orientation reprocesses instead of decoding: 2048 × 1535 × 3 `Float32`, about
-  36 MB for the E-PL3 fixture. There is still no eviction and no cache across
-  opens.
+- A reduced, **pre-mix** preview is held for as long as a file is open, so that
+  a change of orientation or channel mix reprocesses instead of decoding:
+  2048 × 1535 × 3 `Float32`, about 36 MB for the E-PL3 fixture. That is the
+  application-owned scene-linear buffer, not the whole document — the LibRaw
+  reference, the display images and the metadata are held beside it. There is
+  still no eviction and no cache across opens.
 - No transform in the project is a validated infrared colour calibration. The
   file's own `rgbFromCamera` is visible-light data and is opt-in and
   diagnostic only.
@@ -507,9 +571,10 @@ See [RAW/README.md](RAW/README.md).
   rather than the workspace image.
 - The owned preview decodes and processes the **full** frame on the CPU on
   every open — the reduction is the last step of that, not a way to avoid it —
-  and there is no cache across opens. Each adjustment re-orients and re-encodes
-  the reduced frame only.
-- Infrared white balance, channel mixing and a display boundary exist; no
+  and there is no cache across opens. Each adjustment re-mixes, re-orients and
+  re-encodes the reduced frame only.
+- Infrared white balance, an interactive channel mixer and a display boundary
+  exist; no
   false-colour mapping, hue remapping, filter profiles or recipes, no develop
   controls, no export.
 - The workspace's white-balance patch is a centred rectangle, not a scene

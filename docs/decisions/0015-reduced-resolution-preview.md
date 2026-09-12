@@ -32,11 +32,20 @@ mosaic through its `source` chain. Measured on the fixture:
 | white-balanced mosaic, `Float32` | 49,320,960 | 47.0 |
 | camera-native RGB, `Float32` | 147,962,880 | 141.1 |
 | working-colour RGB, `Float32` | 147,962,880 | 141.1 |
-| **total, per open document** | **419,228,160** | **399.8** |
+| **total, application-owned scene-linear chain** | **419,228,160** | **399.8** |
 
 The channel-mixed image itself added nothing: the initial mix is `.identity`,
 whose exact path hands the same immutable array back, so copy-on-write shares
 the working-colour buffer.
+
+**What that total is, and is not.** Every figure in this ADR describes the
+**application-owned scene-linear buffers** reachable from the retained
+processing state. It is not a measurement of an open `DocumentState`, which
+also holds the LibRaw processed-RGB diagnostic reference, the display
+`CGImage`s for both paths, the decoder metadata and a little small state. Those
+are held beside the scene-linear buffer and are not counted here, in either
+column. The claim is "the retained scene-linear chain fell from ~400 MB to
+~36 MB", never "an open document costs 36 MB".
 
 Two costs followed from that, and both were named in the code as things nobody
 had measured.
@@ -209,6 +218,15 @@ so changing the mix would have to re-decode, re-normalise, re-balance,
 re-demosaic and re-convert the whole file. Reducing before it costs nothing and
 keeps that door open: a future interactive mixer runs on 3.1 megapixels.
 
+> That door was walked through in the next milestone, and it needed one thing
+> this ADR did not provide. Reducing *before* the mix is where the reduction
+> happens; this milestone nonetheless applied `.identity` immediately
+> afterwards and retained the **mixed** result, which is exactly the value a
+> new mix cannot be applied to. [ADR 0016](0016-interactive-channel-mixer.md)
+> moves the mix out of `prepare` and into `render`, so the retained buffer is
+> pre-creative. It also splits the one reduced image type in two — see the
+> amendment at the end of this file.
+
 **Not earlier than this.** Reducing one stage earlier, in camera-native RGB,
 has a genuinely lower transient peak — the full-resolution working-colour
 buffer is never allocated — and it was the closest call in this decision. It
@@ -257,8 +275,12 @@ Measured structurally on the E-PL3 fixture, 4056 × 3040 active area, three
 | | dimensions | samples | retained bytes |
 | --- | --- | ---: | ---: |
 | before, scene-linear buffer | 4056 × 3040 | 36,990,720 | 147,962,880 |
-| before, whole retained chain | — | — | 419,228,160 |
+| before, whole retained scene-linear chain | — | — | 419,228,160 |
 | after | 2048 × 1535 | 9,431,040 | 37,724,160 |
+
+Both "before" rows and the "after" row are application-owned scene-linear
+buffers only. See the note under the table in the Context above: an open
+document holds other things, and no claim is made about their size.
 
 ```text
 scene-linear samples   3.92× fewer          74.5% fewer
@@ -359,12 +381,16 @@ Not in this milestone, deliberately:
 - thumbnails or a RAW browser
 - any change to the sidecar schema, the persisted fields, or the ADR 0013 and
   0014 lifecycle rules
-- any UI for exposure, white balance or the channel mixer
+- any UI for exposure, white balance or the channel mixer (the mixer arrived in
+  [ADR 0016](0016-interactive-channel-mixer.md), with a schema version of its
+  own)
 
 ## Consequences
 
-- One document open costs roughly 36 MB of scene-linear buffer rather than
-  roughly 400 MB of chain.
+- One document open holds roughly 36 MB of application-owned scene-linear
+  buffer rather than roughly 400 MB of chain. That is the scene-linear state
+  alone; the LibRaw reference, the display images and the metadata are held
+  beside it.
 - Every interactive adjustment does 3.92× less work on the fixture, and does it
   on a buffer that never reaches back to a full-resolution one.
 - The interactive preview is explicitly disposable. The RAW file plus
@@ -375,3 +401,37 @@ Not in this milestone, deliberately:
   the reduction clamps nothing — those few slightly negative samples averaged
   back into range with their neighbours. The reference test now pins the
   reduced frame's values and says why.
+
+---
+
+## Amendment (2026-09-13) — the reduced domain has two types, not one
+
+The "Types and provenance" section above chose **one** reduced image type with
+one optional field:
+
+```swift
+SceneLinearPreviewProcessing   resolution, workingColorProcessing, mix: IRChannelMix?
+```
+
+and said the invariant it protected — mixes never compose — was enforced by
+`IRChannelMixer` refusing an already-mixed preview. That reasoning held for
+exactly as long as the mix ran once, inside `prepare`, and was never replaced.
+
+[ADR 0016](0016-interactive-channel-mixer.md) makes the mix a user adjustment,
+so the pre-mix and post-mix states are both live in one call graph on every
+interaction. The optional is gone and there are two types:
+
+```text
+SceneLinearPreviewImage        reduced, pre-mix    retained by a document
+IRChannelMixedPreviewImage     reduced, post-mix   one render long
+```
+
+Nothing about the reduction, the reduction point, the size policy, the
+resampling method, the CFA rule or the memory figures changes. What changes is
+that `M2 × (M1 × preview)` no longer has an overload to be written in, and that
+the two `PreviewReductionError` cases which used to refuse it at runtime no
+longer exist.
+
+The cost this ADR named — "the one optional" — turned out to be the right thing
+to pay for one milestone and the wrong thing to keep for the next. It is
+recorded here rather than quietly reversed.
