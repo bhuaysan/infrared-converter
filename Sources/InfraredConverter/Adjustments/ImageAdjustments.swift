@@ -27,11 +27,16 @@ import Foundation
 ///
 /// ## Where it lives, and how long
 ///
-/// In memory, on `DocumentState`, for as long as a file is open. **Nothing
-/// writes it to disk.** The type is `Codable` and round-trips, and that is a
-/// separate fact from being persisted: the serialisable model, the current
-/// in-memory ownership, and a future sidecar or document format are three
-/// different things and only the first two exist.
+/// In memory, on `DocumentState`, for as long as a file is open — and in a
+/// JSON sidecar beside the RAW file between sessions, through
+/// `ImageAdjustmentStore`. This `Codable` conformance is that sidecar's wire
+/// format, which is why its refusals matter: a record this build cannot fully
+/// understand is an error rather than an empty set of adjustments, all the way
+/// out to the workspace. See `docs/decisions/0013-adjustment-sidecar.md`.
+///
+/// It is still not a recipe. A sidecar is the state of one photograph; a
+/// recipe is a reusable set of choices that also references camera, capture
+/// and filter profiles by stable identity, and none of those exist yet.
 public struct ImageAdjustments: Equatable, Sendable {
 
     /// The schema version this build writes and is the highest it reads.
