@@ -16,9 +16,9 @@ import Foundation
 ///     ↓  RAWWorkingColorConverter (.sensorRGBIdentityFalseColor)
 /// WorkingColorRGBImage                       ← full resolution; released here
 ///     ↓  SceneLinearPreviewReducer (area average, PreviewResolutionPolicy)
-/// SceneLinearPreviewImage                    ← reduced
-///     ↓  IRChannelMixer (.identity)
-/// SceneLinearPreviewImage, mixed             ← retained, for reprocessing
+/// SceneLinearPreviewImage                    ← reduced, PRE-MIX, retained
+///     ↓  IRChannelMixer (adjustments.channelMix)
+/// IRChannelMixedPreviewImage                 ← reduced, post-mix, transient
 ///     ↓  EffectiveImageOrientation (metadata orientation + user adjustment)
 ///     ↓  ImageOrienter (one permutation, by the effective orientation)
 /// OrientedSceneLinearRGBImage
@@ -43,12 +43,15 @@ import Foundation
 ///
 /// See `docs/decisions/0008-display-preview-rendering.md`, Decision 19.
 ///
-/// - **`.identity` channel mix.** The canonical infrared operation is the
+/// - **The channel mix the user asked for**, which for a file with no saved
+///   decision is `.identity`. The canonical infrared operation is the
 ///   red/blue swap, and it is deliberately *not* what a freshly opened file
 ///   gets: the application cannot know that a given file is an infrared
 ///   capture, and swapping a visible-light frame's channels would be simply
 ///   wrong. Identity traverses the creative stage and asks for nothing, which
-///   the provenance chain records as exactly that.
+///   the provenance chain records as exactly that. Only a person can ask for
+///   the swap — there is no automatic infrared detection, and this is the
+///   layer that would be the place for one if there were.
 /// - **`.sensorRGBIdentityFalseColor`.** The IR-safe placement into the
 ///   working space. The file's own `rgbFromCamera` is visible-light data whose
 ///   validity for an infrared capture is the open question of this project, so
@@ -68,16 +71,33 @@ import Foundation
 ///   application does not model is a **typed failure**, not a silent
 ///   `.upright`.
 ///
-/// ## Two phases, because orientation is adjustable
+/// ## Two phases, because the mix and the orientation are adjustable
 ///
-/// `prepare(decoding:using:)` runs everything up to and including the
-/// creative mix and hands back a `Source` that keeps it. `render(_:adjustments:)`
-/// takes that `Source` and applies the orientation and the display encode.
+/// ```text
+/// prepare   decode → normalise → balance → demosaic → convert → reduce
+///           → RETAIN the pre-mix reduced preview
 ///
-/// Changing the orientation therefore reruns the last two stages only, from
-/// the **unoriented** channel-mixed image — never from the previous displayed
-/// buffer. Nothing decodes, normalises, white-balances, demosaics, converts
-/// or remixes again, and no orientation is ever applied on top of another.
+/// render    retained pre-mix preview → channel mix → orientation → display
+/// ```
+///
+/// `prepare(decoding:using:)` stops at the reduction and hands back a `Source`
+/// that keeps its result. `render(_:adjustments:)` takes that `Source` and one
+/// complete `ImageAdjustments`, and applies every adjustable stage to it.
+///
+/// The retained source is **pre-creative**, and that is the load-bearing part.
+/// Changing either adjustment reruns the last three stages only, from the
+/// unmixed, unoriented image — never from the previous result. Nothing
+/// decodes, normalises, white-balances, demosaics, converts or reduces again;
+/// no mix is ever composed onto another, and no orientation is ever applied on
+/// top of another. Both facts have the same shape, and both are structural
+/// rather than remembered: the retained buffer's type is the pre-mix one, so
+/// there is no overload through which a second mix could reach it.
+///
+/// One render request is one complete state. `render` is never asked for "the
+/// new mix" or "the new orientation" — it is asked for the whole record — so a
+/// burst of changes to either control collapses to one newest state and
+/// nothing in between reaches the screen or the sidecar. See
+/// `docs/decisions/0016-interactive-channel-mixer.md`.
 ///
 /// None of this is a colour claim. The result is displayable, which is a
 /// strictly weaker property than correct.
@@ -114,10 +134,16 @@ import Foundation
 /// off the main thread, and `DocumentState` runs them there.
 struct WorkspacePreviewPipeline {
 
-    /// The creative mix a freshly opened file gets. See the note above: the
-    /// red/blue swap is a claim about the photograph, and this is not the
-    /// layer that can make it.
-    static let initialMix = IRChannelMix.identity
+    /// The creative mix a file with no saved decision gets. See the note
+    /// above: the red/blue swap is a claim about the photograph, and nothing
+    /// in this application is entitled to make it on a user's behalf.
+    ///
+    /// It is expressed as the **adjustment** rather than as an `IRChannelMix`,
+    /// because that is what it now is: the initial value of a field in the
+    /// canonical editing state, which the first render then applies like any
+    /// other. It is not a fallback inside a processing stage, and no
+    /// processing entry point has a default mix.
+    static let initialChannelMix = UserChannelMixAdjustment.identity
 
     /// The camera-to-working transform a freshly opened file gets.
     static let initialTransform = RAWCameraToWorkingColorTransform.sensorRGBIdentityFalseColor
@@ -235,53 +261,79 @@ struct WorkspacePreviewPipeline {
         let working = try RAWWorkingColorConverter()
             .convert(demosaiced.image, using: Self.initialTransform)
 
-        // The reduction point. Everything above this line is full resolution
-        // and every buffer it produced — the decoded mosaic, the normalised
-        // mosaic, the white-balanced mosaic, the camera-native image and the
-        // working-colour image — becomes unreachable when this function
-        // returns. Nothing below this line is ever full resolution again.
+        // The reduction point, and the end of this phase. Everything above
+        // this line is full resolution and every buffer it produced — the
+        // decoded mosaic, the normalised mosaic, the white-balanced mosaic,
+        // the camera-native image and the working-colour image — becomes
+        // unreachable when this function returns. Nothing below this line is
+        // ever full resolution again.
         //
-        // The bare-image overloads are used deliberately from here on: the
-        // wrapper overloads exist to keep a stage's whole upstream chain
-        // reachable through `source`, which is exactly what must not survive
-        // into the retained value.
+        // The bare-image overload is used deliberately: the wrapper overloads
+        // exist to keep a stage's whole upstream chain reachable through
+        // `source`, which is exactly what must not survive into the retained
+        // value.
+        //
+        // No creative stage runs here. The mix is an adjustment, and applying
+        // one now — even the identity — would retain a mixed buffer that a
+        // later mix could only be composed onto.
         let reduced = try SceneLinearPreviewReducer()
             .reduce(working, policy: policy)
-        let mixed = try IRChannelMixer().apply(to: reduced, mix: Self.initialMix)
 
         return Source(
-            preview: mixed,
+            preview: reduced,
             metadata: decoded.metadata,
             url: url,
             neutralPatch: region
         )
     }
 
-    /// Orients a prepared source and encodes it for display.
+    /// Applies one complete adjustment state to a prepared source and encodes
+    /// the result for display.
     ///
-    /// The cheap half, and the only half a change of orientation reruns. It
-    /// always starts from `source.channelMixed`, which is unoriented, so
-    /// repeated user rotations never compose pixel permutations: the image is
-    /// permuted exactly once, by the effective orientation, from the same
-    /// buffer every time.
+    /// ```text
+    /// retained pre-mix preview
+    ///   → IRChannelMixer      adjustments.channelMix
+    ///   → ImageOrienter       the file's orientation + adjustments.orientation
+    ///   → DisplayPreviewRenderer
+    /// ```
     ///
-    /// Both stages poll `cancellation`, so a superseded re-render stops inside
-    /// the pass rather than at the end of it. A cancelled call throws
+    /// The interactive half, and the only half either adjustment reruns. It
+    /// always starts from `source.preview`, which is unmixed and unoriented,
+    /// so repeated changes never compose: the mix is applied exactly once, by
+    /// the requested matrix, and the image is permuted exactly once, by the
+    /// effective orientation, from the same buffer every time.
+    ///
+    /// The order is fixed and is not a matter of taste. The mix is a colour
+    /// operation on a scene-linear representation and the orientation is
+    /// discrete geometry, so they commute in principle — but the orientation
+    /// stage is where the provenance chain is assembled and the display stage
+    /// is the first thing that stops being proportional to light, so a colour
+    /// stage after either would be a different kind of claim. Colour, then
+    /// geometry, then encoding.
+    ///
+    /// All three stages poll `cancellation`, so a superseded re-render stops
+    /// inside the pass rather than at the end of it. A cancelled call throws
     /// `CancellationError` and produces no preview; it is the caller's job to
     /// tell that apart from a stage refusing the image.
     ///
-    /// - Throws: `OrientationError`, `DisplayRenderingError`, or
-    ///   `CancellationError`.
+    /// - Throws: `PreviewReductionError`, `IRProcessingError`,
+    ///   `OrientationError`, `DisplayRenderingError`, or `CancellationError`.
     func render(
         _ source: Source,
         adjustments: ImageAdjustments,
         cancellation: ProcessingCancellation = .none
     ) throws -> WorkspacePreview {
+        let mixed = try IRChannelMixer().apply(
+            to: source.preview,
+            mix: adjustments.channelMix.mix,
+            cancellation: cancellation
+        )
+
         let orientation = try Self.effectiveOrientation(
             for: source.metadata, adjustments: adjustments
         )
         let oriented = try ImageOrienter().apply(
-            to: source.preview,
+            to: mixed,
             orientation: orientation.applied,
             cancellation: cancellation
         )
@@ -297,6 +349,7 @@ struct WorkspacePreviewPipeline {
             orientationProvenance: OrientationProvenance(
                 orientation: orientation, stage: oriented.processing
             ),
+            channelMixAdjustment: adjustments.channelMix,
             resolution: source.resolution,
             sourcePixelWidth: source.preview.width,
             sourcePixelHeight: source.preview.height,
@@ -330,20 +383,36 @@ extension WorkspacePreviewPipeline {
     ///
     /// ## What is retained, and what is not
     ///
-    /// Non-destructive reprocessing needs the **unoriented** scene-linear
-    /// image: an adjustment must be applied to it, never to whatever is
-    /// currently on screen. What it does not need is that image at sensor
-    /// resolution, and it does not need the chain that produced it.
+    /// Non-destructive reprocessing needs the **unmixed, unoriented**
+    /// scene-linear image: an adjustment must be applied to it, never to
+    /// whatever is currently on screen. What it does not need is that image at
+    /// sensor resolution, and it does not need the chain that produced it.
     ///
     /// This type therefore holds exactly one buffer, at preview resolution,
-    /// and reaches nothing upstream. The mosaics, the camera-native image and
-    /// the full-resolution working-colour image are unreachable from here by
-    /// construction: `prepare` uses the bare-image overloads after the
-    /// reduction precisely so that no `source` chain survives into this value.
+    /// pre-creative, and reaches nothing upstream. The mosaics, the
+    /// camera-native image and the full-resolution working-colour image are
+    /// unreachable from here by construction: `prepare` uses the bare-image
+    /// overload after the reduction precisely so that no `source` chain
+    /// survives into this value.
     ///
-    /// On the E-PL3 fixture that is the difference between roughly 420 MB of
-    /// Float32 buffers held open for as long as the file is open and roughly
-    /// 36 MB.
+    /// On the E-PL3 fixture the scene-linear buffer it holds is roughly 36 MB,
+    /// where the chain it replaced was roughly 420 MB. Those numbers are the
+    /// **application-owned scene-linear buffers** and nothing else: a document
+    /// also holds the LibRaw diagnostic reference, the display `CGImage`s, the
+    /// metadata and a little small state, and no claim is made here about
+    /// their size.
+    ///
+    /// ## Why pre-mix, and not identity-mixed
+    ///
+    /// An identity mix is arithmetically free — its path hands the same
+    /// immutable array back — so retaining a mixed buffer would have cost no
+    /// memory. It would have cost the adjustment. `IRChannelMixer` has no
+    /// overload that accepts an already-mixed preview, deliberately, because
+    /// `M2 × (M1 × preview)` is a different rendering from the one a user
+    /// asked for and is not recognisably wrong when it happens. Retaining the
+    /// pre-mix state is what makes a change of mix an ordinary re-render
+    /// rather than a re-decode. See
+    /// `docs/decisions/0016-interactive-channel-mixer.md`.
     ///
     /// ## Why that is safe
     ///
@@ -356,8 +425,12 @@ extension WorkspacePreviewPipeline {
     /// eventual full-resolution export does the same. See
     /// `docs/decisions/0015-reduced-resolution-preview.md`.
     struct Source: Sendable {
-        /// The reduced, unoriented, channel-mixed scene-linear image. The one
+        /// The reduced, **unmixed**, unoriented scene-linear image. The one
         /// buffer every interactive re-render reads.
+        ///
+        /// Its type is what says it is unmixed: `SceneLinearPreviewImage` is
+        /// the pre-creative state, and the mixer's result is a different type
+        /// that no `Source` can hold.
         let preview: SceneLinearPreviewImage
         /// The RAW-state metadata the chain was processed against.
         ///
@@ -404,6 +477,15 @@ struct WorkspacePreview {
     /// Why the image has the geometry it has: what the file recorded, what
     /// the user asked for, and what `ImageOrienter` actually applied.
     let orientationProvenance: OrientationProvenance
+    /// The creative channel mix the user asked for, as the canonical
+    /// adjustment rather than as the matrix it became.
+    ///
+    /// `processing.mix` already carries the `IRChannelMix` the stage applied,
+    /// and this is not a duplicate of it: one is what the pipeline did, the
+    /// other is what the person chose. They are the same two facts
+    /// `orientationProvenance` keeps apart for the orientation — a control
+    /// reads this, an audit of the rendering reads that.
+    let channelMixAdjustment: UserChannelMixAdjustment
     /// What resolution these pixels are, what full resolution they were
     /// reduced from, by which policy and by which method.
     ///
@@ -436,6 +518,8 @@ struct WorkspacePreview {
     var effectiveOrientation: RAWImageOrientation {
         orientationProvenance.effectiveOrientation
     }
+    /// The mix the creative stage actually applied, with its provenance.
+    var channelMix: IRChannelMix { processing.mix }
     /// Width of the full-resolution, unoriented active image area, in pixels.
     var fullResolutionSourcePixelWidth: Int { resolution.sourceWidth }
     /// Height of that same area.

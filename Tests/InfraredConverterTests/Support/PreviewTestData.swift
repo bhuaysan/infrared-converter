@@ -63,6 +63,74 @@ enum PreviewTestData {
         return working(width: width, height: height, values: values)
     }
 
+    /// A reduced scene-linear preview from interleaved `R G B` values.
+    ///
+    /// It is the **pre-mix** type, which is what a `WorkspacePreviewPipeline`
+    /// source holds. `method` says the values were not resampled, which is
+    /// true: a test builds them directly.
+    static func preview(
+        width: Int,
+        height: Int,
+        values: [Float],
+        policy: PreviewResolutionPolicy = PreviewResolutionPolicy(maximumLongestEdge: 2048)
+    ) -> SceneLinearPreviewImage {
+        SceneLinearPreviewImage(
+            width: width,
+            height: height,
+            values: values,
+            processing: SceneLinearPreviewProcessing(
+                resolution: PreviewResolution(
+                    sourceWidth: width,
+                    sourceHeight: height,
+                    width: width,
+                    height: height,
+                    policy: policy,
+                    method: .unreduced
+                ),
+                workingColorProcessing: workingColorProcessing()
+            )
+        )
+    }
+
+    /// A reduced preview whose samples are generated per pixel and channel.
+    static func preview(
+        width: Int,
+        height: Int,
+        sample: (_ row: Int, _ column: Int, _ channel: Int) -> Float
+    ) -> SceneLinearPreviewImage {
+        var values: [Float] = []
+        values.reserveCapacity(width * height * 3)
+        for row in 0..<height {
+            for column in 0..<width {
+                for channel in 0..<3 {
+                    values.append(sample(row, column, channel))
+                }
+            }
+        }
+        return preview(width: width, height: height, values: values)
+    }
+
+    /// A prepared workspace source wrapping a synthetic pre-mix preview, so a
+    /// test can exercise `render` without decoding anything.
+    ///
+    /// The metadata records `flip` 0, so the file's own orientation is upright
+    /// and the effective orientation is whatever the user asked for.
+    static func source(
+        _ preview: SceneLinearPreviewImage,
+        url: URL = URL(fileURLWithPath: "/tmp/synthetic-preview.orf")
+    ) -> WorkspacePreviewPipeline.Source {
+        var metadata = RAWTestData.metadata()
+        metadata.geometry.flip = 0
+        return WorkspacePreviewPipeline.Source(
+            preview: preview,
+            metadata: metadata,
+            url: url,
+            neutralPatch: RAWActiveAreaRegion(
+                originRow: 0, originColumn: 0, width: 2, height: 2
+            )
+        )
+    }
+
     /// A deliberately non-symmetric matrix with exact binary-fraction
     /// coefficients, so that arithmetic on it is exactly representable.
     static func asymmetricMatrix() throws -> RAWColorMatrix3x3 {

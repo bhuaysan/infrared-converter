@@ -271,10 +271,10 @@ struct SceneLinearPreviewReducerTests {
         #expect(reduced.processing.whiteBalanceApplied)
         #expect(reduced.processing.normalized)
 
-        // The creative stage has not run on it yet, and it says so.
-        #expect(reduced.processing.mix == nil)
+        // The creative stage has not run on it, and the type says so: this is
+        // the pre-creative working representation, and there is no field on it
+        // a mix could be recorded in.
         #expect(!reduced.processing.channelMixApplied)
-        #expect(reduced.processing.channelMixProcessing == nil)
         #expect(reduced.isGeometryConsistent)
     }
 
@@ -429,7 +429,7 @@ struct PreviewChannelMixTests {
         let mixed = try IRChannelMixer().apply(to: try Self.reduced(), mix: .redBlueSwap)
         #expect(mixed.processing.mix == .redBlueSwap)
         #expect(mixed.processing.channelMixApplied)
-        #expect(mixed.processing.channelMixProcessing?.mixSource == .redBlueSwap)
+        #expect(mixed.processing.channelMixProcessing.mixSource == .redBlueSwap)
         // The reduction record survives the mix untouched.
         #expect(mixed.processing.resolution.sourceWidth == 8)
         #expect(mixed.processing.resolution.width == 4)
@@ -457,26 +457,46 @@ struct PreviewChannelMixTests {
         #expect(zip(mixed.values, reduced.values).allSatisfy { $0.bitPattern == $1.bitPattern })
     }
 
-    /// Mixes never compose. At full resolution that is structural — the
-    /// wrapper reaches through `source` — and here it is enforced, because the
-    /// reduced domain has one image type.
-    @Test("A second mix on an already-mixed preview is refused, not composed")
-    func mixesNeverCompose() throws {
-        let mixed = try IRChannelMixer().apply(to: try Self.reduced(), mix: .redBlueSwap)
-        #expect(throws: PreviewReductionError.self) {
-            _ = try IRChannelMixer().apply(to: mixed, mix: .redBlueSwap)
-        }
-    }
+    // Two tests used to live here and cannot be written any more, which is
+    // the point of them no longer existing:
+    //
+    //   "a second mix on an already-mixed preview is refused"
+    //   "orienting an unmixed preview is refused"
+    //
+    // Both exercised runtime guards on one reduced image type that stood for
+    // the pre-mix and post-mix states at once. There are now two types, so
+    // `IRChannelMixer().apply(to: mixedPreview, ...)` and
+    // `ImageOrienter().apply(to: unmixedPreview, ...)` do not compile, and a
+    // test can no longer construct either mistake to assert that it is
+    // refused. Mixes never compose because there is nothing to compose them
+    // with. See `docs/decisions/0016-interactive-channel-mixer.md`.
+    //
+    // What can still be written is the positive half, and it is, below: a mix
+    // runs exactly once on a pre-mix image, and orienting the result carries
+    // the whole chain.
 
-    /// Orientation carries the whole chain, so it needs the creative stage to
-    /// have run. A preview with no mix has no complete chain to carry.
-    @Test("Orienting an unmixed preview is refused")
-    func orientingAnUnmixedPreviewIsRefused() throws {
-        #expect(throws: PreviewReductionError.channelMixNotApplied) {
-            _ = try ImageOrienter().apply(
-                to: try Self.reduced(), orientation: .upright
-            )
-        }
+    /// The mix is applied to the reduced pre-mix values themselves, so two
+    /// different mixes of one source are independent renderings rather than a
+    /// sequence.
+    @Test("Two mixes of one preview are each applied to the unmixed values")
+    func eachMixStartsFromTheUnmixedValues() throws {
+        let reduced = try Self.reduced()
+        let mixer = IRChannelMixer()
+
+        let swapped = try mixer.apply(to: reduced, mix: .redBlueSwap)
+        let swappedAgain = try mixer.apply(to: reduced, mix: .redBlueSwap)
+        let identity = try mixer.apply(to: reduced, mix: .identity)
+
+        // Two swaps of the same source are the same rendering. Had the second
+        // composed onto the first, it would be the identity instead.
+        #expect(swapped.values == swappedAgain.values)
+        #expect(
+            zip(identity.values, reduced.values).allSatisfy {
+                $0.bitPattern == $1.bitPattern
+            }
+        )
+        // And the source itself is untouched by either.
+        #expect(reduced.values == (try Self.reduced()).values)
     }
 
     @Test("Orienting a mixed preview records the reduction on its provenance")

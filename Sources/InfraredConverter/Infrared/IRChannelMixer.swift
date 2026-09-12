@@ -126,10 +126,15 @@ public struct IRChannelMixer: Sendable {
     ///     `RAWWorkingColorConverter` produces.
     ///   - mix: which matrix, authored for which working space, obtained how.
     ///     Required — there is deliberately no default.
-    /// - Throws: `IRProcessingError`.
+    ///   - cancellation: polled once per row. Defaults to never cancelling:
+    ///     nothing on the full-resolution path is interactive today, and the
+    ///     parameter exists so that the two entry points share one contract
+    ///     rather than two.
+    /// - Throws: `IRProcessingError`, or `CancellationError`.
     public func apply(
         to image: WorkingColorRGBImage,
-        mix: IRChannelMix
+        mix: IRChannelMix,
+        cancellation: ProcessingCancellation = .none
     ) throws -> IRChannelMixedRGBImage {
         guard image.isGeometryConsistent else {
             throw IRProcessingError.invalidGeometry(
@@ -158,7 +163,11 @@ public struct IRChannelMixer: Sendable {
         )
 
         let values = try Self.mixedValues(
-            image.values, width: image.width, height: image.height, mix: mix
+            image.values,
+            width: image.width,
+            height: image.height,
+            mix: mix,
+            cancellation: cancellation
         )
 
         return IRChannelMixedRGBImage(
@@ -208,37 +217,67 @@ public struct IRChannelMixer: Sendable {
     /// full-resolution and the preview-resolution entry points, so a reduced
     /// image and a sensor-resolution one go through identical arithmetic.
     private static func mixedValues(
-        _ values: [Float], width: Int, height: Int, mix: IRChannelMix
+        _ values: [Float],
+        width: Int,
+        height: Int,
+        mix: IRChannelMix,
+        cancellation: ProcessingCancellation = .none
     ) throws -> [Float] {
         if mix.matrix.isIdentity {
-            return try identityValues(values, width: width, height: height)
+            return try identityValues(
+                values, width: width, height: height, cancellation: cancellation
+            )
         }
         if mix.matrix == IRChannelMix.redBlueSwap.matrix {
-            return try redBlueSwappedValues(values, width: width, height: height)
+            return try redBlueSwappedValues(
+                values, width: width, height: height, cancellation: cancellation
+            )
         }
-        return try mixedValues(values, width: width, height: height, matrix: mix.matrix)
+        return try mixedValues(
+            values,
+            width: width,
+            height: height,
+            matrix: mix.matrix,
+            cancellation: cancellation
+        )
     }
 
     // MARK: - Preview resolution
 
-    /// Applies a creative channel mix to a **reduced** scene-linear preview.
+    /// Applies the user's creative channel mix to a **reduced** scene-linear
+    /// preview: `SceneLinearPreviewImage` → `IRChannelMixedPreviewImage`.
     ///
-    /// Identical arithmetic to the full-resolution entry point — the same
-    /// three exact paths, the same `Double` accumulation, the same refusal of
-    /// non-finite values — over fewer pixels. That is the whole difference,
-    /// and it is why the reduction is allowed to happen before this stage:
-    /// a 3x3 matrix distributes over the weighted sums an area average is
-    /// made of, so mixing a reduced image and reducing a mixed one agree.
+    /// The interactive entry point, and the first stage of every re-render the
+    /// workspace performs. Identical arithmetic to the full-resolution entry
+    /// point — the same three exact paths, the same `Double` accumulation, the
+    /// same refusal of non-finite values — over fewer pixels. That is the
+    /// whole difference, and it is why the reduction is allowed to happen
+    /// before this stage: a 3x3 matrix distributes over the weighted sums an
+    /// area average is made of, so mixing a reduced image and reducing a mixed
+    /// one agree.
     ///
-    /// - Throws: `PreviewReductionError.channelMixAlreadyApplied` when the
-    ///   preview has already been through this stage. Mixes never compose,
-    ///   and here that is enforced rather than made structurally impossible:
-    ///   the reduced domain has one image type, so the guard lives in the
-    ///   provenance record it carries.
+    /// ## Mixes never compose, and here that is structural
+    ///
+    /// The input type is the **pre-mix** one and the output type is not, so
+    /// there is no overload this result can be handed back to. `M2 × (M1 ×
+    /// preview)` does not compile, which is a stronger statement than the
+    /// runtime refusal this used to make — and one nobody has to remember.
+    /// A user who changes their mix gets `M2 × preview`, from the buffer the
+    /// document retains. See
+    /// `docs/decisions/0016-interactive-channel-mixer.md`.
+    ///
+    /// - Parameter cancellation: polled once before anything is allocated and
+    ///   once per row, the same contract `ImageOrienter` and
+    ///   `DisplayPreviewRenderer` follow. This stage is now on the interactive
+    ///   path, where a user changing their mind mid-pass is ordinary, so a
+    ///   superseded mix stops inside the pass rather than at the end of it.
+    /// - Throws: `PreviewReductionError` for geometry, `IRProcessingError` for
+    ///   values and spaces, or `CancellationError`.
     public func apply(
         to preview: SceneLinearPreviewImage,
-        mix: IRChannelMix
-    ) throws -> SceneLinearPreviewImage {
+        mix: IRChannelMix,
+        cancellation: ProcessingCancellation = .none
+    ) throws -> IRChannelMixedPreviewImage {
         guard preview.isGeometryConsistent else {
             throw PreviewReductionError.invalidGeometry(
                 reason: """
@@ -248,11 +287,6 @@ public struct IRChannelMixer: Sendable {
                     """
             )
         }
-        if let existing = preview.processing.mix {
-            throw PreviewReductionError.channelMixAlreadyApplied(
-                existing: existing, requested: mix
-            )
-        }
         guard preview.processing.workingColorSpace == mix.workingColorSpace else {
             throw IRProcessingError.channelMixWorkingColorSpaceMismatch(
                 image: preview.processing.workingColorSpace,
@@ -260,11 +294,19 @@ public struct IRChannelMixer: Sendable {
             )
         }
 
+        // Before anything is allocated: a caller that has already superseded
+        // this mix gets nothing built for it at all.
+        try cancellation.check()
+
         let values = try Self.mixedValues(
-            preview.values, width: preview.width, height: preview.height, mix: mix
+            preview.values,
+            width: preview.width,
+            height: preview.height,
+            mix: mix,
+            cancellation: cancellation
         )
 
-        return SceneLinearPreviewImage(
+        return IRChannelMixedPreviewImage(
             width: preview.width,
             height: preview.height,
             values: values,
@@ -289,9 +331,14 @@ public struct IRChannelMixer: Sendable {
     /// `IRChannelMixedRGBImage` this stage produced holds finite values
     /// whichever path made it. That sweep reads, and allocates nothing.
     private static func identityValues(
-        _ values: [Float], width: Int, height: Int
+        _ values: [Float],
+        width: Int,
+        height: Int,
+        cancellation: ProcessingCancellation
     ) throws -> [Float] {
-        try validateFinite(values, width: width, height: height)
+        try validateFinite(
+            values, width: width, height: height, cancellation: cancellation
+        )
         return values
     }
 
@@ -316,7 +363,10 @@ public struct IRChannelMixer: Sendable {
     /// One owned output buffer is allocated, because the values genuinely have
     /// to be reordered; copy-on-write cannot help when the contents change.
     private static func redBlueSwappedValues(
-        _ values: [Float], width: Int, height: Int
+        _ values: [Float],
+        width: Int,
+        height: Int,
+        cancellation: ProcessingCancellation
     ) throws -> [Float] {
         let outputCount = values.count
 
@@ -325,6 +375,13 @@ public struct IRChannelMixer: Sendable {
             try values.withUnsafeBufferPointer { input in
                 var base = 0
                 for row in 0..<height {
+                    // One poll per row. Throwing here abandons the whole
+                    // array: the caller gets `CancellationError`, never an
+                    // image with some rows swapped and the rest not.
+                    if cancellation.isCancelled {
+                        initializedCount = base
+                        throw CancellationError()
+                    }
                     for column in 0..<width {
                         let red = input[base]
                         let green = input[base + 1]
@@ -379,7 +436,8 @@ public struct IRChannelMixer: Sendable {
         _ values: [Float],
         width: Int,
         height: Int,
-        matrix: RAWColorMatrix3x3
+        matrix: RAWColorMatrix3x3,
+        cancellation: ProcessingCancellation
     ) throws -> [Float] {
         // Loaded once, outside the per-pixel loop.
         let m00 = matrix.m00, m01 = matrix.m01, m02 = matrix.m02
@@ -393,6 +451,11 @@ public struct IRChannelMixer: Sendable {
             try values.withUnsafeBufferPointer { input in
                 var base = 0
                 for row in 0..<height {
+                    // One poll per row, as on every other path.
+                    if cancellation.isCancelled {
+                        initializedCount = base
+                        throw CancellationError()
+                    }
                     for column in 0..<width {
                         let inputRed = input[base]
                         let inputGreen = input[base + 1]
@@ -467,12 +530,20 @@ public struct IRChannelMixer: Sendable {
 
     /// Sweeps the input for non-finite values, reporting the first with its
     /// coordinate and channel. Reads only; allocates nothing.
+    ///
+    /// Cancellable per row like every other path here, so the identity path's
+    /// granularity is the same as the arithmetic paths' rather than being the
+    /// one place a superseded render runs to the end of the frame.
     private static func validateFinite(
-        _ values: [Float], width: Int, height: Int
+        _ values: [Float],
+        width: Int,
+        height: Int,
+        cancellation: ProcessingCancellation = .none
     ) throws {
         try values.withUnsafeBufferPointer { input in
             var base = 0
             for row in 0..<height {
+                if cancellation.isCancelled { throw CancellationError() }
                 for column in 0..<width {
                     let red = input[base]
                     let green = input[base + 1]

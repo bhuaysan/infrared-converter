@@ -34,14 +34,20 @@ public enum PreviewReductionError: Error, Equatable {
     /// rather than clamped: an image carrying an invented value is worse than
     /// a failed stage.
     case nonFiniteResult(row: Int, column: Int, channel: RAWLinearRGBChannel)
-    /// The creative mix was asked to run on a reduced image it had already run
-    /// on. Mixes never compose, and a composed mix is not recognisably wrong —
-    /// it is simply a different rendering than the one asked for.
-    case channelMixAlreadyApplied(existing: IRChannelMix, requested: IRChannelMix)
-    /// A stage that needs the creative mix to have run was handed a reduced
-    /// image it had not run on.
-    case channelMixNotApplied
 }
+
+// Two cases used to live here and no longer can be reached, so they no longer
+// exist: `channelMixAlreadyApplied`, for a second mix on an already-mixed
+// preview, and `channelMixNotApplied`, for orienting a preview the creative
+// stage had not run on. Both were guards on one reduced image type that
+// represented the pre-mix and post-mix states at once. There are now two
+// types, so neither call compiles, and an error case describing an impossible
+// state would be a claim about nothing. See
+// `docs/decisions/0016-interactive-channel-mixer.md`.
+//
+// `IRProcessingError.channelMixWorkingColorSpaceMismatch` is deliberately
+// *not* treated the same way: it is unreachable today because one working
+// space exists, and it becomes reachable the day a second one does.
 
 extension PreviewReductionError: LocalizedError {
     public var errorDescription: String? {
@@ -54,10 +60,6 @@ extension PreviewReductionError: LocalizedError {
             return "The image data contains a value that is not a finite number."
         case .nonFiniteResult:
             return "Reducing this image produces values that are not finite numbers."
-        case .channelMixAlreadyApplied:
-            return "This preview has already been channel-mixed."
-        case .channelMixNotApplied:
-            return "This preview has not been channel-mixed yet."
         }
     }
 
@@ -79,17 +81,6 @@ extension PreviewReductionError: LocalizedError {
             return """
                 The reduced \(channel) coordinate at row \(row), column \(column) is not a \
                 finite Float32.
-                """
-        case .channelMixAlreadyApplied(let existing, let requested):
-            return """
-                The preview already carries \(existing.source.diagnosticDescription) and was \
-                asked for \(requested.source.diagnosticDescription). Mixes are applied to the \
-                unmixed image, never to a previous result.
-                """
-        case .channelMixNotApplied:
-            return """
-                The reduced preview has not been through the creative channel-mix stage, so \
-                there is no complete provenance record to carry forward.
                 """
         }
     }

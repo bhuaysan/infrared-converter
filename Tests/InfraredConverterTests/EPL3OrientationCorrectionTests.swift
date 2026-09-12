@@ -152,9 +152,12 @@ struct EPL3OrientationCorrectionTests {
     @Test("Named destination coordinates map to the expected source pixels")
     func namedCoordinatesMapCorrectly() throws {
         let source = try Self.prepared()
-        let mixed = source.preview
+        // The retained source is pre-mix, so the creative stage runs first.
+        // `.identity` is bit-preserving, which is what makes it the right mix
+        // for a test about where pixels go rather than what they are.
+        let mixed = try IRChannelMixer().apply(to: source.preview, mix: .identity)
         let oriented = try ImageOrienter().apply(
-            to: source.preview, orientation: .rotated270Clockwise
+            to: mixed, orientation: .rotated270Clockwise
         )
 
         #expect(oriented.width == Self.previewHeight)
@@ -205,11 +208,12 @@ struct EPL3OrientationCorrectionTests {
     @Test("The correction is a rotation, not the reflection of the same dimensions")
     func theCorrectionIsNotAReflection() throws {
         let source = try Self.prepared()
+        let mixed = try IRChannelMixer().apply(to: source.preview, mix: .identity)
         let rotated = try ImageOrienter().apply(
-            to: source.preview, orientation: .rotated270Clockwise
+            to: mixed, orientation: .rotated270Clockwise
         )
         let reflected = try ImageOrienter().apply(
-            to: source.preview, orientation: .transposed
+            to: mixed, orientation: .transposed
         )
 
         // Same geometry, different pixels.

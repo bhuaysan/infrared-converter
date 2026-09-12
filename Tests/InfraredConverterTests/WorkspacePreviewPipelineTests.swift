@@ -15,9 +15,12 @@ struct WorkspacePreviewPipelineTests {
     func initialChoicesAreStated() {
         // Identity, not the red/blue swap: the application cannot know that a
         // file is an infrared capture, and swapping a visible-light frame's
-        // channels would simply be wrong.
-        #expect(WorkspacePreviewPipeline.initialMix == .identity)
-        #expect(WorkspacePreviewPipeline.initialMix.source == .identity)
+        // channels would simply be wrong. It is now the initial value of a
+        // user adjustment rather than a fixed pipeline choice, and it is still
+        // the identity.
+        #expect(WorkspacePreviewPipeline.initialChannelMix == .identity)
+        #expect(WorkspacePreviewPipeline.initialChannelMix.mix.source == .identity)
+        #expect(ImageAdjustments.none.channelMix == .identity)
 
         // The IR-safe placement, never the file's visible-light matrix.
         #expect(WorkspacePreviewPipeline.initialTransform == .sensorRGBIdentityFalseColor)

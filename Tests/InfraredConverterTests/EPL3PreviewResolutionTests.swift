@@ -71,7 +71,10 @@ struct EPL3PreviewResolutionTests {
         #expect(source.preview.processing.workingColorSpace == .extendedLinearSRGB)
         #expect(source.preview.processing.demosaiced)
         #expect(source.preview.processing.whiteBalanceApplied)
-        #expect(source.preview.processing.mix == .identity)
+        // The retained source is PRE-mix: the creative stage has not run on
+        // it, which is what lets an interactive mixer apply a mix to it rather
+        // than compose one onto a previous result.
+        #expect(!source.preview.processing.channelMixApplied)
 
         // The metadata came through, and the white-balance region is still in
         // full-resolution sensor coordinates.

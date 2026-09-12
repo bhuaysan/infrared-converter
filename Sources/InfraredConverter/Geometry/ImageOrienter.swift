@@ -181,11 +181,12 @@ public struct ImageOrienter: Sendable {
         )
     }
 
-    /// Applies an orientation to a **reduced** scene-linear preview.
+    /// Applies an orientation to a **reduced, channel-mixed** scene-linear
+    /// preview.
     ///
     /// The only entry point the interactive workspace uses. It permutes the
     /// preview-resolution buffer — 3.1 megapixels on the E-PL3 rather than
-    /// 12.3 — and nothing upstream runs: no channel mix, no camera
+    /// 12.3 — and nothing upstream of the creative mix runs: no camera
     /// conversion, no demosaic, no white balance, no decode, and no
     /// resampling. The size was decided once, on the unoriented image, and an
     /// orientation can only exchange the two dimensions, never re-open the
@@ -195,12 +196,14 @@ public struct ImageOrienter: Sendable {
     /// preview says that its pixels are a smaller rendition rather than the
     /// sensor's own.
     ///
-    /// - Throws: `PreviewReductionError.channelMixNotApplied` when the preview
-    ///   has not been through the creative stage yet. The orientation record
-    ///   carries the whole upstream chain, and a preview with no mix on it
-    ///   has no complete chain to carry.
+    /// The input type is the **post-mix** one, and that is what makes the
+    /// provenance chain complete by construction: the orientation record
+    /// carries the whole history through `channelMixProcessing`, and a preview
+    /// the creative stage had not run on has no such history to carry. There
+    /// used to be a runtime refusal for that case; now there is no overload
+    /// for it. See `docs/decisions/0016-interactive-channel-mixer.md`.
     public func apply(
-        to preview: SceneLinearPreviewImage,
+        to preview: IRChannelMixedPreviewImage,
         orientation: RAWImageOrientation,
         cancellation: ProcessingCancellation = .none
     ) throws -> OrientedSceneLinearRGBImage {
@@ -212,9 +215,6 @@ public struct ImageOrienter: Sendable {
                     values, buffer holds \(preview.values.count).
                     """
             )
-        }
-        guard let channelMixProcessing = preview.processing.channelMixProcessing else {
-            throw PreviewReductionError.channelMixNotApplied
         }
 
         try cancellation.check()
@@ -250,7 +250,7 @@ public struct ImageOrienter: Sendable {
                 ),
             processing: ImageOrientationProcessing(
                 orientation: orientation,
-                channelMixProcessing: channelMixProcessing,
+                channelMixProcessing: preview.processing.channelMixProcessing,
                 previewResolution: preview.processing.resolution
             )
         )
