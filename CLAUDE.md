@@ -1465,6 +1465,9 @@ Pause and reconsider when code begins to show any of these patterns:
 - automatically assuming an opened RAW is infrared, or choosing the red/blue swap without a person asking
 - an interactive stage that does not poll cancellation at the documented granularity on every one of its paths
 - an image-affecting persisted field slipped into an existing schema version, or a migration that guesses rather than stating what the absent field meant
+- schema-version decoding through a `default` or other catch-all case, rather than an exhaustive switch over a closed version type
+- a built-in persisted channel mix carrying matrix coefficients that are silently ignored
+- an image-affecting field added to an existing schema version with `decodeIfPresent` and a default
 - full RAW decode on every slider move without measurement or caching rationale
 - every feature depending directly on LibRaw
 - direct Metal shader calls from UI views

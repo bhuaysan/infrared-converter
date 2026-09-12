@@ -349,3 +349,79 @@ Not in this milestone, deliberately:
 - **Export**, full-resolution rendering, zoom, crop, and any GPU path.
 - **Undo/redo.** The adjustment is a canonical state, not a history, and a
   history is a separate decision.
+
+## Amendment (2026-09-13) — schema-v2 hardening
+
+Two defects in Decision 6 were found before a third schema version was added,
+and both were fixed first, because both would have become data-loss paths the
+moment one was.
+
+### Schema dispatch is exhaustive
+
+The migration dispatched the version as a bare `Int`:
+
+```text
+switch version {
+case 1:    migrate
+default:   decode as version 2
+}
+```
+
+Its comment claimed that adding version 3 would be a compile error there. It
+would not: `default` catches 3, and every version 3 record would have been
+decoded by version 2's rules — with any version 3 field silently ignored, and
+then written away on the next save.
+
+The version is now converted to a closed internal type before anything is
+decoded:
+
+```text
+raw Int
+  → refuse below PersistedSchemaVersion.first
+  → refuse above PersistedSchemaVersion.current
+  → PersistedSchemaVersion(rawValue:)
+  → exhaustive switch, no default
+```
+
+```swift
+enum PersistedSchemaVersion: Int, CaseIterable {
+    case orientationOnly = 1
+    case channelMix = 2
+}
+```
+
+`currentSchemaVersion` is derived from `PersistedSchemaVersion.current`, so the
+version written and the set of versions read cannot disagree. Adding a case is
+a compile error in the migration until someone decides what that version's
+record contains. A test pins the set as exactly `1...current` with no gap and
+`current` as its highest member, and a second test decodes each version's own
+minimal record through its own branch.
+
+### A built-in mix carrying a matrix is contradictory, and refused
+
+The wire format in Decision 6 says a built-in persists as its token **alone**.
+The decoder enforced that when writing and not when reading:
+
+```json
+{ "kind" : "redBlueSwap", "matrix" : [ 9, 9, 9, 9, 9, 9, 9, 9, 9 ] }
+```
+
+decoded as the swap, with the nine numbers silently ignored. That is the
+"record that disagrees with itself" Decision 3 was written to make
+unrepresentable, accepted at the one boundary where it can still arrive.
+
+The table is now enforced in both directions:
+
+```text
+identity    + matrix            refused   unexpectedChannelMixField
+redBlueSwap + matrix            refused   unexpectedChannelMixField
+matrix      without matrix      refused   missingChannelMixField
+matrix      wrong count         refused   malformedChannelMixMatrix
+matrix      non-finite          refused   nonFiniteChannelMixCoefficient
+```
+
+A built-in carrying a matrix is refused whatever the coefficients are, the
+built-in's own included; ignoring them and trusting them are both guesses. Only
+the `matrix` key is policed inside `channelMix`, because it is the one that
+contradicts the token. Unknown keys elsewhere in the record remain subject to
+the forward-compatibility rule, unchanged.

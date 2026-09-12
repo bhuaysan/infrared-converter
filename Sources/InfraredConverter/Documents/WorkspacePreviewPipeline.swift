@@ -222,12 +222,25 @@ struct WorkspacePreviewPipeline {
         )
     }
 
-    /// Decodes a RAW file and runs every stage up to and including the
-    /// creative channel mix, keeping the result.
+    /// Decodes a RAW file and runs every stage up to and including the preview
+    /// reduction, keeping the reduced, **pre-mix** result.
     ///
-    /// This is the expensive half — decode, normalise, estimate, balance,
-    /// demosaic, convert, mix — and it does not depend on the orientation, so
-    /// it runs once per file rather than once per rotation.
+    /// ```text
+    /// prepare   decode
+    ///           → normalise
+    ///           → white balance (neutral-patch estimate, then gains)
+    ///           → demosaic
+    ///           → camera → working
+    ///           → preview reduction
+    ///           → RETAIN the pre-mix source
+    ///
+    /// render    mix → orientation → display rendering
+    /// ```
+    ///
+    /// This is the expensive half, and it depends on none of the user's
+    /// adjustments: no creative stage, no geometry and no display encoding
+    /// runs here, so it runs once per file rather than once per adjustment.
+    /// Every adjustable stage is in `render(_:adjustments:cancellation:)`.
     ///
     /// LibRaw's processed-RGB path is not involved: this calls `decodeMosaic`,
     /// and every stage after it is ours.
