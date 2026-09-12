@@ -1973,9 +1973,11 @@ everything downstream of *that*, plus image quality:
   implemented (ADR 0009, ADR 0010), but only as the eight discrete
   arrangements — whether a file names one or a person does; the continuous
   editing operations are a different problem and need interpolation.
-- **Durable persistence of the user's adjustments.** The orientation
-  adjustment is serialisable and versioned (ADR 0010) and lives in memory
-  only; there is no sidecar, no document format and no restore on relaunch.
+- **Anything about persistence beyond one photograph's own state.** The
+  orientation adjustment is saved in a JSON sidecar beside the RAW file and
+  restored before the first render (ADR 0013). What does not exist: recipes and
+  presets, any reuse of a record across images, a document format, watching a
+  sidecar for external edits, and undo/redo.
 - **Any adjustment other than orientation.** Exposure, the white-balance
   patch, the camera transform and the channel mix are still fixed
   application-layer choices with no controls, and the recipe format that

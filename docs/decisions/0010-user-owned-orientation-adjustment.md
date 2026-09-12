@@ -212,6 +212,10 @@ it chose.
 
 ## Decision 9 — Persistence: a serialisable model, in-memory ownership, no disk
 
+> Superseded by [ADR 0013](0013-adjustment-sidecar.md), which added the third
+> layer. The separation below still holds; only the last line of the table
+> changed.
+
 Three layers, deliberately separated, and **only the first two exist**:
 
 ```text
@@ -315,7 +319,8 @@ leaving every buffer, every test and every future export in sensor order.
   the eight discrete arrangements, applied as an exact permutation of whole
   pixels.
 - **Durable persistence.** No sidecar, no document format, no relaunch
-  restore.
+  restore. *(Decided later, in [ADR 0013](0013-adjustment-sidecar.md): a JSON
+  sidecar beside the RAW file, read before the first render.)*
 - **The `InfraredRecipe` format**, profile identity, and reuse of a recipe
   across images.
 - **Undo/redo history.** The adjustment is a state; an undo architecture is a
@@ -408,3 +413,18 @@ worked. That is the same class of failure as decoding a corrupt record into
 
 `init(from:)` already enforces the refusal. This rule is the instruction to a
 future author about when to raise the number.
+
+
+---
+
+## Amendment (2026-09-12) — the third layer exists
+
+Decision 9 named three layers and built two. [ADR
+0013](0013-adjustment-sidecar.md) builds the third: one JSON sidecar per
+photograph, beside the RAW file, holding exactly this record.
+
+Nothing in this ADR was revised to get there. The canonical single state, the
+stable tokens, the typed refusals and the schema version were all shaped for a
+format that did not yet exist, and they are what the sidecar writes and reads
+unchanged. The forward-compatibility rule above stops being advice to a future
+author and starts governing files on a user's disk.

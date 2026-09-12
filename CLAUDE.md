@@ -238,7 +238,9 @@ Rendered output is derived from:
 source + adjustments
 ```
 
-This architecture must make undo/redo, presets, recipes, batch processing, parameter comparison, and future sidecars possible without modifying source data.
+This architecture must make undo/redo, presets, recipes, batch processing, parameter comparison, and sidecars possible without modifying source data.
+
+The adjustment sidecar is the first of those to exist. A RAW file is an immutable input — never rewritten, appended to, re-tagged or replaced — and a user's decisions live in one application-owned JSON file beside it, named by one rule in one place. It is read **before** the file is decoded, so the first render is already the saved state; it is written only after a state has rendered successfully and is still the current one; and a record it cannot understand stops the open rather than becoming `ImageAdjustments.none`. See `docs/decisions/0013-adjustment-sidecar.md`.
 
 ## Processing stages have explicit boundaries
 
@@ -1056,6 +1058,8 @@ The working-representation decision must be recorded before production IR color 
 
 How those re-renders are scheduled and cancelled is `docs/decisions/0011-coalesced-preview-rendering.md`. That the application-owned pipeline and the LibRaw processed-RGB reference are independent paths, neither gating nor substituting for the other, is `docs/decisions/0012-independent-raw-paths.md` — whose amendment defines the open boundary: a file is open when a path produced an **image**, and a prepared scene-linear state is not one.
 
+Where the user's adjustments are kept between sessions, how an open reads them before it renders, and when a state earns the right to be written, is `docs/decisions/0013-adjustment-sidecar.md`.
+
 ADR numbers are assigned in the order decisions are actually made; do not reuse a number that is already taken.
 
 If implementation evidence invalidates a design hypothesis in this file, do not silently work around the contradiction. Update the relevant documentation and deliberately update `CLAUDE.md` if an invariant itself changes.
@@ -1400,6 +1404,13 @@ Pause and reconsider when code begins to show any of these patterns:
 - an orientation applied on top of an already-oriented buffer instead of re-derived from the unoriented source
 - a user adjustment stored as a list of button presses rather than one canonical state
 - unreadable persisted adjustment state silently recovered as "no adjustment"
+- a RAW file opened for writing, or a user decision recorded anywhere but the sidecar
+- a sidecar name built by string concatenation somewhere other than the one place that owns the rule
+- an identity render performed on open and then replaced by the saved state
+- an adjustment persisted before it is known to render, or a superseded render writing one
+- an unreadable sidecar recovered as "no adjustments", repaired, or deleted
+- a sidecar failure reported as a RAW decoding failure
+- a successful render withdrawn because saving it failed
 - full RAW decode on every slider move without measurement or caching rationale
 - every feature depending directly on LibRaw
 - direct Metal shader calls from UI views

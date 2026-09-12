@@ -122,9 +122,16 @@ persist as "no correction", and the image is permuted exactly once, from the
 retained unoriented buffer, each time. Reset means "the user asked for no
 correction" — on a file whose metadata records a rotation, that restores the
 rotation rather than making the image upright. The adjustment is serialisable
-and versioned; it lives in memory for as long as the file is open and is
-**not** written to disk. See
-[ADR 0010](docs/decisions/0010-user-owned-orientation-adjustment.md).
+and versioned, and it is saved: one JSON sidecar beside the RAW file, written
+after a change has rendered and read back before the first render on the next
+open. See
+[ADR 0010](docs/decisions/0010-user-owned-orientation-adjustment.md) and
+[ADR 0013](docs/decisions/0013-adjustment-sidecar.md).
+
+```text
+OLYMPUS.ORF                        an immutable input; never written to
+OLYMPUS.ORF.iradjustments.json     the user's decisions, and the only place they live
+```
 
 Still legacy diagnostic behaviour: the LibRaw processed-RGB decode. It is no
 longer the workspace image. It supplies the inspector's decoder facts and a
@@ -132,9 +139,9 @@ small labelled reference thumbnail, and is kept because comparing the two paths
 is useful while the owned one is young.
 
 Still absent: any tone control — contrast, curves, highlight recovery,
-saturation; arbitrary rotation, straightening and crop; durable persistence of
-the user's adjustments, so they are lost when the file is closed; filter and
-capture profiles, recipes and presets beyond the two built-in mixes; export of
+saturation; arbitrary rotation, straightening and crop; undo/redo; filter and
+capture profiles, recipes and presets beyond the two built-in mixes, so a
+saved record belongs to one photograph and cannot be reused; export of
 any kind; a reduced-resolution or cached preview path, so the workspace
 renders the full frame on every open; Metal.
 
@@ -418,9 +425,16 @@ See [RAW/README.md](RAW/README.md).
   and below `0` is destroyed, and the provenance record says how many samples
   that was. There is no highlight recovery, no curve and no automatic
   exposure.
-- **The user's orientation adjustment is not saved.** It is a serialisable,
-  versioned record, and nothing writes it anywhere: closing the file, or
-  quitting, loses it. There is no sidecar and no document format.
+- **A sidecar this build cannot read stops the file from opening.** An
+  unsupported schema version, an unknown orientation token or malformed JSON is
+  reported and left untouched, never repaired and never silently replaced by
+  "no adjustments". The remedy is the user's: inspect the file, move it aside,
+  or restore it.
+- **Nothing watches the sidecar.** If it changes underneath an open document,
+  the last save from this application wins. There is no external-edit
+  detection and no conflict resolution.
+- **Saved state is one photograph's own.** There is no recipe format, no
+  preset, and no way to apply one file's record to another.
 - **Orientation has no automatic correction.** A file is oriented by what it
   records, and departing from that is a manual act. There is no camera-model
   table, no filename heuristic and no automatic straightening — the E-PL3
