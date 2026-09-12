@@ -505,26 +505,48 @@ private struct OrientationControls: View {
 }
 
 
-/// Says when the photograph on screen has not reached its sidecar.
+/// Says when a decision has not reached its sidecar.
 ///
 /// Silent while everything is saved, because a durable edit is the ordinary
-/// case and a permanent badge for it would be noise. It appears only for the
-/// one state a user needs to know about: the image is correct and the saved
-/// copy is not, so closing the file now would lose the edit.
+/// case and a permanent badge for it would be noise. Silent while a save is
+/// merely **pending**, too, and that is a deliberate choice rather than an
+/// omission: a save follows a render that normally takes well under a second,
+/// so an indicator for it would flash on every rotation and say nothing a user
+/// can act on. The pending state exists in the model, where correctness needs
+/// it, not on screen, where it would only flicker.
+///
+/// What does appear is the state a user needs to know about: the image is
+/// correct and the saved copy is not, so closing the file now would lose the
+/// edit — for this photograph, or for one already left behind.
 private struct AdjustmentSaveStatus: View {
     let documentState: DocumentState
 
     var body: some View {
         if let failure = documentState.adjustmentSaveFailure {
-            Label {
-                Text("Adjustments not saved")
-            } icon: {
-                Image(systemName: "exclamationmark.triangle.fill")
-            }
-            .foregroundStyle(.orange)
-            .font(.caption)
-            .help(failure.failureReason ?? failure.localizedDescription)
-            .accessibilityLabel("The adjustments could not be saved")
+            warning(
+                "Adjustments not saved",
+                detail: failure.failureReason ?? failure.localizedDescription
+            )
+        } else if let earlier = documentState.unsavedAdjustments.last {
+            // A decision from a file the workspace has already left. Without
+            // this it would exist only in the log, which is the definition of
+            // losing it silently.
+            warning(
+                "\(earlier.url.lastPathComponent) not saved",
+                detail: "The adjustment was not written: \(earlier.reasonDescription)."
+            )
         }
+    }
+
+    private func warning(_ title: String, detail: String) -> some View {
+        Label {
+            Text(title)
+        } icon: {
+            Image(systemName: "exclamationmark.triangle.fill")
+        }
+        .foregroundStyle(.orange)
+        .font(.caption)
+        .help(detail)
+        .accessibilityLabel("\(title). \(detail)")
     }
 }

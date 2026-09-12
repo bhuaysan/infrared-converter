@@ -109,6 +109,21 @@ final class StubImageAdjustmentStore: ImageAdjustmentStore, @unchecked Sendable 
         return stored[url]
     }
 
+    /// Every write this store accepted, in order, **with the URL it was
+    /// written under**.
+    ///
+    /// The event log records what was saved; this records where. One
+    /// document's adjustment reaching another document's sidecar would be
+    /// invisible in the first and obvious in the second.
+    private(set) var writes: [(url: URL, adjustments: ImageAdjustments)] = []
+
+    /// The writes, as a comparable list of file name and orientation token.
+    var writeSummary: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return writes.map { "\($0.url.lastPathComponent):\($0.adjustments.orientation.persistedToken)" }
+    }
+
     func load(for url: URL) throws(ImageAdjustmentPersistenceError) -> ImageAdjustments? {
         let refusal: ImageAdjustmentPersistenceError? = {
             lock.lock()
@@ -144,6 +159,7 @@ final class StubImageAdjustmentStore: ImageAdjustmentStore, @unchecked Sendable 
 
         lock.lock()
         stored[url] = adjustments
+        writes.append((url: url, adjustments: adjustments))
         lock.unlock()
         log.append(.saved(adjustments.orientation))
     }
@@ -197,5 +213,125 @@ struct RecordingMosaicDecoder: RAWDecoder {
     func decodeMosaic(at url: URL) throws -> DecodedRAWMosaic {
         log.append(.decodedMosaic)
         return try wrapped.decodeMosaic(at: url)
+    }
+}
+
+/// A render the test starts, holds, and releases by hand.
+///
+/// `RecordingRender` counts and refuses; this one also **stops**, which is what
+/// a lifecycle test needs: a render that is genuinely in flight while the test
+/// does something else, rather than one that has already finished by the time
+/// the next line runs.
+///
+/// Only the adjustments named in `holding` are gated. Everything else renders
+/// straight through, so opening a second file while the first one's rotation is
+/// held does not deadlock on the second file's own initial render.
+///
+/// The render itself is the real one, so the pixels a test asserts on are real
+/// pixels — and a gated render that is cancelled while held still unwinds as a
+/// cancellation, because the pipeline polls the signal after the gate opens.
+///
+/// ## Why a suite using this must be serialised
+///
+/// A held render occupies a Swift concurrency cooperative-pool thread for as
+/// long as the test holds it. Several at once can exhaust the pool, at which
+/// point the render a test is waiting for cannot start and the run deadlocks.
+/// Every wait is bounded as a second line of defence, so a mistake of that kind
+/// fails the test instead of hanging the run.
+final class GatedRender: @unchecked Sendable {
+    /// A wait that never returned: a fault in the test, reported rather than
+    /// hung.
+    struct Stalled: Error {}
+    /// A stage saying no, which is nothing like a cancellation.
+    struct Refused: Error, LocalizedError {
+        var errorDescription: String? { "The gated render refused this adjustment." }
+    }
+
+    /// Deliberately far longer than anything healthy. It exists so a genuine
+    /// deadlock fails the run instead of hanging it.
+    static let waitLimit = DispatchTimeInterval.seconds(600)
+
+    private let lock = NSLock()
+    private var holding: [UserOrientationAdjustment]
+    private var refusing: [UserOrientationAdjustment]
+    private let didStart = DispatchSemaphore(value: 0)
+    private let release = DispatchSemaphore(value: 0)
+    let log: WorkspaceEventLog
+
+    init(
+        log: WorkspaceEventLog,
+        holding: [UserOrientationAdjustment] = [],
+        refusing: [UserOrientationAdjustment] = []
+    ) {
+        self.log = log
+        self.holding = holding
+        self.refusing = refusing
+    }
+
+    var render: DocumentState.PreviewRender {
+        { [self] source, adjustments, cancellation in
+            let state = adjustments.orientation
+            if withLock({ holding.contains(state) }) {
+                didStart.signal()
+                guard release.wait(timeout: .now() + Self.waitLimit) == .success else {
+                    throw Stalled()
+                }
+            }
+            if withLock({ refusing.contains(state) }) {
+                log.append(.renderRefused(state))
+                throw Refused()
+            }
+            let preview = try DocumentState.pipelineRender(source, adjustments, cancellation)
+            log.append(.rendered(state))
+            return preview
+        }
+    }
+
+    /// Suspends until a gated render has begun and is waiting at the gate.
+    ///
+    /// The blocking wait runs on a global queue, never on the main actor, so
+    /// the workspace can keep working while the test waits.
+    func waitForGatedRenderToStart() async throws {
+        let started = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { [self] in
+                continuation.resume(
+                    returning: didStart.wait(timeout: .now() + Self.waitLimit) == .success
+                )
+            }
+        }
+        guard started else { throw Stalled() }
+    }
+
+    /// Lets one held render past the gate.
+    func releaseOneRender() { release.signal() }
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+}
+
+/// A decoder that serves a different mosaic per URL, so one workspace can open
+/// two genuinely different files.
+///
+/// The geometries are meant to differ: a preview from the wrong file is then
+/// visible in its dimensions, not merely in a label.
+struct MultiFileStubDecoder: RAWDecoder {
+    var mosaics: [URL: DecodedRAWMosaic]
+    var log: WorkspaceEventLog?
+
+    func readMetadata(at url: URL) throws -> RAWMetadata {
+        try decodeMosaic(at: url).metadata
+    }
+
+    func decode(at url: URL, options: RAWDecodeOptions) throws -> DecodedRAW {
+        RAWTestData.decodedRAW(url: url)
+    }
+
+    func decodeMosaic(at url: URL) throws -> DecodedRAWMosaic {
+        log?.append(.decodedMosaic)
+        guard let mosaic = mosaics[url] else { throw RAWDecodingError.fileNotFound(url) }
+        return mosaic
     }
 }

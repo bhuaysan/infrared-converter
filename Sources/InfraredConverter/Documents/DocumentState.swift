@@ -71,6 +71,28 @@ import Observation
 /// is installed — after it has succeeded, and only while the adjustment it was
 /// made for is still the one the user wants — so a superseded render can no
 /// more write the sidecar than it can reach the screen.
+///
+/// ## A decision is tracked from the press to the disk
+///
+/// ```text
+/// user presses rotate     adjustments updated, persistence = .pending
+/// render succeeds         preview installed, sidecar written, = .saved
+/// render refuses          nothing written,                    = .renderRefused
+/// write refuses           preview kept,                       = .saveFailed
+/// ```
+///
+/// `.saved` is a claim about the adjustment currently on screen, never about
+/// the last one that happened to be written. It stops being true the instant a
+/// newer state is asked for.
+///
+/// ## Leaving a file does not throw a decision away
+///
+/// A render still running when the user opens the next file is not cancelled.
+/// It is handed over: the document keeps its render slot, loses its screen,
+/// and may do exactly one thing more — write its own sidecar once its own
+/// render succeeds. Everything a decision could not survive is recorded in
+/// `unsavedAdjustments` rather than dropped. See
+/// `docs/decisions/0014-adjustment-lifecycle.md`.
 @MainActor
 @Observable
 final class DocumentState {
@@ -88,22 +110,98 @@ final class DocumentState {
         case adjustmentsUnreadable(URL, DocumentAdjustmentError)
     }
 
-    /// Whether the user's current adjustments are safely on disk.
+    /// Where the **currently requested** adjustment stands with respect to the
+    /// sidecar.
+    ///
+    /// One closed enum rather than a handful of booleans, because the states
+    /// are mutually exclusive and a combination like `isSaved && isDirty` has
+    /// no meaning that anyone should have to work out.
+    ///
+    /// The subject is always the adjustment the user has asked for **now**, not
+    /// the last one that happened to be written. That distinction is the whole
+    /// point of the type: `.saved` is a claim about the state on screen, so it
+    /// must stop being true the moment a newer state is requested, and may not
+    /// become true again until exactly that state is durable.
+    ///
+    /// ```text
+    /// unchanged      nothing has been decided since the file opened
+    /// pending        decided, not durable yet: its render has not delivered
+    /// saved          decided and durable
+    /// renderRefused  its render refused, so it was never eligible to be saved
+    /// saveFailed     it rendered, and the write refused
+    /// ```
+    ///
+    /// The last two both mean "not durable", and they are kept apart because
+    /// the reasons differ and so does what a reader can do about them. In both,
+    /// the sidecar still holds the last state that actually rendered and saved.
     ///
     /// Diagnostic state, deliberately small. There is no retry engine and no
     /// queue: a failure is reported and the next successful adjustment tries
     /// again, because that is what the user's next action does anyway.
     enum AdjustmentPersistence {
         /// Nothing has been adjusted since the file was opened, so there has
-        /// been nothing to write. The sidecar, if any, still holds what was
-        /// loaded from it.
+        /// been nothing to write. What is on screen is what the file opened
+        /// with — the sidecar's record, or no record at all.
         case unchanged
-        /// The adjustment currently on screen is the one on disk.
+        /// The current adjustment has been asked for and is not durable yet.
+        /// Its render is running, or its result has not been delivered.
+        case pending
+        /// The current adjustment is the one in the sidecar.
         case saved
-        /// The image is correct and the sidecar is not. Kept as a value so a
-        /// reader can be told which file and why — and so the preview is not
-        /// rolled back to pretend the edit never happened.
-        case failed(ImageAdjustmentPersistenceError)
+        /// The current adjustment's render refused it, so it never became
+        /// eligible to be written. Persisting an unrenderable state would
+        /// restore a broken workspace on the next launch.
+        case renderRefused
+        /// The current adjustment rendered and could not be written. The image
+        /// is correct and the sidecar is not. Kept as a value so a reader can
+        /// be told which file and why — and so the preview is not rolled back
+        /// to pretend the edit never happened.
+        case saveFailed(ImageAdjustmentPersistenceError)
+
+        /// Whether what is on screen is what a reopen would restore.
+        ///
+        /// True for exactly two states: nothing was decided this session, or
+        /// what was decided is in the sidecar.
+        var isDurable: Bool {
+            switch self {
+            case .unchanged, .saved: return true
+            case .pending, .renderRefused, .saveFailed: return false
+            }
+        }
+    }
+
+    /// A user decision that could not be made durable, kept so that leaving a
+    /// file cannot make it disappear silently.
+    ///
+    /// `AdjustmentPersistence` reports this for the document on screen. Once
+    /// the workspace moves to another file there is no `Loaded` left to carry
+    /// it, and dropping it there is exactly the silent loss this milestone is
+    /// about — so it is moved here instead.
+    struct UnsavedAdjustment {
+        /// Why it is not on disk.
+        enum Reason {
+            /// The state never rendered, so it was never eligible to be saved.
+            case renderRefused
+            /// It rendered, and the write refused.
+            case saveRefused(ImageAdjustmentPersistenceError)
+        }
+
+        /// The RAW file the decision belongs to. Its sidecar still holds the
+        /// last state that rendered and saved.
+        let url: URL
+        /// The decision itself, so it is described rather than merely counted.
+        let adjustments: ImageAdjustments
+        let reason: Reason
+
+        /// One line for a log or a tooltip.
+        var reasonDescription: String {
+            switch reason {
+            case .renderRefused:
+                return "its render refused it, so it was never eligible to be saved"
+            case .saveRefused(let error):
+                return error.localizedDescription
+            }
+        }
     }
 
     /// A successfully opened file: the application-owned preview the
@@ -166,7 +264,12 @@ final class DocumentState {
         /// The application-owned pipeline's result, or the reason it failed.
         var owned: OwnedPreview
 
-        /// Whether the current adjustments have reached the sidecar.
+        /// Where `adjustments` stands with respect to the sidecar.
+        ///
+        /// It tracks the field above, not the last write: asking for a new
+        /// adjustment makes this `.pending` in the same assignment, so there is
+        /// no moment in which the workspace holds one state and claims another
+        /// is saved.
         ///
         /// Independent of `owned` on purpose: a render that succeeded and a
         /// save that failed are two different facts, and the image is not
@@ -272,15 +375,54 @@ final class DocumentState {
 
     private(set) var status: Status = .empty
 
+    /// Decisions this workspace could not make durable, oldest first.
+    ///
+    /// Appended to only when a document leaves the screen with something at
+    /// stake. Empty in normal operation: a successful save adds nothing.
+    private(set) var unsavedAdjustments: [UnsavedAdjustment] = []
+
     private let decoder: RAWDecoder
     private let store: any ImageAdjustmentStore
     private let render: PreviewRender
     private var decodeTask: Task<Void, Never>?
 
+    /// Which open this is. Incremented by every `open(_:)`.
+    ///
+    /// A render's delivery is routed by the generation it was made for, not by
+    /// its URL: the same file can be opened twice, and the second open's
+    /// preview must never be replaced by the first open's late result.
+    private var generation = 0
+
     /// The single slot every re-render goes through, rebuilt for each opened
     /// file because it closes over that file's retained scene-linear source.
     /// `nil` when nothing adjustable is open.
     private var renderer: CoalescingPreviewRenderer?
+
+    /// A document the workspace has left while one of its adjustments was
+    /// still being rendered.
+    ///
+    /// It has no screen and no controls. Its render slot is kept running for
+    /// one reason only: the state it was asked for is a decision the user
+    /// made, and the rule is that a state may be written **after** it has
+    /// rendered. Cancelling it would satisfy the rule by losing the decision.
+    private struct SettlingDocument {
+        let url: URL
+        /// The newest state this document was asked for, frozen at the moment
+        /// the workspace left it. Nothing can change it afterwards: there is no
+        /// UI attached to a settling document.
+        let requested: ImageAdjustments
+        /// Kept so the render is not deallocated mid-flight — and released as
+        /// soon as it settles, because it holds that file's scene-linear
+        /// source.
+        let renderer: CoalescingPreviewRenderer
+    }
+
+    /// Documents that have left the screen and have not settled, by the
+    /// generation they belonged to.
+    ///
+    /// Normally empty. An entry exists only between a file switch and the
+    /// delivery of the render that was already running.
+    private var settling: [Int: SettlingDocument] = [:]
 
     init(
         decoder: RAWDecoder = LibRawDecoder(),
@@ -315,31 +457,52 @@ final class DocumentState {
         return loaded.isAdjustable
     }
 
-    /// Whether what is on screen has been written to the sidecar.
+    /// Where the adjustment on screen stands with respect to its sidecar.
     var adjustmentPersistence: AdjustmentPersistence {
         guard case .decoded(let loaded) = status else { return .unchanged }
         return loaded.persistence
     }
 
-    /// Why the last save failed, or `nil` when none did.
+    /// Why the current adjustment's save failed, or `nil` when none did.
     ///
     /// The image is correct either way; this says only whether it will still
     /// be there next time.
     var adjustmentSaveFailure: ImageAdjustmentPersistenceError? {
-        guard case .failed(let error) = adjustmentPersistence else { return nil }
+        guard case .saveFailed(let error) = adjustmentPersistence else { return nil }
         return error
     }
 
+    /// Whether any decision is still on its way to disk — the open document's
+    /// or a departed one's.
+    ///
+    /// The seam a real close guard will need. There is no document lifecycle
+    /// to hang one on today, so nothing consumes this yet; it exists so that
+    /// when there is, the answer is already a single question with a single
+    /// answer rather than something to reconstruct. See
+    /// `docs/decisions/0014-adjustment-lifecycle.md`.
+    var hasUnsettledAdjustments: Bool {
+        if !settling.isEmpty { return true }
+        if case .decoded(let loaded) = status, case .pending = loaded.persistence {
+            return true
+        }
+        return false
+    }
+
     /// Selects a file and starts decoding it, replacing any decode in flight.
+    ///
+    /// The new file appears as soon as it can; the previous one is never a
+    /// reason to make a user wait. What the previous document leaves behind is
+    /// settled in the background — see `handOverCurrentDocument`.
     func open(_ url: URL) {
         decodeTask?.cancel()
-        renderer?.cancelAll()
-        renderer = nil
+        handOverCurrentDocument()
+        generation += 1
         status = .decoding(url)
 
         let decoder = self.decoder
         let store = self.store
         let render = self.render
+        let generation = self.generation
         // LibRaw decoding is a long, blocking C++ call. Detaching keeps it off
         // both the main actor and the caller's cooperative context.
         decodeTask = Task.detached(priority: .userInitiated) {
@@ -351,9 +514,84 @@ final class DocumentState {
             ) else { return }
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
-                self?.apply(outcome, for: url)
+                self?.apply(outcome, generation: generation)
             }
         }
+    }
+
+    /// Decides what happens to the document being replaced.
+    ///
+    /// ```text
+    /// nothing decided, or decided and saved   the render slot is cancelled and dropped
+    /// decided, render still running           the slot keeps running, to persist and nothing else
+    /// decided, render refused it              recorded as unsaved; it can never be written
+    /// decided, rendered, save refused         recorded as unsaved; the sidecar is older
+    /// ```
+    ///
+    /// The second row is the one this exists for. A user who rotates a
+    /// photograph and immediately opens the next one has made a decision, and
+    /// cancelling its render — the only thing that can make that decision
+    /// eligible to be written — would drop it without a word.
+    ///
+    /// What a settling document may still do is exactly one thing: **write its
+    /// own sidecar, once its own render succeeds.** It cannot install a
+    /// preview, it cannot touch `status`, and it writes under the URL captured
+    /// with it, so it can never reach the new document's sidecar.
+    ///
+    /// The cost is stated rather than discovered: a settling document holds its
+    /// scene-linear source until it settles, so a switch made mid-render
+    /// briefly retains two of them. It is released the moment the render
+    /// delivers.
+    private func handOverCurrentDocument() {
+        defer { renderer = nil }
+        guard case .decoded(let loaded) = status else {
+            renderer?.cancelAll()
+            return
+        }
+
+        switch loaded.persistence {
+        case .pending:
+            guard let renderer else { return }
+            // Deliberately not cancelled. This is the whole hand-over.
+            settling[generation] = SettlingDocument(
+                url: loaded.url, requested: loaded.adjustments, renderer: renderer
+            )
+
+        case .renderRefused:
+            renderer?.cancelAll()
+            record(
+                UnsavedAdjustment(
+                    url: loaded.url, adjustments: loaded.adjustments, reason: .renderRefused
+                )
+            )
+
+        case .saveFailed(let error):
+            renderer?.cancelAll()
+            record(
+                UnsavedAdjustment(
+                    url: loaded.url,
+                    adjustments: loaded.adjustments,
+                    reason: .saveRefused(error)
+                )
+            )
+
+        case .unchanged, .saved:
+            // Nothing is at stake. Any render still unwinding here is one whose
+            // state was already superseded or already written.
+            renderer?.cancelAll()
+        }
+    }
+
+    /// Records a decision that did not reach disk, and says so in the log.
+    private func record(_ unsaved: UnsavedAdjustment) {
+        unsavedAdjustments.append(unsaved)
+        Log.ui.error(
+            """
+            Left \(unsaved.url.lastPathComponent, privacy: .public) with an unsaved \
+            adjustment \(unsaved.adjustments.orientation.persistedToken, privacy: .public): \
+            \(unsaved.reasonDescription, privacy: .public)
+            """
+        )
     }
 
     /// Reads the saved adjustments, then runs both RAW paths independently,
@@ -573,9 +811,11 @@ final class DocumentState {
     /// history — and the render that follows always starts from the retained,
     /// unoriented channel-mixed image, never from what is on screen.
     ///
-    /// Nothing is saved here. A state that has not been rendered is not known
-    /// to be renderable, and writing it would let a broken state be restored
-    /// automatically on the next launch.
+    /// Nothing is saved here, and the state says so: it becomes `.pending`
+    /// until a render of exactly this adjustment has been delivered. A state
+    /// that has not been rendered is not known to be renderable, and writing
+    /// it would let a broken state be restored automatically on the next
+    /// launch.
     private func adjustOrientation(
         _ transform: (UserOrientationAdjustment) -> UserOrientationAdjustment
     ) {
@@ -587,8 +827,12 @@ final class DocumentState {
         guard updated != loaded.adjustments.orientation else { return }
 
         // Record the intent immediately, so the controls reflect what the
-        // user pressed even while the render is still running.
+        // user pressed even while the render is still running — and say, in
+        // the same breath, that this state is not on disk. The state that was
+        // saved a moment ago is no longer the state on screen, and reporting
+        // it as saved would be a claim about the wrong adjustment.
         loaded.adjustments.orientation = updated
+        loaded.persistence = .pending
         status = .decoded(loaded)
 
         // One slot, newest state wins. A burst of presses produces one
@@ -602,9 +846,15 @@ final class DocumentState {
     /// source, so every re-render starts from it rather than from whatever is
     /// on screen. Nothing upstream reruns: no channel mix, no camera
     /// conversion, no demosaic, no white balance, no decode.
+    ///
+    /// It also captures the file's URL and the generation of the open it
+    /// belongs to. Those two are what let a delivery find its way back to the
+    /// right document — or, when that document has been left, to its
+    /// sidecar and nothing else.
     private func makeRenderer(
         for source: WorkspacePreviewPipeline.Source,
-        url: URL
+        url: URL,
+        generation: Int
     ) -> CoalescingPreviewRenderer {
         let render = self.render
         return CoalescingPreviewRenderer(
@@ -612,9 +862,33 @@ final class DocumentState {
                 try render(source, adjustments, cancellation)
             },
             deliver: { [weak self] outcome, adjustments in
-                self?.applyReprocessed(outcome, adjustments: adjustments, for: url)
+                self?.deliver(outcome, adjustments: adjustments, url: url, generation: generation)
             }
         )
+    }
+
+    /// Routes a settled render to the document it was made for.
+    ///
+    /// ```text
+    /// the document is still on screen   install it, then save it
+    /// the document has been left        save it, and nothing else
+    /// neither                           nothing; there is nowhere for it to go
+    /// ```
+    ///
+    /// Routing is by **generation**, not by URL. The same file can be opened
+    /// twice, and a late render from the first open must not touch the second
+    /// one's preview merely because the paths match.
+    private func deliver(
+        _ outcome: Result<WorkspacePreview, Error>,
+        adjustments: ImageAdjustments,
+        url: URL,
+        generation: Int
+    ) {
+        if generation == self.generation {
+            applyReprocessed(outcome, adjustments: adjustments, for: url)
+        } else if let document = settling[generation] {
+            settle(document, generation: generation, outcome: outcome, adjustments: adjustments)
+        }
     }
 
     /// Installs a re-rendered preview, unless a newer adjustment has already
@@ -652,64 +926,113 @@ final class DocumentState {
         switch outcome {
         case .success(let preview):
             loaded.owned = .rendered(preview)
-            loaded.persistence = persist(adjustments, for: url)
+            loaded.persistence = write(adjustments, for: url).map {
+                AdjustmentPersistence.saveFailed($0)
+            } ?? .saved
         case .failure(let error):
             Self.log(error, path: "Owned re-render", url: url)
             loaded.owned = .unavailable(RAWPathFailure(stage: .ownedRender, error))
-            // `persistence` is deliberately untouched: the last successfully
-            // saved state is still what is on disk, and it is still correct.
+            // Not eligible to be written, and the sidecar is untouched: it
+            // still holds the last state that actually rendered.
+            loaded.persistence = .renderRefused
         }
         status = .decoded(loaded)
     }
 
-    /// Writes one rendered adjustment to its sidecar.
+    /// Finishes a document the workspace has left.
     ///
-    /// Synchronous, on the main actor, and small on purpose: one atomic write
-    /// of a few hundred bytes, ordered by construction because there is only
-    /// one place that writes and it cannot interleave with itself. Moving it
-    /// off the main actor would buy nothing measurable and would need its own
-    /// ordering guard to stop an older save landing after a newer one.
-    private func persist(
-        _ adjustments: ImageAdjustments, for url: URL
-    ) -> AdjustmentPersistence {
-        do {
-            try store.save(adjustments, for: url)
-            return .saved
-        } catch {
-            Self.log(error, path: "Saving adjustments", url: url)
-            return .failed(error)
+    /// The only effect available here is a write to that document's own
+    /// sidecar. There is no preview to install — the document has no screen —
+    /// and `status` belongs to a different file entirely.
+    ///
+    /// A delivery for anything other than the frozen requested state is a
+    /// superseded render inside the departed document: discarded, and the
+    /// document stays open in `settling` because its newest state is still to
+    /// come.
+    private func settle(
+        _ document: SettlingDocument,
+        generation: Int,
+        outcome: Result<WorkspacePreview, Error>,
+        adjustments: ImageAdjustments
+    ) {
+        guard document.requested == adjustments else { return }
+        // Whatever happens below, this document is done: its newest state has
+        // now either been written or refused. Releasing the slot releases its
+        // scene-linear source with it.
+        defer { settling[generation] = nil }
+
+        switch outcome {
+        case .success:
+            if let failure = write(adjustments, for: document.url) {
+                record(
+                    UnsavedAdjustment(
+                        url: document.url, adjustments: adjustments, reason: .saveRefused(failure)
+                    )
+                )
+            }
+        case .failure(let error):
+            Self.log(error, path: "Owned re-render", url: document.url)
+            record(
+                UnsavedAdjustment(
+                    url: document.url, adjustments: adjustments, reason: .renderRefused
+                )
+            )
         }
     }
 
-    private func apply(_ outcome: Result<Loaded, OpenFailure>, for url: URL) {
+    /// Writes one rendered adjustment to its sidecar.
+    ///
+    /// Synchronous, on the main actor, and small on purpose: one atomic
+    /// replacement of a few hundred bytes, ordered by construction because
+    /// there is only one place that writes and it cannot interleave with
+    /// itself. Moving it off the main actor would buy nothing measurable and
+    /// would need its own ordering guard to stop an older save landing after a
+    /// newer one.
+    ///
+    /// - Returns: the refusal, or `nil` when the record is on disk.
+    private func write(
+        _ adjustments: ImageAdjustments, for url: URL
+    ) -> ImageAdjustmentPersistenceError? {
+        do {
+            try store.save(adjustments, for: url)
+            return nil
+        } catch {
+            Self.log(error, path: "Saving adjustments", url: url)
+            return error
+        }
+    }
+
+    private func apply(_ outcome: Result<Loaded, OpenFailure>, generation: Int) {
         // Ignore a result that a newer selection has already superseded.
-        guard selectedFileURL == url else { return }
+        guard generation == self.generation else { return }
 
         switch outcome {
         case .success(let loaded):
             // Only an adjustable file gets a render slot. A prepared source
             // nothing can be rendered from gets none, so there is no path by
             // which a control could request work that is known to fail.
-            renderer = loaded.adjustableSource.map { makeRenderer(for: $0, url: loaded.url) }
+            renderer = loaded.adjustableSource.map {
+                makeRenderer(for: $0, url: loaded.url, generation: generation)
+            }
             status = .decoded(loaded)
 
         case .failure(.raw(let error)):
             Log.ui.error(
                 """
-                Failed to open \(url.lastPathComponent, privacy: .public): \
+                Failed to open \(error.url.lastPathComponent, privacy: .public): \
                 \(error.localizedDescription, privacy: .public)
                 """
             )
-            status = .failed(url, error)
+            status = .failed(error.url, error)
 
         case .failure(.adjustments(let error)):
             Log.ui.error(
                 """
-                Did not open \(url.lastPathComponent, privacy: .public): \
+                Did not open \(error.url.lastPathComponent, privacy: .public): \
                 \(error.localizedDescription, privacy: .public)
                 """
             )
-            status = .adjustmentsUnreadable(url, error)
+            status = .adjustmentsUnreadable(error.url, error)
         }
     }
 }
