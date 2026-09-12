@@ -15,8 +15,42 @@ struct ImageAdjustmentsTests {
         // is an infrared capture, so nothing chooses a rendering for it.
         #expect(adjustments.channelMix == .identity)
         #expect(adjustments.isIdentity)
+        #expect(adjustments.exposure == .neutral)
+        #expect(adjustments.exposure.ev == 0)
         #expect(adjustments.schemaVersion == ImageAdjustments.currentSchemaVersion)
-        #expect(ImageAdjustments.currentSchemaVersion == 2)
+        #expect(ImageAdjustments.currentSchemaVersion == 3)
+    }
+
+    // MARK: - isIdentity includes the exposure
+
+    @Test("No orientation, no mix and 0 EV is the identity; a tenth of a stop is not")
+    func isIdentityCoversTheExposure() throws {
+        #expect(
+            ImageAdjustments(
+                orientation: .identity, channelMix: .identity, exposure: .neutral
+            ).isIdentity
+        )
+        #expect(!ImageAdjustments(exposure: try UserExposureAdjustment(ev: 0.1)).isIdentity)
+        #expect(!ImageAdjustments(exposure: try UserExposureAdjustment(ev: -0.05)).isIdentity)
+
+        // A net effect, not a provenance: an explicit identity matrix at 0 EV
+        // has no effect on the image, and it is still recorded as explicit.
+        let explicitIdentity = ImageAdjustments(
+            channelMix: try UserChannelMixAdjustment.explicit(
+                persistedMatrix: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+            ),
+            exposure: .neutral
+        )
+        #expect(explicitIdentity.isIdentity)
+        #expect(explicitIdentity.channelMix.mix.source == .explicit)
+        #expect(explicitIdentity != ImageAdjustments.none)
+
+        // Resetting the exposure to zero is still a decision, and still the
+        // identity.
+        var reset = ImageAdjustments(exposure: try UserExposureAdjustment(ev: 1.5))
+        reset.exposure = .neutral
+        #expect(reset.isIdentity)
+        #expect(reset == ImageAdjustments.none)
     }
 
     // MARK: - isIdentity is about the whole record
@@ -99,7 +133,7 @@ struct ImageAdjustmentsTests {
         )
         #expect(
             String(decoding: identity, as: UTF8.self)
-                == #"{"channelMix":{"kind":"identity"},"orientation":"rotate90Clockwise","schemaVersion":2}"#
+                == #"{"channelMix":{"kind":"identity"},"exposureEV":0,"orientation":"rotate90Clockwise","schemaVersion":3}"#
         )
 
         let swap = try encoder.encode(
@@ -107,7 +141,16 @@ struct ImageAdjustmentsTests {
         )
         #expect(
             String(decoding: swap, as: UTF8.self)
-                == #"{"channelMix":{"kind":"redBlueSwap"},"orientation":"none","schemaVersion":2}"#
+                == #"{"channelMix":{"kind":"redBlueSwap"},"exposureEV":0,"orientation":"none","schemaVersion":3}"#
+        )
+
+        // The exposure is a bare number, and the unit is in the key alone.
+        let exposed = try encoder.encode(
+            ImageAdjustments(channelMix: .redBlueSwap, exposure: try UserExposureAdjustment(ev: 1.25))
+        )
+        #expect(
+            String(decoding: exposed, as: UTF8.self)
+                == #"{"channelMix":{"kind":"redBlueSwap"},"exposureEV":1.25,"orientation":"none","schemaVersion":3}"#
         )
 
         let explicit = try encoder.encode(
@@ -119,7 +162,7 @@ struct ImageAdjustmentsTests {
         )
         #expect(
             String(decoding: explicit, as: UTF8.self)
-                == #"{"channelMix":{"kind":"matrix","matrix":[0,0,1,0,1,0,1,0,0]},"orientation":"none","schemaVersion":2}"#
+                == #"{"channelMix":{"kind":"matrix","matrix":[0,0,1,0,1,0,1,0,0]},"exposureEV":0,"orientation":"none","schemaVersion":3}"#
         )
 
         // A built-in's nine numbers are derived from its token and are
@@ -157,12 +200,12 @@ struct ImageAdjustmentsTests {
     func anImageAffectingFieldArrivesAsANewerVersion() {
         let json = Data(
             #"""
-            {"schemaVersion":3,"orientation":"flipVertical",
-             "channelMix":{"kind":"identity"},"exposureEV":0.75}
+            {"schemaVersion":4,"orientation":"flipVertical",
+             "channelMix":{"kind":"identity"},"exposureEV":0.75,"toneCurve":[0,1]}
             """#.utf8
         )
         #expect(
-            throws: ImageAdjustmentError.unsupportedSchemaVersion(found: 3, supported: 2)
+            throws: ImageAdjustmentError.unsupportedSchemaVersion(found: 4, supported: 3)
         ) {
             try JSONDecoder().decode(ImageAdjustments.self, from: json)
         }
@@ -192,21 +235,21 @@ struct ImageAdjustmentsTests {
         #expect(decoded == ImageAdjustments(orientation: orientation, channelMix: .identity))
     }
 
-    @Test("A migrated version 1 record is written back as version 2")
-    func aMigratedRecordIsWrittenAsVersionTwo() throws {
+    @Test("A migrated version 1 record is written back as version 3")
+    func aMigratedRecordIsWrittenAsTheCurrentVersion() throws {
         let json = Data(#"{"schemaVersion":1,"orientation":"rotate180"}"#.utf8)
         let decoded = try JSONDecoder().decode(ImageAdjustments.self, from: json)
-        #expect(decoded.schemaVersion == 2)
+        #expect(decoded.schemaVersion == 3)
 
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         #expect(
             String(decoding: try encoder.encode(decoded), as: UTF8.self)
-                == #"{"channelMix":{"kind":"identity"},"orientation":"rotate180","schemaVersion":2}"#
+                == #"{"channelMix":{"kind":"identity"},"exposureEV":0,"orientation":"rotate180","schemaVersion":3}"#
         )
 
         // And re-reading what was written is the same record: the migration
-        // runs once and then the record is an ordinary version 2 one.
+        // runs once and then the record is an ordinary version 3 one.
         let reread = try JSONDecoder().decode(
             ImageAdjustments.self, from: try encoder.encode(decoded)
         )
@@ -280,6 +323,29 @@ struct ImageAdjustmentsTests {
                 #expect(
                     throws: ImageAdjustmentError.missingAdjustment(
                         field: "channelMix", schemaVersion: 2
+                    )
+                ) {
+                    try JSONDecoder().decode(ImageAdjustments.self, from: older)
+                }
+            case .exposure:
+                let own = Data(
+                    #"{"schemaVersion":3,"orientation":"rotate180","channelMix":{"kind":"redBlueSwap"},"exposureEV":-0.5}"#.utf8
+                )
+                #expect(
+                    try JSONDecoder().decode(ImageAdjustments.self, from: own)
+                        == ImageAdjustments(
+                            orientation: .halfTurn,
+                            channelMix: .redBlueSwap,
+                            exposure: try UserExposureAdjustment(ev: -0.5)
+                        )
+                )
+                // Version 2's record is not a version 3 record.
+                let older = Data(
+                    #"{"schemaVersion":3,"orientation":"rotate180","channelMix":{"kind":"redBlueSwap"}}"#.utf8
+                )
+                #expect(
+                    throws: ImageAdjustmentError.missingAdjustment(
+                        field: "exposureEV", schemaVersion: 3
                     )
                 ) {
                     try JSONDecoder().decode(ImageAdjustments.self, from: older)
@@ -360,19 +426,141 @@ struct ImageAdjustmentsTests {
         )
     }
 
+    // MARK: - Schema version 3 and the exposure
+
+    @Test(
+        "A version 2 record keeps its orientation and mix and migrates to 0 EV",
+        arguments: ["identity", "redBlueSwap"]
+    )
+    func aVersionTwoRecordMigratesToNeutralExposure(kind: String) throws {
+        let json = Data(
+            #"{"schemaVersion":2,"orientation":"rotate270Clockwise","channelMix":{"kind":"\#(kind)"}}"#.utf8
+        )
+        let decoded = try JSONDecoder().decode(ImageAdjustments.self, from: json)
+        #expect(decoded.orientation == .quarterTurnLeft)
+        #expect(decoded.channelMix.kind.rawValue == kind)
+        // A migration: version 2 predates the control and always rendered at
+        // 0 EV, so that is the state the record was saved in.
+        #expect(decoded.exposure == .neutral)
+        #expect(decoded.schemaVersion == 3)
+    }
+
+    @Test("A version 1 record migrates to the identity mix and 0 EV")
+    func aVersionOneRecordMigratesToNeutralExposure() throws {
+        let json = Data(#"{"schemaVersion":1,"orientation":"transposeMainDiagonal"}"#.utf8)
+        let decoded = try JSONDecoder().decode(ImageAdjustments.self, from: json)
+        #expect(decoded.orientation == .diagonalFlip)
+        #expect(decoded.channelMix == .identity)
+        #expect(decoded.exposure == .neutral)
+    }
+
+    @Test(
+        "A version 3 record keeps all three decisions exactly",
+        arguments: [-10.0, -2.5, -0.05, 0, 0.1, 0.73000001, 1.25, 4.5, 10]
+    )
+    func aVersionThreeRecordReadsAsWritten(ev: Double) throws {
+        let explicit = try UserChannelMixAdjustment.explicit(
+            persistedMatrix: [0.5, 0, 0.25, 0, 1, 0, 0.125, 0, 2]
+        )
+        let record = ImageAdjustments(
+            orientation: .antiDiagonalFlip,
+            channelMix: explicit,
+            exposure: try UserExposureAdjustment(ev: ev)
+        )
+        let decoded = try JSONDecoder().decode(
+            ImageAdjustments.self, from: try JSONEncoder().encode(record)
+        )
+        #expect(decoded == record)
+        // Not rounded on the way through: the bit pattern survives.
+        #expect(decoded.exposure.ev.bitPattern == ev.bitPattern)
+        #expect(decoded.channelMix == explicit)
+        #expect(decoded.orientation == .antiDiagonalFlip)
+    }
+
+    @Test("A migrated version 2 record is written back as version 3 with 0 EV")
+    func aMigratedVersionTwoRecordIsWrittenAsVersionThree() throws {
+        let json = Data(
+            #"{"schemaVersion":2,"orientation":"none","channelMix":{"kind":"redBlueSwap"}}"#.utf8
+        )
+        let decoded = try JSONDecoder().decode(ImageAdjustments.self, from: json)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        #expect(
+            String(decoding: try encoder.encode(decoded), as: UTF8.self)
+                == #"{"channelMix":{"kind":"redBlueSwap"},"exposureEV":0,"orientation":"none","schemaVersion":3}"#
+        )
+    }
+
+    /// Field strictness per version. An image-affecting field is never
+    /// quietly defaulted because it is absent, and never quietly ignored
+    /// because its version predates it.
+    @Test(
+        "Each version's fields are exactly its own",
+        arguments: [
+            (#"{"schemaVersion":1,"orientation":"none","channelMix":{"kind":"identity"}}"#,
+             ImageAdjustmentError.unexpectedAdjustment(field: "channelMix", schemaVersion: 1)),
+            (#"{"schemaVersion":1,"orientation":"none","exposureEV":0.5}"#,
+             ImageAdjustmentError.unexpectedAdjustment(field: "exposureEV", schemaVersion: 1)),
+            (#"{"schemaVersion":1,"orientation":"none","exposureEV":0}"#,
+             ImageAdjustmentError.unexpectedAdjustment(field: "exposureEV", schemaVersion: 1)),
+            (#"{"schemaVersion":2,"orientation":"none","channelMix":{"kind":"identity"},"exposureEV":0.5}"#,
+             ImageAdjustmentError.unexpectedAdjustment(field: "exposureEV", schemaVersion: 2)),
+            (#"{"schemaVersion":3,"orientation":"none","channelMix":{"kind":"identity"}}"#,
+             ImageAdjustmentError.missingAdjustment(field: "exposureEV", schemaVersion: 3)),
+            (#"{"schemaVersion":3,"orientation":"none","channelMix":{"kind":"identity"},"exposureEV":null}"#,
+             ImageAdjustmentError.missingAdjustment(field: "exposureEV", schemaVersion: 3)),
+            (#"{"schemaVersion":3,"orientation":"none","exposureEV":0.5}"#,
+             ImageAdjustmentError.missingAdjustment(field: "channelMix", schemaVersion: 3)),
+            (#"{"schemaVersion":3,"channelMix":{"kind":"identity"},"exposureEV":0.5}"#,
+             ImageAdjustmentError.missingAdjustment(field: "orientation", schemaVersion: 3)),
+        ]
+    )
+    func eachVersionsFieldsAreExactlyItsOwn(json: String, refusal: ImageAdjustmentError) {
+        #expect(throws: refusal) {
+            try JSONDecoder().decode(ImageAdjustments.self, from: Data(json.utf8))
+        }
+    }
+
+    @Test(
+        "An exposure outside the supported range is refused, not clamped",
+        arguments: [10.000001, -10.5, 11, -100, 1e300]
+    )
+    func anOutOfRangeExposureIsRefused(ev: Double) {
+        let json = Data(
+            #"{"schemaVersion":3,"orientation":"none","channelMix":{"kind":"identity"},"exposureEV":\#(ev)}"#.utf8
+        )
+        #expect(
+            throws: ImageAdjustmentError.exposureAdjustmentOutOfRange(
+                ev: ev, supported: UserExposureAdjustment.supportedRange
+            )
+        ) {
+            try JSONDecoder().decode(ImageAdjustments.self, from: json)
+        }
+    }
+
+    @Test("An exposure that is not a number is refused as undecodable")
+    func aNonNumericExposureIsRefused() {
+        let json = Data(
+            #"{"schemaVersion":3,"orientation":"none","channelMix":{"kind":"identity"},"exposureEV":"+1 EV"}"#.utf8
+        )
+        #expect(throws: DecodingError.self) {
+            try JSONDecoder().decode(ImageAdjustments.self, from: json)
+        }
+    }
+
     // MARK: - Refusals
 
-    @Test("A newer schema version is refused rather than partly applied", arguments: [3, 4, 99])
+    @Test("A newer schema version is refused rather than partly applied", arguments: [4, 5, 99])
     func aNewerSchemaVersionIsRefused(version: Int) {
         let json = Data(
             #"""
             {"schemaVersion":\#(version),"orientation":"none",
-             "channelMix":{"kind":"identity"}}
+             "channelMix":{"kind":"identity"},"exposureEV":0}
             """#.utf8
         )
         #expect(
             throws: ImageAdjustmentError.unsupportedSchemaVersion(
-                found: version, supported: 2
+                found: version, supported: 3
             )
         ) {
             try JSONDecoder().decode(ImageAdjustments.self, from: json)
@@ -383,7 +571,7 @@ struct ImageAdjustmentsTests {
     func anImpossibleSchemaVersionIsRefused(version: Int) {
         let json = Data(#"{"schemaVersion":\#(version),"orientation":"none"}"#.utf8)
         #expect(
-            throws: ImageAdjustmentError.unsupportedSchemaVersion(found: version, supported: 2)
+            throws: ImageAdjustmentError.unsupportedSchemaVersion(found: version, supported: 3)
         ) {
             try JSONDecoder().decode(ImageAdjustments.self, from: json)
         }
@@ -403,7 +591,7 @@ struct ImageAdjustmentsTests {
 
     @Test(
         "A missing orientation is refused, not defaulted to no correction",
-        arguments: [1, 2]
+        arguments: [1, 2, 3]
     )
     func aMissingOrientationIsRefused(version: Int) {
         let json = Data(#"{"schemaVersion":\#(version)}"#.utf8)

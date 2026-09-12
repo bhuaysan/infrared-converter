@@ -238,14 +238,90 @@ struct JSONSidecarImageAdjustmentStoreTests {
             try #expect(sandbox.sidecarText().contains("\"schemaVersion\": 1"))
             #expect(!(try sandbox.sidecarText().contains("channelMix")))
 
-            // And the next save writes version 2, with the state it migrated
+            // And the next save writes version 3, with the state it migrated
             // to.
             try Self.store.save(loaded, for: sandbox.raw)
             let text = try sandbox.sidecarText()
-            #expect(text.contains("\"schemaVersion\" : 2"))
+            #expect(text.contains("\"schemaVersion\" : 3"))
             #expect(text.contains("\"identity\""))
+            #expect(text.contains("\"exposureEV\" : 0"))
             try #expect(Self.store.load(for: sandbox.raw) == loaded)
             #expect(sandbox.rawIsUnchanged)
+        }
+    }
+
+    // MARK: - Schema version 3, through a real file
+
+    @Test("A version 2 sidecar loads at 0 EV, and its next save is version 3")
+    func aVersionTwoSidecarMigrates() throws {
+        try Self.withSandbox { sandbox in
+            let original = """
+                { "schemaVersion": 2, "orientation": "rotate180", "channelMix": { "kind": "redBlueSwap" } }
+                """
+            try sandbox.writeSidecar(original)
+
+            let loaded = try #require(try Self.store.load(for: sandbox.raw))
+            #expect(loaded.orientation == .halfTurn)
+            #expect(loaded.channelMix == .redBlueSwap)
+            #expect(loaded.exposure == .neutral)
+            // Reading migrates in memory and writes nothing.
+            try #expect(sandbox.sidecarText() == original)
+
+            try Self.store.save(loaded, for: sandbox.raw)
+            let text = try sandbox.sidecarText()
+            #expect(text.contains("\"schemaVersion\" : 3"))
+            #expect(text.contains("\"exposureEV\" : 0"))
+            #expect(text.contains("\"redBlueSwap\""))
+            try #expect(Self.store.load(for: sandbox.raw) == loaded)
+            #expect(sandbox.rawIsUnchanged)
+        }
+    }
+
+    @Test("A hand-written version 3 sidecar loads all three decisions")
+    func aHandWrittenVersionThreeSidecarLoads() throws {
+        try Self.withSandbox { sandbox in
+            try sandbox.writeSidecar(
+                """
+                {
+                  "schemaVersion": 3,
+                  "orientation": "none",
+                  "channelMix": { "kind": "redBlueSwap" },
+                  "exposureEV": 1.25
+                }
+                """
+            )
+            let loaded = try #require(try Self.store.load(for: sandbox.raw))
+            #expect(loaded.orientation == .identity)
+            #expect(loaded.channelMix == .redBlueSwap)
+            #expect(loaded.exposure.ev == 1.25)
+        }
+    }
+
+    @Test("An invalid exposure in a sidecar is refused with its typed reason, and nothing is repaired")
+    func anInvalidExposureSidecarIsRefused() throws {
+        let cases: [(String, ImageAdjustmentError)] = [
+            (
+                #"{ "schemaVersion": 3, "orientation": "none", "channelMix": { "kind": "identity" }, "exposureEV": 12.5 }"#,
+                .exposureAdjustmentOutOfRange(ev: 12.5, supported: UserExposureAdjustment.supportedRange)
+            ),
+            (
+                #"{ "schemaVersion": 2, "orientation": "none", "channelMix": { "kind": "identity" }, "exposureEV": 1 }"#,
+                .unexpectedAdjustment(field: "exposureEV", schemaVersion: 2)
+            ),
+            (
+                #"{ "schemaVersion": 3, "orientation": "none", "channelMix": { "kind": "identity" } }"#,
+                .missingAdjustment(field: "exposureEV", schemaVersion: 3)
+            ),
+        ]
+        for (body, expected) in cases {
+            try Self.withSandbox { sandbox in
+                try sandbox.writeSidecar(body)
+                let refusal = try #require(Self.loadRefusal(sandbox.raw))
+                #expect(refusal.adjustment == expected)
+                #expect(refusal.failureReason?.isEmpty == false)
+                try #expect(sandbox.sidecarText() == body)
+                #expect(sandbox.rawIsUnchanged)
+            }
         }
     }
 

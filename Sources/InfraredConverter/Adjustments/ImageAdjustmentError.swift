@@ -76,6 +76,18 @@ public enum ImageAdjustmentError: Error, Equatable {
     /// restated at the persistence boundary so the refusal names the sidecar
     /// rather than a processing stage the user never chose to run.
     case nonFiniteChannelMixCoefficient(index: Int, value: Double)
+    /// An exposure compensation is NaN or an infinity.
+    ///
+    /// Never read as `0 EV`: a value we could not use and a deliberate
+    /// decision to leave the exposure alone are different facts.
+    case nonFiniteExposureAdjustment(ev: Double)
+    /// An exposure compensation is finite and outside the range a record may
+    /// hold.
+    ///
+    /// Refused rather than clamped. A clamped exposure renders a different
+    /// photograph from the one the record describes, and nothing on screen
+    /// would say so.
+    case exposureAdjustmentOutOfRange(ev: Double, supported: ClosedRange<Double>)
 }
 
 extension ImageAdjustmentError: LocalizedError {
@@ -99,6 +111,10 @@ extension ImageAdjustmentError: LocalizedError {
             return "The saved channel-mix matrix is not a 3×3 matrix."
         case .nonFiniteChannelMixCoefficient:
             return "The saved channel-mix matrix contains a value that is not a finite number."
+        case .nonFiniteExposureAdjustment:
+            return "The saved exposure is not a finite number."
+        case .exposureAdjustmentOutOfRange:
+            return "The saved exposure is outside the supported range."
         }
     }
 
@@ -155,6 +171,18 @@ extension ImageAdjustmentError: LocalizedError {
             return """
                 Channel-mix coefficient \(index) is \(value), which is not a finite number \
                 and cannot describe a transform.
+                """
+        case .nonFiniteExposureAdjustment(let ev):
+            return """
+                The exposure is \(ev) EV, which is not a finite number. It is reported rather \
+                than treated as 0 EV, because a value we could not use and a deliberate \
+                decision to leave the exposure alone are different facts.
+                """
+        case .exposureAdjustmentOutOfRange(let ev, let supported):
+            return """
+                The exposure is \(ev) EV; a saved exposure must lie between \
+                \(supported.lowerBound) and \(supported.upperBound) EV. It is refused rather \
+                than clamped, because a clamped exposure would render a different photograph.
                 """
         }
     }

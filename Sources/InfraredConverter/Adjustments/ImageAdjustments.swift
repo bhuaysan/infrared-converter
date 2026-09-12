@@ -11,18 +11,20 @@ import Foundation
 ///
 /// ## Why a record rather than a property
 ///
-/// There are two adjustments today — the orientation correction and the
-/// creative channel mix — and this is why the model was a record from the
-/// first one. Every adjustment that follows, exposure and the white-balance
-/// choice and tone settings and crop, belongs beside them rather than as
-/// another unrelated field, and the set has to be serialisable **as a set**:
-/// a recipe is "all of these together", not one of them at a time.
+/// There are three adjustments today — the orientation correction, the
+/// creative channel mix and the exposure compensation — and this is why the
+/// model was a record from the first one. Every adjustment that follows, the
+/// white-balance choice and tone settings and crop, belongs beside them rather
+/// than as another unrelated field, and the set has to be serialisable **as a
+/// set**: a recipe is "all of these together", not one of them at a time.
 ///
 /// It is also what makes one render request mean one complete state. The
-/// workspace never asks for "the new orientation" or "the new mix"; it asks
-/// for the whole record, so a burst of changes to either collapses to one
-/// newest state and nothing in between is ever rendered or written. See
-/// `docs/decisions/0016-interactive-channel-mixer.md`.
+/// workspace never asks for "the new orientation", "the new mix" or "the new
+/// exposure"; it asks for the whole record, so a burst of changes to any of
+/// them — a slider drag included — collapses to one newest state and nothing
+/// in between is ever rendered or written. See
+/// `docs/decisions/0016-interactive-channel-mixer.md` and
+/// `docs/decisions/0017-interactive-exposure.md`.
 ///
 /// This is the first step toward the versioned `InfraredRecipe` the project
 /// will need. It is deliberately not that format: a recipe also references
@@ -53,12 +55,13 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// ```text
     /// 1    orientation
     /// 2    orientation, channelMix
+    /// 3    orientation, channelMix, exposureEV
     /// ```
     ///
-    /// Version 2 exists because a channel mix changes the rendered image, and
-    /// the rule below says an image-affecting field needs its own version. A
-    /// version 1 record still reads, as the migration in `init(from:)`
-    /// describes.
+    /// Versions 2 and 3 exist because a channel mix and an exposure each change
+    /// the rendered image, and the rule below says an image-affecting field
+    /// needs its own version. Version 1 and 2 records still read, as the
+    /// migration in `init(from:)` describes.
     ///
     /// Derived from `PersistedSchemaVersion.current` rather than written as a
     /// literal, so the list of versions this build reads and the version it
@@ -101,15 +104,26 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// capture.
     public var channelMix: UserChannelMixAdjustment
 
+    /// The exposure compensation the user chose. `.neutral` is `0 EV`.
+    ///
+    /// Applied in the linear domain as `× 2^EV` by the display renderer, after
+    /// the mix and the orientation and before the display range policy. It is
+    /// not tone mapping, not highlight recovery and not automatic: nothing
+    /// derives it from the image. See
+    /// `docs/decisions/0017-interactive-exposure.md`.
+    public var exposure: UserExposureAdjustment
+
     /// Builds a record of the user's decisions at this build's schema version.
     ///
     /// There is deliberately no version parameter. See `schemaVersion`.
     public init(
         orientation: UserOrientationAdjustment = .identity,
-        channelMix: UserChannelMixAdjustment = .identity
+        channelMix: UserChannelMixAdjustment = .identity,
+        exposure: UserExposureAdjustment = .neutral
     ) {
         self.orientation = orientation
         self.channelMix = channelMix
+        self.exposure = exposure
     }
 
     /// A freshly opened file's adjustments: the user has decided nothing.
@@ -123,9 +137,10 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// Whether this record has **no net effect on the image**.
     ///
     /// Every adjustment it holds is the identity: no orientation correction on
-    /// top of what the file records, and no creative channel remapping. It is
-    /// one question about the whole record, because a record that leaves the
-    /// geometry alone and swaps two channels does affect the image.
+    /// top of what the file records, no creative channel remapping, and
+    /// exactly `0 EV`. It is one question about the whole record, because a
+    /// record that leaves the geometry and the channels alone and lifts the
+    /// exposure by a tenth of a stop does affect the image.
     ///
     /// Three things it does **not** mean, each of which it has been read as:
     ///
@@ -141,7 +156,9 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// ```
     ///
     /// It compares net effects, and nothing else.
-    public var isIdentity: Bool { orientation.isIdentity && channelMix.isIdentity }
+    public var isIdentity: Bool {
+        orientation.isIdentity && channelMix.isIdentity && exposure.isIdentity
+    }
 }
 
 // MARK: - Persistence
@@ -169,13 +186,14 @@ public struct ImageAdjustments: Equatable, Sendable {
 /// requires a new schema version, and an older client must refuse that
 /// version rather than read around it.**
 ///
-/// The rule has now been applied once rather than merely written down.
+/// The rule has now been applied twice rather than merely written down.
 /// `channelMix` changes the rendered image, so adding it raised the version
-/// from 1 to 2 — it was not slipped into version 1 as an optional field — and
-/// a build that reads only version 1 refuses a version 2 record outright
-/// rather than opening it with no mix. In the other direction, version 1 is
-/// still read, because what its absent mix meant is known exactly: no
-/// remapping at all.
+/// from 1 to 2, and `exposureEV` raised it from 2 to 3 — neither was slipped
+/// into an older version as an optional field — and a build that reads only an
+/// older version refuses a newer record outright rather than opening it
+/// without the field. In the other direction, versions 1 and 2 are still read,
+/// because what each absent field meant is known exactly: no remapping, and
+/// `0 EV`.
 extension ImageAdjustments {
     /// Every schema version this build reads, as a closed set.
     ///
@@ -202,11 +220,13 @@ extension ImageAdjustments {
         case orientationOnly = 1
         /// `orientation` and `channelMix`.
         case channelMix = 2
+        /// `orientation`, `channelMix` and `exposureEV`.
+        case exposure = 3
 
         /// The version this build writes. Named explicitly, so adding a case
         /// does not by itself change what is written; a test asserts that it
         /// is the highest case.
-        static let current = PersistedSchemaVersion.channelMix
+        static let current = PersistedSchemaVersion.exposure
 
         /// The first version any build of this project wrote.
         static let first = PersistedSchemaVersion.orientationOnly
@@ -218,6 +238,7 @@ extension ImageAdjustments: Codable {
         case schemaVersion
         case orientation
         case channelMix
+        case exposureEV
     }
 
     /// Reads a persisted record, refusing anything it cannot fully understand
@@ -237,23 +258,27 @@ extension ImageAdjustments: Codable {
     /// - An orientation token or channel-mix kind this version does not model
     ///   is refused by the adjustment type that owns it.
     ///
-    /// ## The version 1 migration
+    /// ## The migrations
     ///
     /// ```text
-    /// v1    orientation                 → orientation, channelMix = .identity
-    /// v2    orientation, channelMix     → read as written
+    /// v1    orientation                        → channelMix = .identity, exposure = 0 EV
+    /// v2    orientation, channelMix            → exposure = 0 EV
+    /// v3    orientation, channelMix, exposureEV → read as written
     /// ```
     ///
-    /// Version 1 predates the creative mix, so a version 1 record describes a
-    /// photograph that was rendered with no remapping and identity is the
-    /// state it was actually saved in. That makes this a **migration** rather
-    /// than a default: it is not a guess about a missing field, it is what the
-    /// absent field meant.
+    /// Version 1 predates the creative mix and versions 1 and 2 predate the
+    /// exposure control, so such a record describes a photograph that was
+    /// rendered with no remapping and at `0 EV` — which the workspace always
+    /// passed. Those are the states the record was actually saved in. That
+    /// makes this a **migration** rather than a default: it is not a guess
+    /// about a missing field, it is what the absent field meant.
     ///
-    /// A version 1 record that nonetheless carries `channelMix` is a different
+    /// A record that carries a field its version does not have is a different
     /// thing entirely and is refused. Reading it would break the rule below in
-    /// the one direction that destroys data, and writing it back as version 2
-    /// would then make the loss permanent.
+    /// the one direction that destroys data, and writing it back at the
+    /// current version would then make the loss permanent. Every field a
+    /// version has is required, `decodeIfPresent` notwithstanding: absence is
+    /// refused, never defaulted.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
@@ -286,31 +311,72 @@ extension ImageAdjustments: Codable {
             )
         }
 
-        // Every version from the first onward has `orientation`; only version 2
-        // has `channelMix`. The switch is over `PersistedSchemaVersion`, with
-        // no `default`, so adding a version is a compile error here rather
-        // than a silent fall-through into an older version's decoding.
+        // Every version from the first onward has `orientation`; version 2
+        // adds `channelMix` and version 3 adds `exposureEV`. The switch is over
+        // `PersistedSchemaVersion`, with no `default`, so adding a version is a
+        // compile error here rather than a silent fall-through into an older
+        // version's decoding.
         switch schema {
         case .orientationOnly:
-            guard !container.contains(.channelMix) else {
-                throw ImageAdjustmentError.unexpectedAdjustment(
-                    field: "channelMix", schemaVersion: version
-                )
-            }
+            try Self.refuse(.channelMix, in: container, schemaVersion: version)
+            try Self.refuse(.exposureEV, in: container, schemaVersion: version)
             // The migration. Not a default for a field that went missing: an
-            // absent mix in version 1 *is* the identity, because version 1
-            // rendered no remapping at all.
-            self.init(orientation: orientation, channelMix: .identity)
+            // absent mix in version 1 *is* the identity, and an absent exposure
+            // *is* 0 EV, because version 1 rendered exactly that.
+            self.init(orientation: orientation, channelMix: .identity, exposure: .neutral)
 
         case .channelMix:
-            guard let channelMix = try container.decodeIfPresent(
-                UserChannelMixAdjustment.self, forKey: .channelMix
-            ) else {
-                throw ImageAdjustmentError.missingAdjustment(
-                    field: "channelMix", schemaVersion: version
-                )
-            }
-            self.init(orientation: orientation, channelMix: channelMix)
+            try Self.refuse(.exposureEV, in: container, schemaVersion: version)
+            let channelMix = try Self.require(
+                UserChannelMixAdjustment.self, .channelMix,
+                in: container, schemaVersion: version
+            )
+            // The migration: version 2 predates the exposure control and
+            // rendered at 0 EV.
+            self.init(orientation: orientation, channelMix: channelMix, exposure: .neutral)
+
+        case .exposure:
+            let channelMix = try Self.require(
+                UserChannelMixAdjustment.self, .channelMix,
+                in: container, schemaVersion: version
+            )
+            let exposure = try Self.require(
+                UserExposureAdjustment.self, .exposureEV,
+                in: container, schemaVersion: version
+            )
+            self.init(orientation: orientation, channelMix: channelMix, exposure: exposure)
+        }
+    }
+
+    /// Reads a field its version requires, refusing its absence.
+    ///
+    /// `decodeIfPresent` is used only to turn absence — or an explicit `null` —
+    /// into the typed `missingAdjustment` refusal rather than a
+    /// `DecodingError`. It never yields a default.
+    private static func require<Value: Decodable>(
+        _ type: Value.Type,
+        _ key: CodingKeys,
+        in container: KeyedDecodingContainer<CodingKeys>,
+        schemaVersion: Int
+    ) throws -> Value {
+        guard let value = try container.decodeIfPresent(type, forKey: key) else {
+            throw ImageAdjustmentError.missingAdjustment(
+                field: key.stringValue, schemaVersion: schemaVersion
+            )
+        }
+        return value
+    }
+
+    /// Refuses a field its version does not have.
+    private static func refuse(
+        _ key: CodingKeys,
+        in container: KeyedDecodingContainer<CodingKeys>,
+        schemaVersion: Int
+    ) throws {
+        guard !container.contains(key) else {
+            throw ImageAdjustmentError.unexpectedAdjustment(
+                field: key.stringValue, schemaVersion: schemaVersion
+            )
         }
     }
 
@@ -318,13 +384,14 @@ extension ImageAdjustments: Codable {
     ///
     /// Nothing else is possible: no in-memory record carries any other
     /// version, which is what makes every publicly constructible value
-    /// round-trip. A migrated version 1 record is therefore written back as
-    /// version 2 the next time it is saved — with the identity mix it was
-    /// migrated to, which is the state it was already in.
+    /// round-trip. A migrated version 1 or 2 record is therefore written back
+    /// as version 3 the next time it is saved — with the identity mix and the
+    /// `0 EV` it was migrated to, which is the state it was already in.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(Self.currentSchemaVersion, forKey: .schemaVersion)
         try container.encode(orientation, forKey: .orientation)
         try container.encode(channelMix, forKey: .channelMix)
+        try container.encode(exposure, forKey: .exposureEV)
     }
 }
