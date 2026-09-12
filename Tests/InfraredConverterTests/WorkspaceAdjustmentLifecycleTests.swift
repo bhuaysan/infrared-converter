@@ -160,7 +160,7 @@ struct WorkspaceAdjustmentLifecycleTests {
         #expect(state.orientationAdjustment == .halfTurn)
         #expect(store.saved(for: Self.urlA)?.orientation == .quarterTurnRight)
         #expect(!state.hasPendingAdjustmentWork)
-        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity"])
+        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity:0.0EV"])
     }
 
     @Test("A rendered adjustment whose write refuses is explicitly not saved")
@@ -233,7 +233,7 @@ struct WorkspaceAdjustmentLifecycleTests {
 
         #expect(store.saved(for: Self.urlA)?.orientation == .quarterTurnRight)
         // Written under A's own URL, and nowhere else.
-        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity"])
+        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity:0.0EV"])
         #expect(store.saved(for: Self.urlB) == nil)
         // Nothing was lost, so nothing is reported as lost.
         #expect(state.unsavedAdjustments.isEmpty)
@@ -378,7 +378,7 @@ struct WorkspaceAdjustmentLifecycleTests {
         #expect(state.adjustmentPersistence.isDurable)
         // The claim, checked against the store rather than against itself.
         #expect(store.saved(for: Self.urlA)?.orientation == state.orientationAdjustment)
-        #expect(store.writeSummary == ["lifecycle-a.orf:rotate180:identity"])
+        #expect(store.writeSummary == ["lifecycle-a.orf:rotate180:identity:0.0EV"])
     }
 
     /// The write-write race this follow-up exists for.
@@ -427,7 +427,7 @@ struct WorkspaceAdjustmentLifecycleTests {
         #expect(newest.userOrientationAdjustment == .quarterTurnLeft)
         #expect(state.orientationAdjustment == .quarterTurnLeft)
         #expect(store.writeSummary == [
-            "lifecycle-a.orf:rotate90Clockwise:identity", "lifecycle-a.orf:rotate270Clockwise:identity"
+            "lifecycle-a.orf:rotate90Clockwise:identity:0.0EV", "lifecycle-a.orf:rotate270Clockwise:identity:0.0EV"
         ])
 
         // Nothing older is still moving, so nothing can change the file back —
@@ -472,7 +472,7 @@ struct WorkspaceAdjustmentLifecycleTests {
         // of A ever decoded or installed anything: A was decoded once, for the
         // very first open, and B once.
         #expect(store.saved(for: Self.urlA)?.orientation == .quarterTurnRight)
-        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity"])
+        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity:0.0EV"])
         #expect(log.decodeCount == 2)
         #expect(state.selectedFileURL == Self.urlB)
         #expect(try Self.preview(state).pixelWidth == 10)
@@ -505,7 +505,7 @@ struct WorkspaceAdjustmentLifecycleTests {
         // One decode for the first open, one for the surviving reopen.
         #expect(log.decodeCount == 2)
         #expect(log.renderedOrientations == [.identity, .quarterTurnRight, .quarterTurnRight])
-        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity"])
+        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity:0.0EV"])
         #expect(!state.hasPendingAdjustmentWork)
     }
 
@@ -640,7 +640,7 @@ struct WorkspaceAdjustmentLifecycleTests {
 
         #expect(state.unsavedAdjustments.isEmpty)
         #expect(!state.hasPendingAdjustmentWork)
-        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity"])
+        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity:0.0EV"])
     }
 
     // MARK: - The old guarantees still hold
@@ -672,7 +672,7 @@ struct WorkspaceAdjustmentLifecycleTests {
 
         // Exactly one write, of the state the user actually ended on. The held
         // render's own state was superseded and is nowhere on disk.
-        #expect(store.writeSummary == ["lifecycle-a.orf:\(settled.persistedToken):identity"])
+        #expect(store.writeSummary == ["lifecycle-a.orf:\(settled.persistedToken):identity:0.0EV"])
         #expect(store.saved(for: Self.urlA)?.orientation == settled)
         #expect(store.saved(for: Self.urlB) == nil)
         #expect(state.unsavedAdjustments.isEmpty)

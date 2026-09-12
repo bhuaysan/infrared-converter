@@ -137,16 +137,16 @@ final class StubImageAdjustmentStore: ImageAdjustmentStore, @unchecked Sendable 
 
     /// The writes, as a comparable list of file name and complete state.
     ///
-    /// Both adjustments, because a write is the whole record: a summary that
+    /// Every adjustment, because a write is the whole record: a summary that
     /// named only the orientation would show two different complete states as
-    /// the same string.
+    /// the same string. The exposure is its exact `Double`, `0.0EV` included.
     var writeSummary: [String] {
         lock.lock()
         defer { lock.unlock() }
         return writes.map {
             """
             \($0.url.lastPathComponent):\($0.adjustments.orientation.persistedToken)\
-            :\($0.adjustments.channelMix.kind.rawValue)
+            :\($0.adjustments.channelMix.kind.rawValue):\($0.adjustments.exposure.ev)EV
             """
         }
     }

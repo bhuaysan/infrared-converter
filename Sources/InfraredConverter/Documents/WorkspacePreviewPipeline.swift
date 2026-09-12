@@ -22,7 +22,7 @@ import Foundation
 ///     ↓  EffectiveImageOrientation (metadata orientation + user adjustment)
 ///     ↓  ImageOrienter (one permutation, by the effective orientation)
 /// OrientedSceneLinearRGBImage
-///     ↓  DisplayPreviewRenderer (0 EV, hard clipping, sRGB)
+///     ↓  DisplayPreviewRenderer (adjustments.exposure, hard clipping, sRGB)
 /// DisplayEncodedPreviewImage
 ///     ↓  DisplayPreviewCGImageAdapter
 /// CGImage
@@ -59,8 +59,11 @@ import Foundation
 /// - **A centred neutral patch.** A deterministic placeholder, not a scene
 ///   analysis. Nothing verifies that what is in the middle of the frame is
 ///   neutral; the user will choose the patch when there is a UI for it.
-/// - **`0 EV`.** The mathematically neutral exposure, chosen rather than
-///   assumed.
+/// - **The exposure the user asked for**, which for a file with no saved
+///   decision is `0 EV` — the mathematically neutral value, chosen rather
+///   than assumed. It is passed to `DisplayPreviewRenderer` unchanged, which
+///   applies `× 2^EV` in the linear domain before the range policy. Nothing
+///   derives it from the image.
 /// - **The orientation the file itself names, plus whatever the user has
 ///   asked for.** The file's own orientation is read from
 ///   `RAWMetadata.Geometry.orientation` — the decoder's `flip` mapped once
@@ -71,13 +74,14 @@ import Foundation
 ///   application does not model is a **typed failure**, not a silent
 ///   `.upright`.
 ///
-/// ## Two phases, because the mix and the orientation are adjustable
+/// ## Two phases, because the mix, the orientation and the exposure are adjustable
 ///
 /// ```text
 /// prepare   decode → normalise → balance → demosaic → convert → reduce
 ///           → RETAIN the pre-mix reduced preview
 ///
-/// render    retained pre-mix preview → channel mix → orientation → display
+/// render    retained pre-mix preview → channel mix → orientation
+///           → display (exposure, range policy, encoding)
 /// ```
 ///
 /// `prepare(decoding:using:)` stops at the reduction and hands back a `Source`
@@ -85,7 +89,7 @@ import Foundation
 /// complete `ImageAdjustments`, and applies every adjustable stage to it.
 ///
 /// The retained source is **pre-creative**, and that is the load-bearing part.
-/// Changing either adjustment reruns the last three stages only, from the
+/// Changing any adjustment reruns the last three stages only, from the
 /// unmixed, unoriented image — never from the previous result. Nothing
 /// decodes, normalises, white-balances, demosaics, converts or reduces again;
 /// no mix is ever composed onto another, and no orientation is ever applied on
@@ -190,13 +194,27 @@ struct WorkspacePreviewPipeline {
         )
     }
 
-    /// The display settings a freshly opened file gets. Spelled out rather
-    /// than defaulted, because no entry point offers a default.
-    static let initialSettings = DisplayRenderSettings(
-        exposureEV: 0,
-        rangePolicy: .hardClipToDisplayRange,
-        encoding: .sRGB
-    )
+    /// What the display stage does with values outside `0...1`. Not an
+    /// adjustment: exposure changes which values those are, never this.
+    static let displayRangePolicy = DisplayRangePolicy.hardClipToDisplayRange
+
+    /// The encoding the display stage produces. Not an adjustment either.
+    static let displayEncoding = DisplayEncoding.sRGB
+
+    /// The display settings one complete adjustment state is rendered with.
+    ///
+    /// The user's exposure is passed through **unchanged** — no rounding, no
+    /// clamp, no scale computed here. `DisplayPreviewRenderer` is the one
+    /// authority on what `exposureEV` does to a pixel, and it did so before
+    /// exposure was a user decision. The range policy and the encoding are
+    /// the application's fixed choices and do not depend on the adjustments.
+    static func displaySettings(for adjustments: ImageAdjustments) -> DisplayRenderSettings {
+        DisplayRenderSettings(
+            exposureEV: adjustments.exposure.ev,
+            rangePolicy: displayRangePolicy,
+            encoding: displayEncoding
+        )
+    }
 
     /// The fraction of the shorter active-area dimension the neutral patch
     /// spans. A sixteenth is large enough to average thousands of samples of
@@ -308,9 +326,17 @@ struct WorkspacePreviewPipeline {
     ///   → IRChannelMixer      adjustments.channelMix
     ///   → ImageOrienter       the file's orientation + adjustments.orientation
     ///   → DisplayPreviewRenderer
+    ///                         exposureEV = adjustments.exposure
+    ///                         range policy and encoding unchanged
     /// ```
     ///
-    /// The interactive half, and the only half either adjustment reruns. It
+    /// The interactive half, and the only half any adjustment reruns.
+    ///
+    /// Exposure is scene-linear arithmetic, `× 2^EV`, and it happens inside the
+    /// display stage **before** that stage's range policy: nothing here clamps
+    /// the mixed, oriented values first, so a value that exposure lifts above
+    /// `1` is clipped — and counted — by the policy that owns clipping, not by
+    /// anything upstream of it. It
     /// always starts from `source.preview`, which is unmixed and unoriented,
     /// so repeated changes never compose: the mix is applied exactly once, by
     /// the requested matrix, and the image is permuted exactly once, by the
@@ -352,7 +378,9 @@ struct WorkspacePreviewPipeline {
         )
 
         let encoded = try DisplayPreviewRenderer().render(
-            oriented, settings: Self.initialSettings, cancellation: cancellation
+            oriented,
+            settings: Self.displaySettings(for: adjustments),
+            cancellation: cancellation
         )
 
         return WorkspacePreview(
@@ -363,6 +391,7 @@ struct WorkspacePreviewPipeline {
                 orientation: orientation, stage: oriented.processing
             ),
             channelMixAdjustment: adjustments.channelMix,
+            exposureAdjustment: adjustments.exposure,
             resolution: source.resolution,
             sourcePixelWidth: source.preview.width,
             sourcePixelHeight: source.preview.height,
@@ -499,6 +528,15 @@ struct WorkspacePreview {
     /// `orientationProvenance` keeps apart for the orientation — a control
     /// reads this, an audit of the rendering reads that.
     let channelMixAdjustment: UserChannelMixAdjustment
+    /// The exposure the user asked for, as the canonical adjustment.
+    ///
+    /// The exposure that was **rendered** is `processing.exposureEV` — see
+    /// `renderedExposureEV` — and the pipeline passes one to the other
+    /// unchanged, so the two always hold the same number. They are kept as
+    /// two facts for the reason `channelMixAdjustment` is: a control reads
+    /// what the person chose, an audit of the rendering reads what the stage
+    /// applied, and a test asserts that they agree.
+    let exposureAdjustment: UserExposureAdjustment
     /// What resolution these pixels are, what full resolution they were
     /// reduced from, by which policy and by which method.
     ///
@@ -533,6 +571,9 @@ struct WorkspacePreview {
     }
     /// The mix the creative stage actually applied, with its provenance.
     var channelMix: IRChannelMix { processing.mix }
+    /// The exposure the display stage actually applied, from its own
+    /// provenance. What the inspector shows.
+    var renderedExposureEV: Double { processing.exposureEV }
     /// Width of the full-resolution, unoriented active image area, in pixels.
     var fullResolutionSourcePixelWidth: Int { resolution.sourceWidth }
     /// Height of that same area.

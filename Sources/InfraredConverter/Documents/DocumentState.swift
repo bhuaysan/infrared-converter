@@ -72,18 +72,22 @@ import Observation
 /// made for is still the one the user wants — so a superseded render can no
 /// more write the sidecar than it can reach the screen.
 ///
-/// ## Two adjustments, one state
+/// ## Three adjustments, one state
 ///
 /// ```text
 /// orientation    the eight discrete arrangements, composed onto the file's own
 /// channelMix     the creative infrared remix: identity, red/blue swap, matrix
+/// exposure       compensation in EV, applied as × 2^EV by the display stage
 /// ```
 ///
 /// They are fields of one `ImageAdjustments` record, and every render request
-/// is that whole record. Nothing here renders "the new mix" or "the new
-/// rotation": a burst of changes to either control collapses to one newest
-/// complete state, and the sidecar receives that state or nothing. See
-/// `docs/decisions/0016-interactive-channel-mixer.md`.
+/// is that whole record. Nothing here renders "the new mix", "the new
+/// rotation" or "the new exposure": a burst of changes to any control — a
+/// slider drag is exactly such a burst — collapses to one newest complete
+/// state, and the sidecar receives that state or nothing. Exposure is the
+/// first continuous control, and it deliberately has no scheduler, debounce
+/// or queue of its own. See `docs/decisions/0016-interactive-channel-mixer.md`
+/// and `docs/decisions/0017-interactive-exposure.md`.
 ///
 /// ## A decision is tracked from the press to the disk
 ///
@@ -101,7 +105,7 @@ import Observation
 /// ## Leaving a file does not throw a decision away
 ///
 /// A render still running when the user opens the next file is not cancelled.
-/// What it persists is the complete state it was asked for — both adjustments,
+/// What it persists is the complete state it was asked for — every adjustment,
 /// as one record.
 /// It is handed over: the document keeps its render slot, loses its screen,
 /// and may do exactly one thing more — write its own sidecar once its own
@@ -221,14 +225,16 @@ final class DocumentState {
         let adjustments: ImageAdjustments
         let reason: Reason
 
-        /// The decision itself in one line, both adjustments named.
+        /// The decision itself in one line, every adjustment named.
         ///
-        /// Both, because the record that was not written is the complete state
-        /// and reporting only the rotation would describe the wrong loss.
+        /// All of them, because the record that was not written is the
+        /// complete state and reporting only the rotation would describe the
+        /// wrong loss.
         var adjustmentDescription: String {
             """
             orientation \(adjustments.orientation.persistedToken), \
-            mix \(adjustments.channelMix.kind.rawValue)
+            mix \(adjustments.channelMix.kind.rawValue), \
+            exposure \(adjustments.exposure.signedDescription)
             """
         }
 
@@ -310,9 +316,15 @@ final class DocumentState {
         /// controls, or the user could not undo the adjustment that caused it.
         let isAdjustable: Bool
 
-        /// The user's editing decisions — orientation and channel mix
+        /// The user's editing decisions — orientation, channel mix and exposure
         /// together: what the sidecar held when the file was opened, plus
         /// whatever has been asked for since.
+        ///
+        /// This is the **requested** state, and it is what the controls show.
+        /// While a render is pending it is ahead of `owned`, whose preview —
+        /// and whose provenance, which the inspector reads — describes the
+        /// state that was actually rendered. The two are not reconciled by
+        /// moving a control back.
         var adjustments: ImageAdjustments
 
         /// The application-owned pipeline's result, or the reason it failed.
@@ -542,6 +554,14 @@ final class DocumentState {
     var channelMixAdjustment: UserChannelMixAdjustment {
         guard case .decoded(let loaded) = status else { return .identity }
         return loaded.adjustments.channelMix
+    }
+
+    /// The user's exposure compensation for the open file — the **requested**
+    /// value, ahead of the rendered preview while a render is pending — or
+    /// `.neutral` when nothing is open.
+    var exposureAdjustment: UserExposureAdjustment {
+        guard case .decoded(let loaded) = status else { return .neutral }
+        return loaded.adjustments.exposure
     }
 
     /// Whether the adjustment controls can do anything right now.
@@ -1014,6 +1034,33 @@ final class DocumentState {
     func setChannelMix(_ mix: UserChannelMixAdjustment) {
         adjust { $0.channelMix = mix }
     }
+
+    // MARK: - Exposure adjustment
+
+    /// Chooses the exposure compensation and re-renders.
+    ///
+    /// The first continuous adjustment, and it goes through exactly the path
+    /// the discrete ones do: the complete record is updated, persistence
+    /// becomes `.pending`, and one request goes to the coalescing renderer. A
+    /// slider drag is a burst of such calls; the renderer collapses it to the
+    /// newest state, and only that state can be installed or written. There is
+    /// no timer, no debounce and no exposure-specific queue here, deliberately.
+    ///
+    /// No arithmetic happens here either. The value is already validated by
+    /// its type, and what it does to a pixel is the display renderer's
+    /// business.
+    ///
+    /// Asking for the exposure already in force does nothing at all.
+    func setExposure(_ exposure: UserExposureAdjustment) {
+        adjust { $0.exposure = exposure }
+    }
+
+    /// Returns the exposure to `0 EV`, and changes nothing else.
+    ///
+    /// Like the orientation's reset, it is itself a decision and is saved once
+    /// it has rendered; and like it, it leaves the other adjustments exactly
+    /// as they were.
+    func resetExposure() { setExposure(.neutral) }
 
     // MARK: - Requesting a render of one complete state
 

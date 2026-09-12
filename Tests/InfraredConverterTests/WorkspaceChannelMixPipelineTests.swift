@@ -129,7 +129,7 @@ struct WorkspaceChannelMixPipelineTests {
                     to: try IRChannelMixer().apply(to: source.preview, mix: mix.mix),
                     orientation: .upright
                 ),
-                settings: WorkspacePreviewPipeline.initialSettings
+                settings: WorkspacePreviewPipeline.displaySettings(for: ImageAdjustments(channelMix: mix))
             )
             #expect(
                 WorkspaceStubs.pixelBytes(rendered.image)

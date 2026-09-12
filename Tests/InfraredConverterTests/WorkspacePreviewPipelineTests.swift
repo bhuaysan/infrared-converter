@@ -28,10 +28,10 @@ struct WorkspacePreviewPipelineTests {
             .isValidatedInfraredCalibration)
 
         // Neutral exposure, chosen rather than defaulted.
-        #expect(WorkspacePreviewPipeline.initialSettings.exposureEV == 0)
-        #expect(WorkspacePreviewPipeline.initialSettings.exposureScale == 1)
-        #expect(WorkspacePreviewPipeline.initialSettings.rangePolicy == .hardClipToDisplayRange)
-        #expect(WorkspacePreviewPipeline.initialSettings.encoding == .sRGB)
+        #expect(WorkspacePreviewPipeline.displaySettings(for: .none).exposureEV == 0)
+        #expect(WorkspacePreviewPipeline.displaySettings(for: .none).exposureScale == 1)
+        #expect(WorkspacePreviewPipeline.displaySettings(for: .none).rangePolicy == .hardClipToDisplayRange)
+        #expect(WorkspacePreviewPipeline.displaySettings(for: .none).encoding == .sRGB)
     }
 
     /// The orientation a file gets is read from its metadata and nothing

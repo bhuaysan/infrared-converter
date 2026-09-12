@@ -193,11 +193,13 @@ enum WorkspaceStubs {
     }
 
     /// Waits until the workspace has a rendered preview for one **complete**
-    /// adjustment state: both the orientation and the channel mix.
+    /// adjustment state: the orientation, the channel mix and the exposure.
     ///
     /// The mix is compared as the user's adjustment rather than as the
     /// `IRChannelMix` the stage applied, so an `.explicit` matrix equal to a
-    /// built-in is not mistaken for the built-in.
+    /// built-in is not mistaken for the built-in. The exposure is compared
+    /// both as requested and as rendered, so a preview whose two disagree is
+    /// never mistaken for a match.
     @MainActor
     static func waitForPreview(
         _ state: DocumentState,
@@ -207,6 +209,8 @@ enum WorkspaceStubs {
         try await waitForPreview(state, timeout: timeout) {
             $0.userOrientationAdjustment == adjustments.orientation
                 && $0.channelMixAdjustment == adjustments.channelMix
+                && $0.exposureAdjustment == adjustments.exposure
+                && $0.renderedExposureEV == adjustments.exposure.ev
         }
     }
 

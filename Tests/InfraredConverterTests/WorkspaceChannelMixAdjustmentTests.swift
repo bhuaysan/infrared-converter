@@ -112,7 +112,7 @@ struct WorkspaceChannelMixAdjustmentTests {
         #expect(store.saved(for: Self.url) == wanted)
         #expect(store.saved(for: Self.url)?.channelMix == .redBlueSwap)
         #expect(store.saved(for: Self.url)?.orientation == .identity)
-        #expect(store.saved(for: Self.url)?.schemaVersion == 2)
+        #expect(store.saved(for: Self.url)?.schemaVersion == 3)
         if case .saved = state.adjustmentPersistence {} else {
             Issue.record("Expected .saved, got \(state.adjustmentPersistence)")
         }
@@ -627,7 +627,7 @@ struct WorkspaceChannelMixAdjustmentTests {
         // A's decision reached A's sidecar, and only A's.
         #expect(store.saved(for: Self.url) == held)
         #expect(store.saved(for: Self.otherURL) == nil)
-        #expect(store.writeSummary == ["mix-adjustment.orf:none:redBlueSwap"])
+        #expect(store.writeSummary == ["mix-adjustment.orf:none:redBlueSwap:0.0EV"])
 
         // A's preview never landed in B: B is still showing B, at B's size,
         // with B's own identity mix.
