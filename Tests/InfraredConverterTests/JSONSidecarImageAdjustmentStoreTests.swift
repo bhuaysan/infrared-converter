@@ -177,11 +177,120 @@ struct JSONSidecarImageAdjustmentStoreTests {
         try Self.withSandbox { sandbox in
             try sandbox.writeSidecar(
                 """
-                { "schemaVersion": 1, "orientation": "rotate90Clockwise" }
+                {
+                  "schemaVersion": 2,
+                  "orientation": "rotate90Clockwise",
+                  "channelMix": { "kind": "redBlueSwap" }
+                }
                 """
             )
             let loaded = try #require(try Self.store.load(for: sandbox.raw))
             #expect(loaded.orientation == .quarterTurnRight)
+            #expect(loaded.channelMix == .redBlueSwap)
+        }
+    }
+
+    // MARK: - The channel mix, through a real file
+
+    @Test("Every channel-mix state survives a save and a load")
+    func everyChannelMixRoundTripsThroughTheFile() throws {
+        try Self.withSandbox { sandbox in
+            let explicit = try UserChannelMixAdjustment.explicit(
+                persistedMatrix: [0.5, 0, -0.25, 0, 1, 0, 2, 0, 0.125]
+            )
+            for mix in [UserChannelMixAdjustment.identity, .redBlueSwap, explicit] {
+                let adjustments = ImageAdjustments(
+                    orientation: .quarterTurnLeft, channelMix: mix
+                )
+                try Self.store.save(adjustments, for: sandbox.raw)
+                let loaded = try #require(try Self.store.load(for: sandbox.raw))
+                #expect(loaded == adjustments)
+                #expect(loaded.channelMix == mix)
+                // The kind token on disk is the wire format.
+                try #expect(
+                    sandbox.sidecarText().contains("\"\(mix.kind.rawValue)\"")
+                )
+            }
+            #expect(sandbox.rawIsUnchanged)
+        }
+    }
+
+    // MARK: - The version 1 migration, through a real file
+
+    /// A sidecar written by the build before the channel mix existed. It is
+    /// read, not refused: what its absent mix meant is known exactly.
+    @Test("A version 1 sidecar loads with the identity mix")
+    func aVersionOneSidecarMigrates() throws {
+        try Self.withSandbox { sandbox in
+            try sandbox.writeSidecar(
+                """
+                { "schemaVersion": 1, "orientation": "flipHorizontal" }
+                """
+            )
+
+            let loaded = try #require(try Self.store.load(for: sandbox.raw))
+            #expect(loaded.orientation == .horizontalFlip)
+            #expect(loaded.channelMix == .identity)
+
+            // Nothing was rewritten by reading it. A migration happens in
+            // memory; the file changes only when the workspace saves a state
+            // that has rendered.
+            try #expect(sandbox.sidecarText().contains("\"schemaVersion\": 1"))
+            #expect(!(try sandbox.sidecarText().contains("channelMix")))
+
+            // And the next save writes version 2, with the state it migrated
+            // to.
+            try Self.store.save(loaded, for: sandbox.raw)
+            let text = try sandbox.sidecarText()
+            #expect(text.contains("\"schemaVersion\" : 2"))
+            #expect(text.contains("\"identity\""))
+            try #expect(Self.store.load(for: sandbox.raw) == loaded)
+            #expect(sandbox.rawIsUnchanged)
+        }
+    }
+
+    @Test("A version 1 sidecar carrying a channel mix is refused")
+    func aVersionOneSidecarWithAMixIsRefused() throws {
+        try Self.withSandbox { sandbox in
+            let text = """
+                {
+                  "schemaVersion": 1,
+                  "orientation": "none",
+                  "channelMix": { "kind": "redBlueSwap" }
+                }
+                """
+            try sandbox.writeSidecar(text)
+
+            let refusal = try #require(Self.loadRefusal(sandbox.raw))
+            #expect(
+                refusal.adjustment
+                    == .unexpectedAdjustment(field: "channelMix", schemaVersion: 1)
+            )
+            // Nothing repaired, nothing deleted.
+            try #expect(sandbox.sidecarText() == text)
+            #expect(sandbox.rawIsUnchanged)
+        }
+    }
+
+    @Test("An unreadable channel mix is refused, with its typed reason intact")
+    func anUnreadableMixIsRefused() throws {
+        let bodies = [
+            #"{ "schemaVersion": 2, "orientation": "none", "channelMix": { "kind": "aerochrome" } }"#,
+            #"{ "schemaVersion": 2, "orientation": "none", "channelMix": { "kind": "matrix" } }"#,
+            #"{ "schemaVersion": 2, "orientation": "none", "channelMix": { "kind": "matrix", "matrix": [1,2,3] } }"#,
+        ]
+        for body in bodies {
+            try Self.withSandbox { sandbox in
+                try sandbox.writeSidecar(body)
+                let refusal = try #require(Self.loadRefusal(sandbox.raw))
+                // The record refused, and the typed value survived the file
+                // boundary rather than becoming a sentence.
+                #expect(refusal.adjustment != nil)
+                #expect(refusal.errorDescription?.isEmpty == false)
+                #expect(refusal.failureReason?.isEmpty == false)
+                try #expect(sandbox.sidecarText() == body)
+                #expect(sandbox.rawIsUnchanged)
+            }
         }
     }
 
@@ -336,7 +445,12 @@ struct JSONSidecarImageAdjustmentStoreTests {
     @Test("A repeated save of the same state is byte-stable")
     func repeatedSavesAreByteStable() throws {
         try Self.withSandbox { sandbox in
-            let adjustments = ImageAdjustments(orientation: .diagonalFlip)
+            let adjustments = ImageAdjustments(
+                orientation: .diagonalFlip,
+                channelMix: try UserChannelMixAdjustment.explicit(
+                    persistedMatrix: [1, 0.5, 0, 0, 1, 0, 0, 0, 0.25]
+                )
+            )
             try Self.store.save(adjustments, for: sandbox.raw)
             let first = try Data(contentsOf: sandbox.sidecar)
             try Self.store.save(adjustments, for: sandbox.raw)
@@ -347,7 +461,10 @@ struct JSONSidecarImageAdjustmentStoreTests {
     @Test("The sidecar is readable JSON a person can recognise")
     func theSidecarIsReadable() throws {
         try Self.withSandbox { sandbox in
-            try Self.store.save(ImageAdjustments(orientation: .quarterTurnLeft), for: sandbox.raw)
+            try Self.store.save(
+                ImageAdjustments(orientation: .quarterTurnLeft, channelMix: .redBlueSwap),
+                for: sandbox.raw
+            )
             let text = try sandbox.sidecarText()
 
             // Semantic, not byte-for-byte: the format is the two fields and
@@ -355,7 +472,10 @@ struct JSONSidecarImageAdjustmentStoreTests {
             #expect(text.contains("\"orientation\""))
             #expect(text.contains("\"rotate270Clockwise\""))
             #expect(text.contains("\"schemaVersion\""))
-            #expect(text.contains("1"))
+            #expect(text.contains("2"))
+            #expect(text.contains("\"channelMix\""))
+            #expect(text.contains("\"kind\""))
+            #expect(text.contains("\"redBlueSwap\""))
             #expect(text.contains("\n"))
         }
     }

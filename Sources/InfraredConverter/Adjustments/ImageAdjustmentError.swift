@@ -36,6 +36,37 @@ public enum ImageAdjustmentError: Error, Equatable {
     /// A persisted adjustment record is missing a field its declared schema
     /// version requires.
     case missingAdjustment(field: String, schemaVersion: Int)
+    /// A persisted adjustment record carries a field its declared schema
+    /// version does not have.
+    ///
+    /// The mirror image of `missingAdjustment`, and it exists for the same
+    /// reason: an image-affecting field requires a schema version, so a record
+    /// that declares version 1 and carries a version 2 field is not a version
+    /// 1 record. Reading around the field would render a different photograph
+    /// from the one the user saved and then write the record back without it.
+    case unexpectedAdjustment(field: String, schemaVersion: Int)
+    /// A persisted channel mix names a kind this version does not model — a
+    /// typo, a corrupted file, or a token a newer version writes.
+    ///
+    /// Reported verbatim, and never read as `.identity`: rendering the
+    /// photograph with no creative remapping would look exactly like success
+    /// while discarding the rendering the user chose.
+    case unknownChannelMixKind(token: String)
+    /// A persisted channel mix is missing a field its kind requires — the
+    /// `kind` token itself, or the coefficients an explicit matrix is.
+    case missingChannelMixField(field: String)
+    /// A persisted explicit channel mix does not carry nine coefficients.
+    ///
+    /// The shape is part of the matrix: a 3×3 map is nine numbers in row-major
+    /// order, and a record with eight or ten of them describes no transform at
+    /// all.
+    case malformedChannelMixMatrix(coefficientCount: Int, expected: Int)
+    /// A persisted channel-mix coefficient is not a finite number.
+    ///
+    /// The same contract `RAWColorMatrix3x3` enforces at construction,
+    /// restated at the persistence boundary so the refusal names the sidecar
+    /// rather than a processing stage the user never chose to run.
+    case nonFiniteChannelMixCoefficient(index: Int, value: Double)
 }
 
 extension ImageAdjustmentError: LocalizedError {
@@ -47,6 +78,16 @@ extension ImageAdjustmentError: LocalizedError {
             return "The saved adjustments were written by a different version of this app."
         case .missingAdjustment:
             return "The saved adjustments are incomplete."
+        case .unexpectedAdjustment:
+            return "The saved adjustments were written by a different version of this app."
+        case .unknownChannelMixKind:
+            return "The saved channel mix could not be understood."
+        case .missingChannelMixField:
+            return "The saved channel mix is incomplete."
+        case .malformedChannelMixMatrix:
+            return "The saved channel-mix matrix is not a 3×3 matrix."
+        case .nonFiniteChannelMixCoefficient:
+            return "The saved channel-mix matrix contains a value that is not a finite number."
         }
     }
 
@@ -69,6 +110,34 @@ extension ImageAdjustmentError: LocalizedError {
             return """
                 Schema version \(schemaVersion) requires "\(field)", and the record does not \
                 contain it.
+                """
+        case .unexpectedAdjustment(let field, let schemaVersion):
+            return """
+                Schema version \(schemaVersion) has no "\(field)", and the record contains \
+                one. A setting that changes the image requires its own schema version, so a \
+                record carrying this field is not a version \(schemaVersion) record and is \
+                refused rather than read around.
+                """
+        case .unknownChannelMixKind(let token):
+            return """
+                "\(token)" is not one of the channel mixes this version models. It is \
+                reported rather than treated as "no remapping", because a value we could not \
+                read and a deliberate decision to leave the channels alone are different \
+                facts.
+                """
+        case .missingChannelMixField(let field):
+            return """
+                The saved channel mix does not contain "\(field)", which its kind requires.
+                """
+        case .malformedChannelMixMatrix(let count, let expected):
+            return """
+                A channel-mix matrix is \(expected) coefficients in row-major order, and the \
+                record contains \(count).
+                """
+        case .nonFiniteChannelMixCoefficient(let index, let value):
+            return """
+                Channel-mix coefficient \(index) is \(value), which is not a finite number \
+                and cannot describe a transform.
                 """
         }
     }
