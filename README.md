@@ -433,6 +433,15 @@ See [RAW/README.md](RAW/README.md).
 - **Nothing watches the sidecar.** If it changes underneath an open document,
   the last save from this application wins. There is no external-edit
   detection and no conflict resolution.
+- **Quitting with a render in flight loses that edit.** Leaving a *file*
+  mid-render does not: the departing document finishes its render in the
+  background and writes its own sidecar. Quitting has no lifecycle hook to
+  catch, and inventing one is a later milestone. See
+  [ADR 0014](docs/decisions/0014-adjustment-lifecycle.md).
+- **Reopening a file that is still settling shows the older state.** The new
+  open reads the sidecar before the departing render's write lands, so the two
+  disagree for the length of one render. Nothing is lost; the next open shows
+  the saved state.
 - **Saved state is one photograph's own.** There is no recipe format, no
   preset, and no way to apply one file's record to another.
 - **Orientation has no automatic correction.** A file is oriented by what it

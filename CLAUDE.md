@@ -774,10 +774,16 @@ nothing: a stage that can be superseded takes an explicit
 Cancellation is not a processing failure and must never be reported as one.
 
 Rapid parameter changes coalesce. At most one expensive render works at a
-time, a burst collapses to the newest requested state, and no historical state
-is rendered on the way there — the scheduling counterpart of adjustments being
-canonical state rather than command history. See
+time **per document**, a burst collapses to the newest requested state, and no
+historical state is rendered on the way there — the scheduling counterpart of
+adjustments being canonical state rather than command history. See
 `docs/decisions/0011-coalesced-preview-rendering.md`.
+
+Opening another file does not cancel a render whose result a user's decision
+depends on. A document the workspace leaves keeps its render slot until the
+state it was asked for has settled, and may then do one thing only: write its
+own sidecar. For that interval, and only that interval, two documents' renders
+can overlap. See `docs/decisions/0014-adjustment-lifecycle.md`.
 
 Treat memory usage as a first-class engineering constraint.
 
@@ -1058,7 +1064,7 @@ The working-representation decision must be recorded before production IR color 
 
 How those re-renders are scheduled and cancelled is `docs/decisions/0011-coalesced-preview-rendering.md`. That the application-owned pipeline and the LibRaw processed-RGB reference are independent paths, neither gating nor substituting for the other, is `docs/decisions/0012-independent-raw-paths.md` — whose amendment defines the open boundary: a file is open when a path produced an **image**, and a prepared scene-linear state is not one.
 
-Where the user's adjustments are kept between sessions, how an open reads them before it renders, and when a state earns the right to be written, is `docs/decisions/0013-adjustment-sidecar.md`.
+Where the user's adjustments are kept between sessions, how an open reads them before it renders, and when a state earns the right to be written, is `docs/decisions/0013-adjustment-sidecar.md`. How one adjustment is tracked from the button press to the disk — pending, saved, refused by the render, refused by the write — and what happens to it when the user leaves the photograph mid-render, is `docs/decisions/0014-adjustment-lifecycle.md`.
 
 ADR numbers are assigned in the order decisions are actually made; do not reuse a number that is already taken.
 
@@ -1411,6 +1417,11 @@ Pause and reconsider when code begins to show any of these patterns:
 - an unreadable sidecar recovered as "no adjustments", repaired, or deleted
 - a sidecar failure reported as a RAW decoding failure
 - a successful render withdrawn because saving it failed
+- a persistence state that describes the last write rather than the adjustment on screen
+- a state reported as saved while its render is still running
+- several booleans standing in for one closed state enum
+- a user's decision discarded because they opened another file, with nothing said
+- a delivery routed to a document by its path rather than by which open it belongs to
 - full RAW decode on every slider move without measurement or caching rationale
 - every feature depending directly on LibRaw
 - direct Metal shader calls from UI views

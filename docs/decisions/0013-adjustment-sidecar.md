@@ -224,9 +224,15 @@ delivered.
 
 ## Decision 8 — Writing is atomic, and a write failure is not a render failure
 
-`Data.write(to:options: [.atomic])`: Foundation writes a temporary file beside
-the target and renames it over. A crash or a full disk leaves either the whole
-previous record or the whole new one, never half a JSON document.
+`Data.write(to:options: [.atomic])`: Foundation writes the bytes to a temporary
+file beside the target and renames it over. What that buys is the
+**replacement** — nothing ever observes a half-written record at the sidecar's
+path, and a write that fails partway leaves the previous record where it was.
+
+It is deliberately not described as a durability guarantee. Foundation promises
+nothing here about flushing to the device, so an earlier phrasing of this
+decision ("a crash or a full disk leaves either the whole previous record or the
+whole new one") claimed more than the mechanism does. Corrected in ADR 0014.
 
 A save that fails does **not** withdraw the image:
 
@@ -241,8 +247,8 @@ the workspace shows a small "Adjustments not saved" warning while it stands.
 There is no retry engine and no queue: the user's next successful adjustment
 tries again, which is what their next action does anyway.
 
-The write is synchronous, on the main actor. It is one atomic write of a few
-hundred bytes, and there is exactly one place that writes, so ordering is
+The write is synchronous, on the main actor. It is one atomic replacement of a
+few hundred bytes, and there is exactly one place that writes, so ordering is
 correct by construction. Moving it off the main actor would buy nothing
 measurable and would need its own guard to stop an older save landing after a
 newer one.
@@ -264,9 +270,16 @@ writes; this milestone gives that refusal a file to refuse.
 Nothing about the schema changed here. It is still `schemaVersion` and
 `orientation`, and version 1.
 
+> Extended by [ADR 0014](0014-adjustment-lifecycle.md), which models the
+> interval between a decision and its write, and stops a decision from being
+> discarded when the user opens another file mid-render. The rules in Decision
+> 7 are unchanged by it.
+
 ## Consequences
 
-- A rotation survives closing the file, and survives quitting the application.
+- A rotation survives closing the file, and survives quitting the application
+  once its render has finished. (ADR 0014 states the boundary exactly: leaving
+  a *file* mid-render is safe; quitting mid-render is not.)
 - Every user decision lives in one visible file per photograph, which a user
   can back up, copy beside the RAW file, or delete to start over.
 - A sidecar this build cannot read stops the open, loudly, and is left exactly
