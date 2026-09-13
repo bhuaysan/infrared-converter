@@ -1,14 +1,13 @@
 import Foundation
 
-/// The RAW front half, from a file on disk to the full-resolution working
-/// representation — and the one place the application's choices about that
-/// half are made.
+/// The white-balance-dependent half of the RAW front half: from a normalised
+/// mosaic and one white-balance decision to the full-resolution working
+/// representation.
 ///
 /// ```text
-/// decodeMosaic
-///     ↓  RAWMosaicNormalizer
-/// LinearRAWMosaic
-///     ↓  RAWWhiteBalanceEstimator over a centred neutral patch
+/// NormalizedRAWSource                ← RAWBasePreparationPipeline produced it
+///     ↓  UserWhiteBalanceAdjustment.resolvedRegion    the user's patch, in samples
+///     ↓  RAWWhiteBalanceEstimator                     measured, never guessed
 ///     ↓  RAWWhiteBalancer
 /// WhiteBalancedRAWMosaic
 ///     ↓  RAWDemosaicer (bilinear Bayer)
@@ -27,51 +26,68 @@ import Foundation
 /// ```
 ///
 /// It lived inside `WorkspacePreviewPipeline.prepare` while the preview was
-/// the only consumer. Leaving it there and writing the same seven calls again
-/// in the export path would have produced two RAW pipelines that start
-/// identical and drift silently: a different neutral patch, a different
-/// camera-to-working transform or a different demosaic would make an export
-/// disagree with the preview it was supposed to be the full-resolution version
-/// of, and nothing would say so. See
-/// `docs/decisions/0018-full-resolution-tiff-export.md`.
+/// the only consumer. Leaving it there and writing the same calls again in the
+/// export path would have produced two RAW pipelines that start identical and
+/// drift silently: a different neutral patch, a different camera-to-working
+/// transform or a different demosaic would make an export disagree with the
+/// preview it was supposed to be the full-resolution version of, and nothing
+/// would say so. See `docs/decisions/0018-full-resolution-tiff-export.md`.
 ///
-/// The split is deliberately at the **working representation**, because that
-/// is exactly where the two paths genuinely diverge: the preview reduces and
-/// the export does not. Everything before it is common; everything after it
-/// is each path's own.
+/// That mattered more once the patch became the user's. The export resolves a
+/// saved patch through `UserWhiteBalanceAdjustment.resolvedRegion` and
+/// estimates with `RAWWhiteBalanceEstimator` because **this** code does; there
+/// is no second resolver and no second estimator to disagree with. See
+/// `docs/decisions/0019-interactive-white-balance.md`.
+///
+/// ## Where it splits, and why there
+///
+/// ```text
+/// RAWBasePreparationPipeline   decode, normalise      ← independent of the user
+/// RAWWorkingImagePipeline      balance … convert      ← this type
+/// each end path                reduce / mix / …       ← what makes it a preview
+///                                                       or an export
+/// ```
+///
+/// The first line is split off because nothing in it depends on the white
+/// balance: a workspace can retain its result and re-balance from it without
+/// re-reading the file. The second is split off because that is exactly where
+/// the two end paths diverge — the preview reduces and the export does not.
 ///
 /// ## What is decided here, and what is not
 ///
 /// Every stage below requires its decision to be named — there is no default
-/// transform and no default white balance anywhere in the processing API. The
-/// choices for a file the user has only just opened are made here, in the
-/// application layer, where they are visible in one place:
+/// transform and no default white balance anywhere in the processing API. One
+/// choice is made here, in the application layer, where it is visible:
 ///
 /// - **`.sensorRGBIdentityFalseColor`**, the IR-safe placement into the
 ///   working space. The file's own `rgbFromCamera` is visible-light data whose
 ///   validity for an infrared capture is the open question of this project,
 ///   so it is not used.
-/// - **A centred neutral patch** for the white-balance estimate. A
-///   deterministic placeholder, not a scene analysis. Nothing verifies that
-///   what is in the middle of the frame is neutral; the user will choose the
-///   patch when there is a UI for it.
 ///
-/// What is **not** decided here is every adjustable stage: no creative mix, no
-/// orientation, no exposure, no reduction and no encoding. Those belong to the
-/// path that renders, and they are what makes a preview a preview and an
-/// export an export.
+/// The white balance is no longer among them. It used to be — a centred patch,
+/// hard-coded here, which every caller silently got. It is now a **parameter**,
+/// because it is a user decision, and the default centred patch is one value
+/// that parameter can take (`UserWhiteBalanceAdjustment.defaultNeutralPatch`)
+/// rather than a hidden fallback inside a shared pipeline.
 ///
-/// ## Cost
+/// What is **not** decided here is every adjustable stage after the working
+/// representation: no creative mix, no orientation, no exposure, no reduction
+/// and no encoding. Those belong to the path that renders, and they are what
+/// makes a preview a preview and an export an export.
 ///
-/// The expensive half, on the CPU, with no cache. It runs once per file for a
-/// preview and once per export; it does not depend on any adjustment, so no
-/// slider movement reruns it.
+/// ## Cost and cancellation
 ///
-/// It is **not** cooperatively cancellable: none of the stages it calls polls
-/// a cancellation signal, so it is abandoned only at the task boundary, after
-/// the pass. That is unchanged from when it lived in
-/// `WorkspacePreviewPipeline`, and is the reason the cancellable half of both
-/// end paths starts after it.
+/// The expensive half after decoding, on the CPU, with no cache. It runs once
+/// per file for a preview, again each time the user moves the neutral patch,
+/// and once per export.
+///
+/// Every stage it calls **does** poll the cancellation signal it is handed —
+/// the estimator per patch row, the balancer, the demosaicer and the working
+/// converter per image row — so a superseded pass stops inside itself rather
+/// than at the task boundary. That is a requirement rather than a nicety now
+/// that a user can re-trigger this by clicking: a run abandoned only at the
+/// end would keep a core and a buffer busy producing a picture nobody will
+/// see.
 struct RAWWorkingImagePipeline {
 
     /// The camera-to-working transform every path uses.
@@ -82,30 +98,6 @@ struct RAWWorkingImagePipeline {
     /// calibration would be a different transform with different provenance.
     static let cameraToWorkingTransform = RAWCameraToWorkingColorTransform
         .sensorRGBIdentityFalseColor
-
-    /// The fraction of the shorter active-area dimension the neutral patch
-    /// spans. A sixteenth is large enough to average thousands of samples of
-    /// every CFA plane and small enough to stay well inside the frame.
-    static let neutralPatchDivisor = 16
-
-    /// A centred, even-sided square in active-image coordinates.
-    ///
-    /// Even sides matter: a region of even width and height contains whole
-    /// 2×2 CFA cells whatever its origin's parity, so every colour plane is
-    /// measured. A minimum of two keeps that true for absurdly small images.
-    ///
-    /// This is a deterministic placeholder for a picker, not an estimate of
-    /// where the neutral part of a photograph is.
-    static func centredNeutralPatch(width: Int, height: Int) -> RAWActiveAreaRegion {
-        let shorter = min(width, height)
-        let side = max(2, (shorter / neutralPatchDivisor) & ~1)
-        return RAWActiveAreaRegion(
-            originRow: max(0, (height - side) / 2),
-            originColumn: max(0, (width - side) / 2),
-            width: min(side, width),
-            height: min(side, height)
-        )
-    }
 
     /// The orientation a file's own metadata names, or `nil` when it names one
     /// this application does not model.
@@ -146,47 +138,76 @@ struct RAWWorkingImagePipeline {
         )
     }
 
+    /// Estimates and applies one white-balance decision, then demosaics and
+    /// converts to the working representation, at **sensor resolution**.
+    ///
+    /// The patch is resolved against this file's own active area, measured,
+    /// and turned into gains, in that order — so the persisted decision means
+    /// the same rectangle of the same photograph however the file is opened.
+    ///
+    /// - Throws: whatever the stage that failed reports —
+    ///   `RAWProcessingError` for a patch that cannot be resolved or measured,
+    ///   or `CancellationError`. Nothing is caught and turned into a
+    ///   plausible-looking picture here.
+    func prepare(
+        _ source: NormalizedRAWSource,
+        whiteBalance: UserWhiteBalanceAdjustment,
+        cancellation: ProcessingCancellation = .none
+    ) throws -> PreparedWorkingImage {
+        let region = try whiteBalance.resolvedRegion(
+            activeAreaWidth: source.activeAreaWidth,
+            activeAreaHeight: source.activeAreaHeight
+        )
+        let estimate = try RAWWhiteBalanceEstimator().estimateNeutralPatch(
+            in: source.mosaic, region: region, cancellation: cancellation
+        )
+
+        let balanced = try RAWWhiteBalancer().apply(
+            to: source.mosaic, estimate: estimate, cancellation: cancellation
+        )
+        let demosaiced = try RAWDemosaicer().demosaic(balanced, cancellation: cancellation)
+
+        // The bare-image overload, deliberately: the wrapper overloads exist
+        // to keep a stage's whole upstream chain reachable through `source`,
+        // and at full resolution that chain is three more buffers the size of
+        // the image. The white-balanced mosaic and the camera-native image
+        // both become unreachable when this function returns; the normalised
+        // mosaic belongs to the caller, not to this result.
+        let working = try RAWWorkingColorConverter().convert(
+            demosaiced,
+            using: Self.cameraToWorkingTransform,
+            cancellation: cancellation
+        )
+
+        return PreparedWorkingImage(
+            image: working,
+            metadata: source.metadata,
+            url: source.url,
+            whiteBalance: whiteBalance,
+            estimate: estimate
+        )
+    }
+
     /// Decodes a RAW file and runs every stage up to and including the
     /// camera-to-working conversion, at **sensor resolution**.
+    ///
+    /// Both halves, for a caller that has no reason to keep the normalised
+    /// mosaic — the full-resolution export, which reads the file once and
+    /// retains nothing.
     ///
     /// LibRaw's processed-RGB path is not involved: this calls `decodeMosaic`,
     /// and every stage after it is ours.
     ///
     /// - Throws: whatever the stage that failed reports —
-    ///   `RAWDecodingError` or `RAWProcessingError`. Nothing is caught and
-    ///   turned into a plausible-looking picture here.
+    ///   `RAWDecodingError`, `RAWProcessingError` or `CancellationError`.
     func prepare(
         decoding url: URL,
-        using decoder: RAWDecoder
+        using decoder: RAWDecoder,
+        whiteBalance: UserWhiteBalanceAdjustment,
+        cancellation: ProcessingCancellation = .none
     ) throws -> PreparedWorkingImage {
-        let decoded = try decoder.decodeMosaic(at: url)
-        let normalized = try RAWMosaicNormalizer().process(decoded)
-
-        let region = Self.centredNeutralPatch(
-            width: normalized.mosaic.width,
-            height: normalized.mosaic.height
-        )
-        let estimate = try RAWWhiteBalanceEstimator()
-            .estimateNeutralPatch(in: normalized.mosaic, region: region)
-
-        let balanced = try RAWWhiteBalancer().apply(to: normalized, estimate: estimate)
-        let demosaiced = try RAWDemosaicer().demosaic(balanced)
-
-        // The bare-image overload, deliberately: the wrapper overloads exist
-        // to keep a stage's whole upstream chain reachable through `source`,
-        // and at full resolution that chain is four more buffers the size of
-        // the image. The decoded mosaic, the normalised mosaic, the
-        // white-balanced mosaic and the camera-native image all become
-        // unreachable when this function returns.
-        let working = try RAWWorkingColorConverter()
-            .convert(demosaiced.image, using: Self.cameraToWorkingTransform)
-
-        return PreparedWorkingImage(
-            image: working,
-            metadata: decoded.metadata,
-            url: url,
-            neutralPatch: region
-        )
+        let base = try RAWBasePreparationPipeline().prepare(decoding: url, using: decoder)
+        return try prepare(base, whiteBalance: whiteBalance, cancellation: cancellation)
     }
 }
 
@@ -209,7 +230,21 @@ struct PreparedWorkingImage: Sendable {
     let metadata: RAWMetadata
     /// The file these pixels came from.
     let url: URL
+    /// The white balance the **user** asked for, as intent.
+    ///
+    /// Kept beside the estimate rather than derived from it, for the reason
+    /// `WorkspacePreview` keeps the channel-mix adjustment beside the applied
+    /// matrix: one is what a person chose and the other is what the pipeline
+    /// measured. A control reads this; an audit of the rendering reads
+    /// `estimate`.
+    let whiteBalance: UserWhiteBalanceAdjustment
+    /// What the estimator measured and produced: the resolved region, the
+    /// per-plane statistics, the target mean and the gains.
+    let estimate: RAWWhiteBalanceEstimate
+
     /// The region the white balance was estimated from, in full-resolution
     /// sensor (pre-orientation) active-area coordinates.
-    let neutralPatch: RAWActiveAreaRegion
+    var neutralPatch: RAWActiveAreaRegion { estimate.region }
+    /// The multipliers the estimate produced, indexed by CFA colour plane.
+    var whiteBalanceGains: RAWWhiteBalanceGains { estimate.gains }
 }

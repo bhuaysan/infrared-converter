@@ -199,7 +199,10 @@ enum WorkspaceStubs {
     /// `IRChannelMix` the stage applied, so an `.explicit` matrix equal to a
     /// built-in is not mistaken for the built-in. The exposure is compared
     /// both as requested and as rendered, so a preview whose two disagree is
-    /// never mistaken for a match.
+    /// never mistaken for a match. The white balance is compared as the
+    /// decision the source was **prepared with**, which is the one term a
+    /// render cannot change: a preview matching it is a preview of the right
+    /// pixels, not merely of the right request.
     @MainActor
     static func waitForPreview(
         _ state: DocumentState,
@@ -211,6 +214,7 @@ enum WorkspaceStubs {
                 && $0.channelMixAdjustment == adjustments.channelMix
                 && $0.exposureAdjustment == adjustments.exposure
                 && $0.renderedExposureEV == adjustments.exposure.ev
+                && $0.whiteBalanceAdjustment == adjustments.whiteBalance
         }
     }
 

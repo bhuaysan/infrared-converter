@@ -32,6 +32,12 @@ import Foundation
 ///   the user currently has, whether or not they have been written to disk;
 ///   persistence and export are separate questions. See
 ///   `docs/decisions/0018-full-resolution-tiff-export.md`, Decision 9.
+/// - No white-balance gains, and no normalised mosaic. The patch travels as
+///   the user's intent inside `adjustments`, and the pipeline measures it from
+///   the file it re-reads. An export started while a new patch is still being
+///   prepared for the preview therefore renders the **new** patch: the
+///   canonical state is what is exported, never what is on screen. See
+///   `docs/decisions/0019-interactive-white-balance.md`.
 public struct ExportRequest: Equatable, Sendable {
     /// The RAW file to render. Read; never written, moved or modified.
     public let rawURL: URL
@@ -47,7 +53,8 @@ public struct ExportRequest: Equatable, Sendable {
         """
         \(rawURL.lastPathComponent): orientation \(adjustments.orientation.persistedToken), \
         mix \(adjustments.channelMix.kind.rawValue), \
-        exposure \(adjustments.exposure.signedDescription)
+        exposure \(adjustments.exposure.signedDescription), \
+        white balance \(adjustments.whiteBalance.kind.rawValue)
         """
     }
 }

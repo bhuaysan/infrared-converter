@@ -235,6 +235,121 @@ struct FullResolutionExportPipelineTests {
         #expect(export.processing.orientation == preview.effectiveOrientation)
     }
 
+    // MARK: - The white balance
+
+    /// The export resolves the user's patch through the same resolver the
+    /// preview uses, measures it with the same estimator, and does so against
+    /// the RAW file's own active area — not against anything a workspace
+    /// happened to be holding.
+    @Test("A custom neutral patch reaches the export's own estimate")
+    func aCustomPatchReachesTheExport() throws {
+        let patch = UserWhiteBalanceAdjustment.neutralPatch(
+            try NormalizedActiveAreaRegion(
+                originX: 0.5, originY: 0.5, width: 0.5, height: 0.5
+            )
+        )
+        let rendered = try Self.render(ImageAdjustments(whiteBalance: patch))
+
+        #expect(rendered.request.adjustments.whiteBalance == patch)
+        // The region measured is the one the adjustment names, resolved
+        // against the sensor's own 8 × 6 active area by the one resolver.
+        #expect(
+            rendered.neutralPatch
+                == (try patch.resolvedRegion(activeAreaWidth: 8, activeAreaHeight: 6))
+        )
+        try rendered.whiteBalanceGains.validate()
+        // And the gains reached the pixels: the chain records them.
+        #expect(rendered.image.processing.whiteBalanceGains == rendered.whiteBalanceGains)
+        #expect(rendered.image.processing.whiteBalanceApplied)
+    }
+
+    @Test("Two different patches produce two different exports")
+    func differentPatchesProduceDifferentExports() throws {
+        let a = UserWhiteBalanceAdjustment.neutralPatch(
+            try NormalizedActiveAreaRegion(
+                originX: 0, originY: 0, width: 0.5, height: 0.5
+            )
+        )
+        let b = UserWhiteBalanceAdjustment.neutralPatch(
+            try NormalizedActiveAreaRegion(
+                originX: 0.5, originY: 0.5, width: 0.5, height: 0.5
+            )
+        )
+        let first = try Self.render(ImageAdjustments(whiteBalance: a))
+        let second = try Self.render(ImageAdjustments(whiteBalance: b))
+
+        #expect(first.neutralPatch != second.neutralPatch)
+        #expect(first.whiteBalanceGains != second.whiteBalanceGains)
+        #expect(first.image.values != second.image.values)
+    }
+
+    /// The default case exports exactly what every build of this project
+    /// exported before the white balance was adjustable.
+    @Test("The default patch exports the historical centred square")
+    func theDefaultPatchIsTheHistoricalOne() throws {
+        let rendered = try Self.render(.none)
+        #expect(
+            rendered.neutralPatch
+                == UserWhiteBalanceAdjustment.defaultRegion(width: 8, height: 6)
+        )
+    }
+
+    /// The strongest form of "one estimator, one resolver": for the same file
+    /// and the same patch, the preview and the export measure the same region
+    /// and derive the same multipliers — bit for bit, not to a tolerance.
+    @Test("Preview and export resolve and measure a custom patch identically")
+    func previewAndExportAgreeOnTheWhiteBalance() throws {
+        let decoder = Self.decoder(width: 8, height: 6)
+        let patch = UserWhiteBalanceAdjustment.neutralPatch(
+            try NormalizedActiveAreaRegion(
+                originX: 0.25, originY: 0.25, width: 0.5, height: 0.5
+            )
+        )
+        let adjustments = ImageAdjustments(
+            orientation: .quarterTurnRight,
+            channelMix: .redBlueSwap,
+            exposure: try UserExposureAdjustment(ev: 0.75),
+            whiteBalance: patch
+        )
+
+        let preview = try WorkspacePreviewPipeline().render(
+            decoding: Self.url, using: decoder, adjustments: adjustments
+        )
+        #expect(!preview.resolution.isReduced)
+
+        let export = try FullResolutionExportPipeline().render(
+            ExportRequest(rawURL: Self.url, adjustments: adjustments), using: decoder
+        )
+
+        #expect(export.neutralPatch == preview.neutralPatch)
+        #expect(export.whiteBalanceGains == preview.whiteBalanceGains)
+        #expect(export.estimate.targetMean == preview.estimate.targetMean)
+        #expect(export.estimate.statistics == preview.estimate.statistics)
+        #expect(export.estimate.scalePolicy == preview.estimate.scalePolicy)
+    }
+
+    /// The whole point of persisting intent rather than gains: the record
+    /// names a region, and the gains are re-derived. A record carrying
+    /// multipliers would have frozen an estimator into every sidecar.
+    @Test("The export request carries a patch, not gains")
+    func theExportRequestCarriesIntentNotGains() throws {
+        let patch = UserWhiteBalanceAdjustment.neutralPatch(
+            try NormalizedActiveAreaRegion(
+                originX: 0.1, originY: 0.1, width: 0.2, height: 0.2
+            )
+        )
+        let request = ExportRequest(
+            rawURL: Self.url, adjustments: ImageAdjustments(whiteBalance: patch)
+        )
+        let labels = Mirror(reflecting: request).children.compactMap(\.label)
+        #expect(labels == ["rawURL", "adjustments"])
+
+        let whiteBalanceLabels = Mirror(reflecting: request.adjustments.whiteBalance)
+            .children.compactMap(\.label)
+        #expect(!whiteBalanceLabels.contains("gains"))
+        #expect(request.diagnosticDescription.contains("white balance neutralPatch"))
+    }
+
     // MARK: - The preview policy cannot reach the export
 
     @Test("The export is identical whatever preview resolution the workspace used")

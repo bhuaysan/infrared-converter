@@ -62,7 +62,7 @@ struct WorkspaceChannelMixPipelineTests {
 
         let decoded = try Self.decoder().decodeMosaic(at: Self.url)
         let normalized = try RAWMosaicNormalizer().process(decoded)
-        let region = WorkspacePreviewPipeline.centredNeutralPatch(
+        let region = UserWhiteBalanceAdjustment.defaultRegion(
             width: normalized.mosaic.width, height: normalized.mosaic.height
         )
         let estimate = try RAWWhiteBalanceEstimator()

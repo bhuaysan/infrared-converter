@@ -24,6 +24,16 @@ final class WorkspaceEventLog: @unchecked Sendable {
         case adjustmentLoadRefused
         /// The expensive half of the pipeline ran.
         case decodedMosaic
+        /// The white-balance-dependent half of the pipeline ran — estimate,
+        /// balance, demosaic, convert, reduce — for this decision.
+        ///
+        /// Logged separately from `rendered` because the whole point of the
+        /// two-slot architecture is that they run at different times and for
+        /// different reasons. A rotation that produced one of these would be a
+        /// defect no assertion on the final image could catch.
+        case preparedSource(UserWhiteBalanceAdjustment)
+        /// The white-balance-dependent half refused this decision.
+        case preparationRefused(UserWhiteBalanceAdjustment)
         /// A full render ran, for this complete state.
         case rendered(ImageAdjustments)
         /// A render refused, for this complete state.
@@ -69,6 +79,27 @@ final class WorkspaceEventLog: @unchecked Sendable {
     /// The orientation term of every save.
     var savedOrientations: [UserOrientationAdjustment] {
         saves.map(\.orientation)
+    }
+
+    /// Every white balance the heavy half was actually run for, in order.
+    ///
+    /// A burst of picks that produced one entry is the coalescing claim; a
+    /// rotation that produced none is the "fast adjustments stay fast" claim.
+    var preparations: [UserWhiteBalanceAdjustment] {
+        all.compactMap {
+            if case .preparedSource(let state) = $0 { return state } else { return nil }
+        }
+    }
+
+    /// Every white balance the heavy half was **asked** for, whether it
+    /// finished or refused.
+    var preparationAttempts: [UserWhiteBalanceAdjustment] {
+        all.compactMap {
+            switch $0 {
+            case .preparedSource(let state), .preparationRefused(let state): return state
+            default: return nil
+            }
+        }
     }
 
     var decodeCount: Int {
@@ -146,7 +177,8 @@ final class StubImageAdjustmentStore: ImageAdjustmentStore, @unchecked Sendable 
         return writes.map {
             """
             \($0.url.lastPathComponent):\($0.adjustments.orientation.persistedToken)\
-            :\($0.adjustments.channelMix.kind.rawValue):\($0.adjustments.exposure.ev)EV
+            :\($0.adjustments.channelMix.kind.rawValue):\($0.adjustments.exposure.ev)EV\
+            :\($0.adjustments.whiteBalance.kind.rawValue)
             """
         }
     }
@@ -408,5 +440,142 @@ struct MultiFileStubDecoder: RAWDecoder {
         log?.append(.decodedMosaic)
         guard let mosaic = mosaics[url] else { throw RAWDecodingError.fileNotFound(url) }
         return mosaic
+    }
+}
+
+
+/// The real white-balance preparation, wrapped so a test can count it and make
+/// it refuse.
+///
+/// The preparation itself is genuine — `DocumentState.pipelineSourcePreparation`,
+/// the same closure production uses — so the pixels it produces are really
+/// balanced, demosaiced and reduced from the retained mosaic. Only the
+/// counting and the deliberate refusal are added.
+struct RecordingPreparation: Sendable {
+    /// A refusal that is nothing like a cancellation: a stage saying no.
+    struct Refused: Error, LocalizedError {
+        var errorDescription: String? {
+            "The stub preparation refused this white balance."
+        }
+    }
+
+    let log: WorkspaceEventLog
+    /// Which white balances this preparation refuses. Everything else prepares
+    /// normally.
+    var refuses: @Sendable (UserWhiteBalanceAdjustment) -> Bool = { _ in false }
+
+    init(
+        log: WorkspaceEventLog,
+        refuses: @escaping @Sendable (UserWhiteBalanceAdjustment) -> Bool = { _ in false }
+    ) {
+        self.log = log
+        self.refuses = refuses
+    }
+
+    var prepare: DocumentState.SourcePreparation {
+        let log = self.log
+        let refuses = self.refuses
+        return { base, whiteBalance, policy, cancellation in
+            if refuses(whiteBalance) {
+                log.append(.preparationRefused(whiteBalance))
+                throw Refused()
+            }
+            let source = try DocumentState.pipelineSourcePreparation(
+                base, whiteBalance, policy, cancellation
+            )
+            log.append(.preparedSource(whiteBalance))
+            return source
+        }
+    }
+}
+
+/// A white-balance preparation the test starts, holds, and releases by hand.
+///
+/// The heavy-slot counterpart of `GatedRender`, and it exists for the same
+/// reason: the races this milestone has to get right — a superseded patch, an
+/// exposure changed mid-preparation, a file switch during one — are only
+/// testable while a preparation is genuinely in flight.
+///
+/// Only the white balances named by `holds` are gated, so a second file's own
+/// opening preparation does not deadlock behind the first file's held one.
+///
+/// ## Why a suite using this must be serialised
+///
+/// A held preparation occupies a cooperative-pool thread for as long as the
+/// test holds it, exactly as a held render does. Every wait is bounded so a
+/// mistake fails the test rather than hanging the run.
+final class GatedPreparation: @unchecked Sendable {
+    struct Stalled: Error {}
+    struct Refused: Error, LocalizedError {
+        var errorDescription: String? {
+            "The gated preparation refused this white balance."
+        }
+    }
+
+    static let waitLimit = DispatchTimeInterval.seconds(1800)
+
+    private let lock = NSLock()
+    private let holds: @Sendable (UserWhiteBalanceAdjustment) -> Bool
+    private let refuses: @Sendable (UserWhiteBalanceAdjustment) -> Bool
+    private let didStart = DispatchSemaphore(value: 0)
+    private let release = DispatchSemaphore(value: 0)
+    let log: WorkspaceEventLog
+
+    init(
+        log: WorkspaceEventLog,
+        holds: @escaping @Sendable (UserWhiteBalanceAdjustment) -> Bool,
+        refuses: @escaping @Sendable (UserWhiteBalanceAdjustment) -> Bool = { _ in false }
+    ) {
+        self.log = log
+        self.holds = holds
+        self.refuses = refuses
+    }
+
+    /// Gates every preparation that is not the default — that is, every one a
+    /// user action caused, and none of the ones an open causes.
+    convenience init(log: WorkspaceEventLog, holdingPicks: Bool) {
+        self.init(log: log, holds: { holdingPicks && !$0.isDefault })
+    }
+
+    var prepare: DocumentState.SourcePreparation {
+        { [self] base, whiteBalance, policy, cancellation in
+            if withLock({ holds(whiteBalance) }) {
+                didStart.signal()
+                guard release.wait(timeout: .now() + Self.waitLimit) == .success else {
+                    throw Stalled()
+                }
+            }
+            if withLock({ refuses(whiteBalance) }) {
+                log.append(.preparationRefused(whiteBalance))
+                throw Refused()
+            }
+            let source = try DocumentState.pipelineSourcePreparation(
+                base, whiteBalance, policy, cancellation
+            )
+            log.append(.preparedSource(whiteBalance))
+            return source
+        }
+    }
+
+    /// Suspends until a gated preparation has begun and is waiting at the
+    /// gate.
+    func waitForGatedPreparationToStart() async throws {
+        let started = await withCheckedContinuation { continuation in
+            DispatchQueue.global().async { [self] in
+                continuation.resume(
+                    returning: didStart.wait(timeout: .now() + Self.waitLimit) == .success
+                )
+            }
+        }
+        guard started else { throw Stalled() }
+    }
+
+    /// Lets one held preparation past the gate.
+    func releaseOnePreparation() { release.signal() }
+
+    private func withLock<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
     }
 }

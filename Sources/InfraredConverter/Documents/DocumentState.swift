@@ -72,22 +72,48 @@ import Observation
 /// made for is still the one the user wants — so a superseded render can no
 /// more write the sidecar than it can reach the screen.
 ///
-/// ## Three adjustments, one state
+/// ## Four adjustments, one state
 ///
 /// ```text
+/// whiteBalance   which samples the infrared white balance is measured from
 /// orientation    the eight discrete arrangements, composed onto the file's own
 /// channelMix     the creative infrared remix: identity, red/blue swap, matrix
 /// exposure       compensation in EV, applied as × 2^EV by the display stage
 /// ```
 ///
-/// They are fields of one `ImageAdjustments` record, and every render request
-/// is that whole record. Nothing here renders "the new mix", "the new
-/// rotation" or "the new exposure": a burst of changes to any control — a
-/// slider drag is exactly such a burst — collapses to one newest complete
-/// state, and the sidecar receives that state or nothing. Exposure is the
-/// first continuous control, and it deliberately has no scheduler, debounce
-/// or queue of its own. See `docs/decisions/0016-interactive-channel-mixer.md`
-/// and `docs/decisions/0017-interactive-exposure.md`.
+/// They are fields of one `ImageAdjustments` record, and every request is that
+/// whole record. Nothing here renders "the new mix", "the new rotation" or
+/// "the new exposure": a burst of changes to any control — a slider drag is
+/// exactly such a burst — collapses to one newest complete state, and the
+/// sidecar receives that state or nothing. Exposure is the first continuous
+/// control, and it deliberately has no scheduler, debounce or queue of its
+/// own. See `docs/decisions/0016-interactive-channel-mixer.md` and
+/// `docs/decisions/0017-interactive-exposure.md`.
+///
+/// ## Two costs, two slots, one canonical state
+///
+/// The white balance is the first adjustment that is **upstream of
+/// demosaicing**, so it cannot be applied to the retained reduced preview the
+/// way the other three are. It re-prepares that preview from the retained
+/// normalised mosaic:
+///
+/// ```text
+/// fast    reduced pre-mix preview → mix → orientation → exposure/display
+/// heavy   normalised mosaic → estimate the patch → balance → demosaic
+///         → camera → working → reduce → THEN the fast path, for the latest state
+/// ```
+///
+/// Each has its own `CoalescingRenderSlot`, because "at most one at a time,
+/// newest wins" is a claim each has to make about itself: a patch being
+/// prepared must not stop the exposure from re-rendering once it lands, and a
+/// render must not stop a newer patch from starting.
+///
+/// Neither changes the editing model. A heavy preparation is still requested
+/// for one complete `ImageAdjustments`; when it lands, the fast path renders
+/// the **latest** complete state that still names that white balance, so an
+/// exposure changed while a patch was being prepared is in the result rather
+/// than a stop behind it. See
+/// `docs/decisions/0019-interactive-white-balance.md`.
 ///
 /// ## A decision is tracked from the press to the disk
 ///
@@ -234,7 +260,8 @@ final class DocumentState {
             """
             orientation \(adjustments.orientation.persistedToken), \
             mix \(adjustments.channelMix.kind.rawValue), \
-            exposure \(adjustments.exposure.signedDescription)
+            exposure \(adjustments.exposure.signedDescription), \
+            white balance \(adjustments.whiteBalance.kind.rawValue)
             """
         }
 
@@ -269,8 +296,30 @@ final class DocumentState {
         /// thumbnail — **not** the workspace image.
         let legacy: LegacyReference
 
-        /// The retained scene-linear state every reprocess starts from, or
-        /// `nil` when the owned pipeline could not get that far.
+        /// The retained **normalised mosaic** — decoded, black-subtracted and
+        /// scaled, still a CFA mosaic, at the sensor's own resolution — or
+        /// `nil` when this file will never be re-balanced.
+        ///
+        /// The one full-resolution buffer a document holds, and the exception
+        /// that makes an interactive white balance possible: a new neutral
+        /// patch is estimated and applied from these samples, so moving the
+        /// patch costs a balance, a demosaic, a conversion and a reduction,
+        /// and no decode at all.
+        ///
+        /// It is present only for a file the owned pipeline actually rendered.
+        /// A document with no image has no controls to spend the largest
+        /// retained cost in the application on.
+        ///
+        /// Roughly 49 MB on the E-PL3 fixture — 4056 × 3040 `Float32` — beside
+        /// the roughly 36 MB reduced preview below. The heavy slot's closure
+        /// holds the same value; `LinearRAWMosaic` is a value type over one
+        /// immutable `[Float]`, so that is one buffer with two references and
+        /// not two buffers. See
+        /// `docs/decisions/0019-interactive-white-balance.md`.
+        let base: NormalizedRAWSource?
+
+        /// The retained scene-linear state every fast reprocess starts from,
+        /// or `nil` when the owned pipeline could not get that far.
         ///
         /// This is what makes an adjustment non-destructive: it is the
         /// **unmixed, unoriented** scene-linear image, so a new adjustment is
@@ -294,7 +343,15 @@ final class DocumentState {
         /// prepared source is genuinely useful for diagnosis — but its
         /// presence is **not** what makes the file adjustable. See
         /// `isAdjustable`.
-        let source: WorkspacePreviewPipeline.Source?
+        ///
+        /// It is a `var` because one adjustment can replace it: a new white
+        /// balance is estimated and applied upstream of demosaicing, so its
+        /// result is a **new** reduced pre-mix preview rather than a different
+        /// rendering of this one. Every other adjustment renders from whatever
+        /// this currently holds and leaves it exactly as it is. The
+        /// replacement is installed in one place, under one guard — the white
+        /// balance it was prepared for must still be the one the user wants.
+        var source: WorkspacePreviewPipeline.Source?
 
         /// Whether the workspace can reprocess this file with a different
         /// adjustment.
@@ -343,10 +400,11 @@ final class DocumentState {
         var persistence: AdjustmentPersistence = .unchanged
 
         /// The retained source, but only when re-rendering from it can
-        /// actually work. The one thing a render slot may be built from.
+        /// actually work. The one thing a render request may be built from.
         var adjustableSource: WorkspacePreviewPipeline.Source? {
             isAdjustable ? source : nil
         }
+
     }
 
     /// The LibRaw processed-RGB decode kept beside the workspace image.
@@ -460,10 +518,18 @@ final class DocumentState {
     /// completed render does. Modelling the two halves as one outcome is what
     /// stops "prepare succeeded" from being mistaken for "the file opened".
     private enum OwnedOutcome {
-        /// Prepared and rendered. This is the only success.
-        case rendered(WorkspacePreviewPipeline.Source, WorkspacePreview)
+        /// Prepared and rendered. This is the only success, and the only case
+        /// that carries the normalised mosaic.
+        ///
+        /// The mosaic is retained **only** here, and that is the whole of the
+        /// "retain after a successful open" rule: it is roughly 49 MB on the
+        /// reference camera, and holding it for a file that never produced an
+        /// image would be paying the largest retained cost in the application
+        /// for a document with no controls to spend it on.
+        case rendered(NormalizedRAWSource, WorkspacePreviewPipeline.Source, WorkspacePreview)
         /// Prepared, then refused by the orientation or display stage. The
-        /// source is kept for diagnosis; nothing can be re-rendered from it.
+        /// reduced source is kept for diagnosis; nothing can be re-rendered
+        /// from it, so the normalised mosaic is released.
         case unrenderable(WorkspacePreviewPipeline.Source, RAWPathFailure)
         /// Never reached a scene-linear state at all.
         case unprepared(RAWPathFailure)
@@ -487,10 +553,36 @@ final class DocumentState {
         WorkspacePreviewPipeline.Source, ImageAdjustments, ProcessingCancellation
     ) throws -> WorkspacePreview
 
-    /// The real thing: the second half of `WorkspacePreviewPipeline`.
+    /// The real thing: the last phase of `WorkspacePreviewPipeline`.
     nonisolated static let pipelineRender: PreviewRender = { source, adjustments, cancellation in
         try WorkspacePreviewPipeline().render(
             source, adjustments: adjustments, cancellation: cancellation
+        )
+    }
+
+    /// Re-prepares the reduced pre-mix preview for one white-balance decision,
+    /// from the retained normalised mosaic.
+    ///
+    /// Injected for the same reasons `render` is: a test needs to count how
+    /// many preparations a burst of patches actually starts, to hold one open
+    /// while it asks for another, and to make one refuse. Production passes
+    /// `pipelineSourcePreparation` and nothing else ever does.
+    ///
+    /// It takes a `NormalizedRAWSource` and a white balance — never a `URL`
+    /// and never a decoder. There is no parameter through which this could
+    /// read the file again, which is the performance claim of this milestone
+    /// expressed as a signature rather than as a promise.
+    typealias SourcePreparation = @Sendable (
+        NormalizedRAWSource, UserWhiteBalanceAdjustment, PreviewResolutionPolicy,
+        ProcessingCancellation
+    ) throws -> WorkspacePreviewPipeline.Source
+
+    /// The real thing: the white-balance-dependent phase of
+    /// `WorkspacePreviewPipeline`.
+    nonisolated static let pipelineSourcePreparation: SourcePreparation = {
+        base, whiteBalance, policy, cancellation in
+        try WorkspacePreviewPipeline().prepareSource(
+            base, whiteBalance: whiteBalance, policy: policy, cancellation: cancellation
         )
     }
 
@@ -528,6 +620,7 @@ final class DocumentState {
     private let decoder: RAWDecoder
     private let store: any ImageAdjustmentStore
     private let render: PreviewRender
+    private let prepareSource: SourcePreparation
 
     /// How large the interactive preview each opened file gets may be.
     ///
@@ -556,10 +649,26 @@ final class DocumentState {
     /// preview must never be replaced by the first open's late result.
     private var generation = 0
 
-    /// The single slot every re-render goes through, rebuilt for each opened
-    /// file because it closes over that file's retained scene-linear source.
-    /// `nil` when nothing adjustable is open.
-    private var renderer: CoalescingPreviewRenderer?
+    /// The fast slot: one complete adjustment state applied to a reduced
+    /// pre-mix preview. `nil` when nothing adjustable is open.
+    ///
+    /// Built once per opened file and never rebuilt. It does **not** close
+    /// over that file's source any more — the source travels in the request,
+    /// because a new white balance replaces it and rebuilding a slot that may
+    /// still be unwinding a cancelled pass would break the one-at-a-time
+    /// guarantee the slot exists to make.
+    private var renderer: PreviewRenderSlot?
+
+    /// The heavy slot: one white-balance decision re-prepared from the
+    /// retained normalised mosaic into a new reduced pre-mix preview. `nil`
+    /// when nothing adjustable is open.
+    ///
+    /// Its closure holds that file's `NormalizedRAWSource` — the same value
+    /// `Loaded.base` holds, which is one buffer with two references rather
+    /// than two buffers. Releasing the slot and the document releases the
+    /// mosaic. Roughly 49 MB on the reference camera, retained from a
+    /// successful open until the document is left and has settled.
+    private var preparer: WhiteBalancePreparationSlot?
 
     /// A document the workspace has left while one of its adjustments was
     /// still being rendered.
@@ -574,10 +683,20 @@ final class DocumentState {
         /// the workspace left it. Nothing can change it afterwards: there is no
         /// UI attached to a settling document.
         let requested: ImageAdjustments
-        /// Kept so the render is not deallocated mid-flight — and released as
-        /// soon as it settles, because it holds that file's scene-linear
-        /// source.
-        let renderer: CoalescingPreviewRenderer
+        /// The reduced pre-mix preview this document's render starts from.
+        ///
+        /// A `var` for exactly one reason, and it is the reason settling had
+        /// to be generalised: the outstanding work may be a **white-balance
+        /// preparation**, whose result is a new source that its own render
+        /// then has to run against. A document left mid-preparation therefore
+        /// still has two steps to take, and both happen here, with no screen.
+        var source: WorkspacePreviewPipeline.Source
+        /// Kept so the heavy pass is not deallocated mid-flight — and released
+        /// as soon as the document settles, because it holds that file's
+        /// normalised mosaic.
+        let preparer: WhiteBalancePreparationSlot
+        /// Kept so the render is not deallocated mid-flight.
+        let renderer: PreviewRenderSlot
     }
 
     /// Documents that have left the screen and have not settled, by the
@@ -612,12 +731,14 @@ final class DocumentState {
         decoder: RAWDecoder = LibRawDecoder(),
         store: any ImageAdjustmentStore = JSONSidecarImageAdjustmentStore(),
         render: @escaping PreviewRender = DocumentState.pipelineRender,
+        prepareSource: @escaping SourcePreparation = DocumentState.pipelineSourcePreparation,
         previewPolicy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy,
         exportRun: @escaping ExportRun = DocumentState.fullResolutionTIFFExport
     ) {
         self.decoder = decoder
         self.store = store
         self.render = render
+        self.prepareSource = prepareSource
         self.previewPolicy = previewPolicy
         self.exportRun = exportRun
     }
@@ -652,6 +773,26 @@ final class DocumentState {
     var exposureAdjustment: UserExposureAdjustment {
         guard case .decoded(let loaded) = status else { return .neutral }
         return loaded.adjustments.exposure
+    }
+
+    /// The user's infrared white balance for the open file — the
+    /// **requested** decision, ahead of the rendered preview while a
+    /// preparation is running — or `.defaultNeutralPatch` when nothing is
+    /// open.
+    var whiteBalanceAdjustment: UserWhiteBalanceAdjustment {
+        guard case .decoded(let loaded) = status else { return .defaultNeutralPatch }
+        return loaded.adjustments.whiteBalance
+    }
+
+    /// The active image area of the open file, in samples, or `nil` when there
+    /// is nothing a patch could be picked from.
+    ///
+    /// The coordinates a picked patch is a fraction of. A view needs them to
+    /// size a patch in sensor samples rather than in preview pixels, and to
+    /// draw the overlay for the patch currently in force.
+    var activeAreaSize: (width: Int, height: Int)? {
+        guard case .decoded(let loaded) = status, let base = loaded.base else { return nil }
+        return (width: base.activeAreaWidth, height: base.activeAreaHeight)
     }
 
     /// Whether the adjustment controls can do anything right now.
@@ -754,6 +895,7 @@ final class DocumentState {
         let decoder = self.decoder
         let store = self.store
         let render = self.render
+        let prepareSource = self.prepareSource
         let previewPolicy = self.previewPolicy
         // LibRaw decoding is a long, blocking C++ call. Detaching keeps it off
         // both the main actor and the caller's cooperative context.
@@ -766,6 +908,7 @@ final class DocumentState {
                 using: decoder,
                 store: store,
                 render: render,
+                prepareSource: prepareSource,
                 previewPolicy: previewPolicy
             ) else { return }
             guard !Task.isCancelled else { return }
@@ -821,22 +964,33 @@ final class DocumentState {
     /// the E-PL3 fixture rather than roughly 840 MB. That is the difference
     /// between an overlap worth arguing about and one worth allowing.
     private func handOverCurrentDocument() {
-        defer { renderer = nil }
+        defer {
+            renderer = nil
+            preparer = nil
+        }
         guard case .decoded(let loaded) = status else {
-            renderer?.cancelAll()
+            cancelAllWork()
             return
         }
 
         switch loaded.persistence {
         case .pending:
-            guard let renderer else { return }
-            // Deliberately not cancelled. This is the whole hand-over.
+            guard let renderer, let preparer, let source = loaded.source else { return }
+            // Deliberately not cancelled — either slot. This is the whole
+            // hand-over, and it now covers both costs: a user who picks a
+            // neutral patch and immediately opens the next photograph has
+            // made a decision whose only route to disk runs through a heavy
+            // preparation *and* the render after it.
             settling[generation] = SettlingDocument(
-                url: loaded.url, requested: loaded.adjustments, renderer: renderer
+                url: loaded.url,
+                requested: loaded.adjustments,
+                source: source,
+                preparer: preparer,
+                renderer: renderer
             )
 
         case .renderRefused:
-            renderer?.cancelAll()
+            cancelAllWork()
             record(
                 UnsavedAdjustment(
                     url: loaded.url, adjustments: loaded.adjustments, reason: .renderRefused
@@ -844,7 +998,7 @@ final class DocumentState {
             )
 
         case .saveFailed(let error):
-            renderer?.cancelAll()
+            cancelAllWork()
             record(
                 UnsavedAdjustment(
                     url: loaded.url,
@@ -854,10 +1008,16 @@ final class DocumentState {
             )
 
         case .unchanged, .saved:
-            // Nothing is at stake. Any render still unwinding here is one whose
-            // state was already superseded or already written.
-            renderer?.cancelAll()
+            // Nothing is at stake. Any work still unwinding here is for a
+            // state that was already superseded or already written.
+            cancelAllWork()
         }
+    }
+
+    /// Abandons both slots' work for the document being left.
+    private func cancelAllWork() {
+        renderer?.cancelAll()
+        preparer?.cancelAll()
     }
 
     /// Records a decision that did not reach disk, and says so in the log.
@@ -899,6 +1059,7 @@ final class DocumentState {
         using decoder: RAWDecoder,
         store: any ImageAdjustmentStore,
         render: PreviewRender,
+        prepareSource: SourcePreparation,
         previewPolicy: PreviewResolutionPolicy
     ) -> Result<Loaded, OpenFailure>? {
         let adjustments: ImageAdjustments
@@ -917,6 +1078,7 @@ final class DocumentState {
             using: decoder,
             adjustments: adjustments,
             render: render,
+            prepareSource: prepareSource,
             previewPolicy: previewPolicy,
             cancellation: .enclosingTask
         ) else { return nil }
@@ -927,12 +1089,13 @@ final class DocumentState {
         // decoder — and the owned one is preferred because it belongs to the
         // image the workspace shows.
         switch (owned, legacy) {
-        case (.rendered(let source, let preview), _):
+        case (.rendered(let base, let source, let preview), _):
             return .success(
                 Loaded(
                     url: url,
                     metadata: source.metadata,
                     legacy: legacy,
+                    base: base,
                     source: source,
                     isAdjustable: true,
                     adjustments: adjustments,
@@ -949,6 +1112,7 @@ final class DocumentState {
                     url: url,
                     metadata: source.metadata,
                     legacy: legacy,
+                    base: nil,
                     source: source,
                     isAdjustable: false,
                     adjustments: adjustments,
@@ -962,6 +1126,7 @@ final class DocumentState {
                     url: url,
                     metadata: decoded.metadata,
                     legacy: legacy,
+                    base: nil,
                     source: nil,
                     isAdjustable: false,
                     adjustments: adjustments,
@@ -977,18 +1142,28 @@ final class DocumentState {
         }
     }
 
-    /// Prepares and renders the application-owned pipeline, keeping the two
-    /// halves distinguishable in the result.
+    /// Prepares and renders the application-owned pipeline, keeping the
+    /// phases distinguishable in the result.
+    ///
+    /// ```text
+    /// prepareBase     decode → normalise                    (the file)
+    /// prepareSource   the SAVED white balance → … → reduce  (the user's patch)
+    /// render          the SAVED mix, orientation, exposure  (the rest)
+    /// ```
     ///
     /// A failure is reported, never replaced by the LibRaw image. Every error
     /// the chain can raise is `LocalizedError`, so the message a user sees
-    /// names the stage that actually refused — an unsupported sensor layout,
-    /// an unusable exposure, an orientation code we do not model — instead of
-    /// a generic "preview failed". The error value itself is kept too, which
-    /// is what lets the caller tell a preparation refusal from a render one.
+    /// names the stage that actually refused — an unsupported sensor layout, a
+    /// patch that measured no samples of a colour plane, an orientation code we
+    /// do not model — instead of a generic "preview failed". The error value
+    /// itself is kept too, which is what lets the caller tell a preparation
+    /// refusal from a render one.
     ///
-    /// Exactly one render happens here, with the adjustments the caller
-    /// loaded. There is no unadjusted first pass.
+    /// Exactly one preparation and one render happen here, with the
+    /// adjustments the caller loaded. **The saved white balance is used for
+    /// the first preparation there is**: there is no pass with the default
+    /// patch, so a photograph saved with a picked patch never appears on
+    /// screen balanced from the middle of the frame, not even for a frame.
     ///
     /// - Returns: the outcome, or `nil` when the work was cancelled.
     ///   Cancellation is not a failure and must never be shown as one.
@@ -997,20 +1172,23 @@ final class DocumentState {
         using decoder: RAWDecoder,
         adjustments: ImageAdjustments,
         render: PreviewRender,
+        prepareSource: SourcePreparation,
         previewPolicy: PreviewResolutionPolicy,
         cancellation: ProcessingCancellation
     ) -> OwnedOutcome? {
         let pipeline = WorkspacePreviewPipeline()
 
+        let base: NormalizedRAWSource
         let source: WorkspacePreviewPipeline.Source
         do {
-            source = try pipeline.prepare(
-                decoding: url, using: decoder, policy: previewPolicy
+            base = try pipeline.prepareBase(decoding: url, using: decoder)
+            source = try prepareSource(
+                base, adjustments.whiteBalance, previewPolicy, cancellation
             )
         } catch is CancellationError {
-            // `prepare` polls nothing today, so this is defensive rather than
-            // reachable; it is here so that adding a poll cannot turn a
-            // cancelled open into a reported failure.
+            // `prepareBase` polls nothing, so this is reachable only through
+            // the white-balance phase, which does. A cancelled open is not a
+            // failed one either way.
             return nil
         } catch {
             log(error, path: "Owned preparation", url: url)
@@ -1019,11 +1197,14 @@ final class DocumentState {
 
         do {
             let preview = try render(source, adjustments, cancellation)
-            return .rendered(source, preview)
+            return .rendered(base, source, preview)
         } catch is CancellationError {
             return nil
         } catch {
             log(error, path: "Owned render", url: url)
+            // The normalised mosaic is deliberately not carried out of here.
+            // Nothing can be re-rendered from this file, so there is nothing
+            // for 49 MB of retained samples to do.
             return .unrenderable(source, RAWPathFailure(stage: .ownedRender, error))
         }
     }
@@ -1152,6 +1333,68 @@ final class DocumentState {
     /// as they were.
     func resetExposure() { setExposure(.neutral) }
 
+    // MARK: - White-balance adjustment
+
+    /// Chooses which samples the infrared white balance is measured from, and
+    /// re-prepares.
+    ///
+    /// The first adjustment that is upstream of demosaicing, and it goes
+    /// through exactly the path the other three do: the complete record is
+    /// updated, persistence becomes `.pending`, and one request goes to a
+    /// coalescing slot. It is simply a different slot, because the work is a
+    /// different cost. A burst of picks collapses to the newest patch, and the
+    /// ones in between are never estimated at all.
+    ///
+    /// It is a **state, not an operation**: this replaces whatever was asked
+    /// for before, and no patch is ever measured relative to a previous one.
+    /// The gains are re-derived from the normalised mosaic every time, so
+    /// white balances no more compose than mixes do.
+    ///
+    /// Asking for the white balance already in force does nothing at all.
+    func setWhiteBalance(_ whiteBalance: UserWhiteBalanceAdjustment) {
+        adjust { $0.whiteBalance = whiteBalance }
+    }
+
+    /// Returns the white balance to the application's default centred patch,
+    /// and changes nothing else.
+    ///
+    /// Exactly the historical behaviour, because `.defaultNeutralPatch`
+    /// resolves through the rule this project has always used — not "no white
+    /// balance", which the pipeline has never done and which this button does
+    /// not offer. Like every other reset it is itself a decision, saved once
+    /// it has rendered, and it leaves the orientation, the channel mix and the
+    /// exposure exactly as they were.
+    func resetWhiteBalance() { setWhiteBalance(.defaultNeutralPatch) }
+
+    /// Picks a neutral patch around a point the user clicked, in **active-area
+    /// unit coordinates**.
+    ///
+    /// The view has already done the two things a view is the only thing that
+    /// can do: work out where inside its bounds the aspect-fitted image
+    /// actually is, and undo the displayed orientation. What arrives here is a
+    /// fraction of the sensor's own active area, in sensor axes, and what is
+    /// stored is the region `UserWhiteBalanceAdjustment.pickedRegion` builds
+    /// from it — never a view coordinate, a preview pixel or a `CGPoint`.
+    ///
+    /// Does nothing when there is no adjustable document, or when the point
+    /// cannot make a region: a photograph too small to hold a patch, or a
+    /// coordinate that is not finite. A refusal here is silent because the
+    /// only way to reach it is a click the geometry already rejected.
+    func pickNeutralPatch(atX x: Double, y: Double) {
+        guard case .decoded(let loaded) = status, loaded.isAdjustable,
+              let base = loaded.base
+        else { return }
+
+        guard let region = try? UserWhiteBalanceAdjustment.pickedRegion(
+            atX: x,
+            y: y,
+            activeAreaWidth: base.activeAreaWidth,
+            activeAreaHeight: base.activeAreaHeight
+        ) else { return }
+
+        setWhiteBalance(.neutralPatch(region))
+    }
+
     // MARK: - Exporting
 
     /// The snapshot an export started now would use, or `nil` when there is
@@ -1273,7 +1516,7 @@ final class DocumentState {
     /// launch.
     private func adjust(_ change: (inout ImageAdjustments) -> Void) {
         guard case .decoded(var loaded) = status, loaded.isAdjustable,
-              let renderer
+              let renderer, let preparer, let source = loaded.source
         else { return }
 
         var updated = loaded.adjustments
@@ -1281,7 +1524,7 @@ final class DocumentState {
         guard updated != loaded.adjustments else { return }
 
         // Record the intent immediately, so the controls reflect what the
-        // user asked for even while the render is still running — and say, in
+        // user asked for even while the work is still running — and say, in
         // the same breath, that this state is not on disk. The state that was
         // saved a moment ago is no longer the state on screen, and reporting
         // it as saved would be a claim about the wrong adjustment.
@@ -1289,9 +1532,42 @@ final class DocumentState {
         loaded.persistence = .pending
         status = .decoded(loaded)
 
-        // One slot, newest state wins. A burst of changes produces one
-        // cancellation and one render, not a queue.
-        renderer.request(loaded.adjustments)
+        // Which of the two costs this state needs is one question with one
+        // answer: does the retained preview already describe the white balance
+        // being asked for?
+        //
+        // It is asked of the **source**, not of the previous adjustments,
+        // because those two disagree exactly when it matters. Picking patch B
+        // while patch A is still being prepared leaves the source at the
+        // original balance, and both patches need the heavy path.
+        if source.whiteBalance != updated.whiteBalance {
+            // Heavy. The render is deliberately *not* requested here: the
+            // source it would use is the wrong one, and rendering it would put
+            // the old white balance on screen under the new state's name. The
+            // render happens when the preparation lands, for whatever the
+            // latest complete state is by then.
+            //
+            // And only when it is not already on its way. Every adjustment
+            // reaches this method, so a change of exposure made while a patch
+            // is being prepared arrives here wanting that same patch — and
+            // `request` supersedes unconditionally, so asking again would
+            // cancel a pass that was about to produce the right answer and
+            // start it over. A user dragging the exposure slider during a
+            // preparation would restart it on every frame and never see a
+            // result.
+            if preparer.target != updated.whiteBalance {
+                preparer.request(updated.whiteBalance)
+            }
+        } else {
+            // Fast. Any preparation still outstanding is for a white balance
+            // the user has now moved away from — most often by returning to
+            // the one already prepared — so it is abandoned rather than left
+            // to finish and be discarded on delivery.
+            preparer.cancelAll()
+            renderer.request(
+                PreviewRenderRequest(source: source, adjustments: updated)
+            )
+        }
     }
 
     /// Builds the single render slot for a freshly opened file.
@@ -1311,18 +1587,48 @@ final class DocumentState {
     /// belongs to. Those two are what let a delivery find its way back to the
     /// right document — or, when that document has been left, to its
     /// sidecar and nothing else.
-    private func makeRenderer(
-        for source: WorkspacePreviewPipeline.Source,
-        url: URL,
-        generation: Int
-    ) -> CoalescingPreviewRenderer {
+    private func makeRenderer(url: URL, generation: Int) -> PreviewRenderSlot {
         let render = self.render
-        return CoalescingPreviewRenderer(
-            render: { adjustments, cancellation in
-                try render(source, adjustments, cancellation)
+        return PreviewRenderSlot(
+            work: { request, cancellation in
+                try render(request.source, request.adjustments, cancellation)
             },
-            deliver: { [weak self] outcome, adjustments in
-                self?.deliver(outcome, adjustments: adjustments, url: url, generation: generation)
+            deliver: { [weak self] outcome, request in
+                self?.deliver(
+                    outcome,
+                    adjustments: request.adjustments,
+                    url: url,
+                    generation: generation
+                )
+            }
+        )
+    }
+
+    /// Builds the heavy slot for a freshly opened file.
+    ///
+    /// The closure captures that file's retained **normalised mosaic**, which
+    /// is the whole of this milestone: a change of neutral patch re-estimates
+    /// and re-demosaics from those samples, and reads nothing. There is no
+    /// `URL` and no decoder in the capture, so re-decoding is not something
+    /// this path could do by mistake.
+    ///
+    /// It also captures the file's URL and the generation of the open it
+    /// belongs to, for the same reason the render slot does: a delivery has to
+    /// find its way back to the right document, or — when that document has
+    /// been left — to the settling record that is still finishing its work.
+    private func makePreparer(
+        base: NormalizedRAWSource, url: URL, generation: Int
+    ) -> WhiteBalancePreparationSlot {
+        let prepareSource = self.prepareSource
+        let policy = self.previewPolicy
+        return WhiteBalancePreparationSlot(
+            work: { whiteBalance, cancellation in
+                try prepareSource(base, whiteBalance, policy, cancellation)
+            },
+            deliver: { [weak self] outcome, whiteBalance in
+                self?.deliverPreparedSource(
+                    outcome, whiteBalance: whiteBalance, url: url, generation: generation
+                )
             }
         )
     }
@@ -1348,6 +1654,135 @@ final class DocumentState {
             applyReprocessed(outcome, adjustments: adjustments, for: url)
         } else if let document = settling[generation] {
             settle(document, generation: generation, outcome: outcome, adjustments: adjustments)
+        }
+    }
+
+    /// Routes a settled white-balance preparation to the document it was made
+    /// for, and starts the render that must follow it.
+    ///
+    /// ```text
+    /// the document is still on screen   install the source, render the LATEST state
+    /// the document has been left        install it, render its frozen state, then save
+    /// neither                           nothing; there is nowhere for it to go
+    /// ```
+    ///
+    /// Routing is by **generation**, exactly as a render's is: the same file
+    /// can be opened twice, and the first open's late preparation must not
+    /// replace the second open's source merely because the paths match.
+    private func deliverPreparedSource(
+        _ outcome: Result<WorkspacePreviewPipeline.Source, Error>,
+        whiteBalance: UserWhiteBalanceAdjustment,
+        url: URL,
+        generation: Int
+    ) {
+        if generation == self.generation {
+            applyPreparedSource(outcome, whiteBalance: whiteBalance, for: url)
+        } else if let document = settling[generation] {
+            settlePreparedSource(
+                document, generation: generation, outcome: outcome, whiteBalance: whiteBalance
+            )
+        }
+    }
+
+    /// Installs a re-prepared reduced preview and asks for the render that
+    /// turns it into a picture — unless a newer white balance has already
+    /// superseded it.
+    ///
+    /// The guard is the same one every delivery uses, asked about the one
+    /// field this work depended on: the white balance the preparation was made
+    /// for must still be the one the user wants. A superseded preparation
+    /// installs nothing, renders nothing and saves nothing — patch A finishing
+    /// after patch B was asked for leaves no trace at all.
+    ///
+    /// The render that follows is requested with **`loaded.adjustments`**, the
+    /// latest complete state, and not with a state captured when the patch was
+    /// picked. That is the whole answer to "what happens to an exposure change
+    /// made while a patch was being prepared": it is in the result, because
+    /// the result is a render of what the user currently wants, from the
+    /// source that now describes their patch.
+    ///
+    /// Nothing is saved here. `.pending` survives the preparation and ends
+    /// where it always has — where a render succeeds and is installed —
+    /// because a white balance that estimated cleanly and then failed to
+    /// demosaic, orient or encode is not a state worth restoring on the next
+    /// launch. See `docs/decisions/0013-adjustment-sidecar.md`.
+    private func applyPreparedSource(
+        _ outcome: Result<WorkspacePreviewPipeline.Source, Error>,
+        whiteBalance: UserWhiteBalanceAdjustment,
+        for url: URL
+    ) {
+        guard case .decoded(var loaded) = status,
+              loaded.url == url,
+              loaded.adjustments.whiteBalance == whiteBalance,
+              let renderer
+        else { return }
+
+        switch outcome {
+        case .success(let source):
+            // The previous reduced preview is released here, and this one
+            // takes its place. A document holds one, never a chain of them.
+            loaded.source = source
+            status = .decoded(loaded)
+            renderer.request(
+                PreviewRenderRequest(source: source, adjustments: loaded.adjustments)
+            )
+
+        case .failure(let error):
+            Self.log(error, path: "Owned white-balance preparation", url: url)
+            loaded.owned = .unavailable(RAWPathFailure(stage: .ownedPreparation, error))
+            // The retained source is left exactly as it was: the previous
+            // white balance is still the one those pixels describe, and a
+            // failed estimate must not be allowed to make it look otherwise.
+            // Not eligible to be written either, and the sidecar is untouched.
+            loaded.persistence = .renderRefused
+            status = .decoded(loaded)
+        }
+    }
+
+    /// Finishes the heavy half for a document the workspace has left.
+    ///
+    /// The generalisation ADR 0014's settling needed once an adjustment could
+    /// cost two passes. A document left mid-preparation still has both to
+    /// make, and it makes them here: the new source is installed into the
+    /// settling record, and its **frozen** requested state is rendered from
+    /// it. That render's delivery reaches `settle`, which writes the sidecar
+    /// and releases the document.
+    ///
+    /// The frozen state, not the latest one, because there is no latest one:
+    /// a settling document has no UI and nothing can change what it was asked
+    /// for.
+    private func settlePreparedSource(
+        _ document: SettlingDocument,
+        generation: Int,
+        outcome: Result<WorkspacePreviewPipeline.Source, Error>,
+        whiteBalance: UserWhiteBalanceAdjustment
+    ) {
+        guard document.requested.whiteBalance == whiteBalance else { return }
+
+        switch outcome {
+        case .success(let source):
+            var updated = document
+            updated.source = source
+            settling[generation] = updated
+            updated.renderer.request(
+                PreviewRenderRequest(source: source, adjustments: updated.requested)
+            )
+
+        case .failure(let error):
+            Self.log(error, path: "Owned white-balance preparation", url: document.url)
+            record(
+                UnsavedAdjustment(
+                    url: document.url,
+                    adjustments: document.requested,
+                    reason: .renderRefused
+                )
+            )
+            // Done: this document's newest state has been refused, so there is
+            // nothing left for it to write. Releasing it frees its normalised
+            // mosaic and its file, which may be what an open is waiting for.
+            release(document)
+            settling[generation] = nil
+            startDeferredOpenIfReady()
         }
     }
 
@@ -1436,14 +1871,26 @@ final class DocumentState {
         }
 
         // This document is done: its newest state has now either been written
-        // or refused. Releasing the slot releases its scene-linear source with
-        // it — and frees its file, which may be what an open is waiting for.
+        // or refused. Releasing the record releases its reduced preview and,
+        // through its heavy slot, its normalised mosaic — and frees its file,
+        // which may be what an open is waiting for.
         //
         // The order matters and is the whole fix: the write above has already
         // returned, so an open released here reads a sidecar that no older
         // generation can still change.
+        release(document)
         settling[generation] = nil
         startDeferredOpenIfReady()
+    }
+
+    /// Releases the slots a settling document no longer needs.
+    ///
+    /// Both, because either may still be holding something large: the heavy
+    /// slot holds that file's normalised mosaic, and the fast slot's pending
+    /// request holds its reduced preview.
+    private func release(_ document: SettlingDocument) {
+        document.preparer.cancelAll()
+        document.renderer.cancelAll()
     }
 
     /// Writes one rendered adjustment to its sidecar.
@@ -1474,11 +1921,22 @@ final class DocumentState {
 
         switch outcome {
         case .success(let loaded):
-            // Only an adjustable file gets a render slot. A prepared source
-            // nothing can be rendered from gets none, so there is no path by
-            // which a control could request work that is known to fail.
-            renderer = loaded.adjustableSource.map {
-                makeRenderer(for: $0, url: loaded.url, generation: generation)
+            // Only an adjustable file gets slots. A prepared source nothing
+            // can be rendered from gets none, so there is no path by which a
+            // control could request work that is known to fail — and no file
+            // without an image retains a normalised mosaic.
+            //
+            // The two are built together and released together: `base` is
+            // non-nil exactly when the file rendered, which is exactly when
+            // `adjustableSource` is.
+            if loaded.adjustableSource != nil, let base = loaded.base {
+                renderer = makeRenderer(url: loaded.url, generation: generation)
+                preparer = makePreparer(
+                    base: base, url: loaded.url, generation: generation
+                )
+            } else {
+                renderer = nil
+                preparer = nil
             }
             status = .decoded(loaded)
 

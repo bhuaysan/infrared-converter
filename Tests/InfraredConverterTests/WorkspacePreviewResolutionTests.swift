@@ -238,7 +238,7 @@ struct WorkspacePreviewResolutionTests {
         let source = try #require(try Self.loaded(state).source)
 
         let labels = Mirror(reflecting: source).children.compactMap(\.label)
-        #expect(labels == ["preview", "metadata", "url", "neutralPatch"])
+        #expect(labels == ["preview", "metadata", "url", "whiteBalance", "estimate"])
 
         // The one buffer it does hold is the reduced one.
         let previewLabels = Mirror(reflecting: source.preview).children.compactMap(\.label)

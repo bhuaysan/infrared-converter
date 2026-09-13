@@ -134,10 +134,14 @@ public struct RAWDemosaicer: Sendable {
     ///   - mosaic: the white-balanced CFA mosaic. Identity gains are a valid
     ///     way to reach this state without changing any value.
     ///   - algorithm: which algorithm to use. One exists.
-    /// - Throws: `RAWProcessingError`.
+    ///   - cancellation: polled once per output row. A cancelled demosaic
+    ///     throws `CancellationError` and produces no image; it is not a
+    ///     processing failure and must not be reported as one.
+    /// - Throws: `RAWProcessingError`, or `CancellationError`.
     public func demosaic(
         _ mosaic: WhiteBalancedRAWMosaic,
-        algorithm: RAWDemosaicAlgorithm = .bilinearBayer
+        algorithm: RAWDemosaicAlgorithm = .bilinearBayer,
+        cancellation: ProcessingCancellation = .none
     ) throws -> DemosaicedRAWRGBImage {
         let pattern = try RAWBayerCellPattern.resolve(
             from: mosaic.sensorColorLayout, algorithm: algorithm
@@ -177,6 +181,10 @@ public struct RAWDemosaicer: Sendable {
         let width = mosaic.width
         let height = mosaic.height
 
+        // Before the output buffer is allocated: a superseded pass costs
+        // nothing rather than a full-frame allocation it will throw away.
+        try cancellation.check()
+
         switch algorithm {
         case .bilinearBayer:
             let values = try Self.bilinearBayerValues(
@@ -185,7 +193,8 @@ public struct RAWDemosaicer: Sendable {
                 width: width,
                 height: height,
                 sampleCount: sampleCount,
-                outputCount: outputCount
+                outputCount: outputCount,
+                cancellation: cancellation
             )
             return DemosaicedRAWRGBImage(
                 width: width,
@@ -209,9 +218,12 @@ public struct RAWDemosaicer: Sendable {
     /// without decoding the file again.
     public func demosaic(
         _ processed: WhiteBalancedProcessedRAWMosaic,
-        algorithm: RAWDemosaicAlgorithm = .bilinearBayer
+        algorithm: RAWDemosaicAlgorithm = .bilinearBayer,
+        cancellation: ProcessingCancellation = .none
     ) throws -> DemosaicedProcessedRAWImage {
-        let image = try demosaic(processed.mosaic, algorithm: algorithm)
+        let image = try demosaic(
+            processed.mosaic, algorithm: algorithm, cancellation: cancellation
+        )
         return DemosaicedProcessedRAWImage(source: processed, image: image)
     }
 
@@ -241,7 +253,8 @@ public struct RAWDemosaicer: Sendable {
         width: Int,
         height: Int,
         sampleCount: Int,
-        outputCount: Int
+        outputCount: Int,
+        cancellation: ProcessingCancellation
     ) throws -> [Float] {
         try [Float](unsafeUninitializedCapacity: outputCount) { buffer, initializedCount in
             initializedCount = 0
@@ -304,6 +317,13 @@ public struct RAWDemosaicer: Sendable {
                 var base = 0
                 var index = 0
                 for row in 0..<height {
+                    // Once per output row. `initializedCount` is left at
+                    // exactly the elements written, so unwinding deinitialises
+                    // those and no half-demosaiced image escapes.
+                    if cancellation.isCancelled {
+                        initializedCount = base
+                        throw CancellationError()
+                    }
                     let rowParity = row & 1
                     for column in 0..<width {
                         let centre = pattern.channel(

@@ -12,9 +12,9 @@ import Foundation
 /// Serialised: the probe blocks a cooperative-pool thread for as long as a
 /// render is held in flight, and several of these at once can exhaust the
 /// pool. See `RenderProbe`.
-@Suite("Coalescing preview renderer", .serialized)
+@Suite("Coalescing render slot", .serialized)
 @MainActor
-struct CoalescingPreviewRendererTests {
+struct CoalescingRenderSlotTests {
 
     static let url = URL(fileURLWithPath: "/tmp/example.orf")
 
@@ -37,7 +37,7 @@ struct CoalescingPreviewRendererTests {
 
     /// Waits for the render slot to empty, bounded so a scheduling mistake
     /// fails the test instead of hanging the run.
-    static func waitUntilIdle(_ renderer: CoalescingPreviewRenderer) async throws {
+    static func waitUntilIdle(_ renderer: PreviewRenderSlot) async throws {
         // Yields rather than sleeps, and is bounded generously for the same
         // reason `RenderProbe.waitLimit` is: another suite can hold the main
         // actor for minutes, and a starved test is not a broken scheduler.
@@ -48,18 +48,31 @@ struct CoalescingPreviewRendererTests {
         throw RenderProbe.Stalled()
     }
 
-    static func adjustments(_ orientation: UserOrientationAdjustment) -> ImageAdjustments {
-        ImageAdjustments(orientation: orientation)
+    /// A synthetic reduced pre-mix source, so a request is a complete one.
+    ///
+    /// Every request in this suite carries the **same** source: the subject
+    /// here is scheduling, and varying the pixels would only obscure which
+    /// states were started and which were collapsed away. The suite that
+    /// varies the source is the white-balance one, where replacing it is the
+    /// point.
+    static let source = PreviewTestData.source(
+        PreviewTestData.preview(width: 2, height: 2) { _, _, _ in 0.5 }
+    )
+
+    static func adjustments(_ orientation: UserOrientationAdjustment) -> PreviewRenderRequest {
+        PreviewRenderRequest(
+            source: source, adjustments: ImageAdjustments(orientation: orientation)
+        )
     }
 
     static func makeRenderer(
         probe: RenderProbe, delivered: Delivered
-    ) -> CoalescingPreviewRenderer {
-        CoalescingPreviewRenderer(
-            render: probe.render,
-            deliver: { outcome, adjustments in
+    ) -> PreviewRenderSlot {
+        PreviewRenderSlot(
+            work: probe.render,
+            deliver: { outcome, request in
                 switch outcome {
-                case .success: delivered.states.append(adjustments.orientation)
+                case .success: delivered.states.append(request.adjustments.orientation)
                 case .failure(let error): delivered.failures.append(error)
                 }
             }
@@ -206,13 +219,13 @@ struct CoalescingPreviewRendererTests {
     @Test("A render that genuinely fails is delivered as a failure")
     func aRealFailureIsDelivered() async throws {
         let delivered = Delivered()
-        let renderer = CoalescingPreviewRenderer(
-            render: { _, _ in
+        let renderer = PreviewRenderSlot(
+            work: { _, _ in
                 throw OrientationError.invalidGeometry(reason: "test")
             },
-            deliver: { outcome, adjustments in
+            deliver: { outcome, request in
                 switch outcome {
-                case .success: delivered.states.append(adjustments.orientation)
+                case .success: delivered.states.append(request.adjustments.orientation)
                 case .failure(let error): delivered.failures.append(error)
                 }
             }

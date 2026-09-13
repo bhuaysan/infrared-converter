@@ -72,7 +72,7 @@ struct WorkspaceExposureAdjustmentTests {
 
     // MARK: - The control changes canonical state
 
-    @Test("Setting the exposure re-renders and saves the complete state at schema 3")
+    @Test("Setting the exposure re-renders and saves the complete state at schema 4")
     func settingTheExposureSavesTheCompleteState() async throws {
         let log = WorkspaceEventLog()
         let store = StubImageAdjustmentStore(log: log)
@@ -91,7 +91,7 @@ struct WorkspaceExposureAdjustmentTests {
         let preview = try #require(await WorkspaceStubs.waitForPreview(state, adjustments: wanted))
         #expect(preview.renderedExposureEV == 0.7)
         #expect(store.saved(for: Self.url) == wanted)
-        #expect(store.saved(for: Self.url)?.schemaVersion == 3)
+        #expect(store.saved(for: Self.url)?.schemaVersion == 4)
         guard case .saved = state.adjustmentPersistence else {
             Issue.record("Expected .saved, got \(state.adjustmentPersistence)")
             return
@@ -231,7 +231,7 @@ struct WorkspaceExposureAdjustmentTests {
         #expect(log.renders == [.none, newest])
         // Written: the newest, once.
         #expect(log.saves == [newest])
-        #expect(store.writeSummary == ["exposure-adjustment.orf:none:identity:1.5EV"])
+        #expect(store.writeSummary == ["exposure-adjustment.orf:none:identity:1.5EV:defaultNeutralPatch"])
         for intermediate in requested.dropLast() {
             #expect(!log.renders.contains(intermediate))
             #expect(!log.saves.contains(intermediate))
@@ -366,7 +366,7 @@ struct WorkspaceExposureAdjustmentTests {
     }
 
     /// The whole round trip through the real sidecar: all three decisions
-    /// reach the file at schema 3, and a fresh workspace reopening the file
+    /// reach the file at schema 4, and a fresh workspace reopening the file
     /// renders exactly that state — and exactly those pixels — first.
     @Test("Mix, orientation and exposure reach the sidecar and reopen as the first render")
     func allThreeRoundTripThroughTheSidecar() async throws {
@@ -407,7 +407,7 @@ struct WorkspaceExposureAdjustmentTests {
                 with: Data(contentsOf: JSONSidecarImageAdjustmentStore.sidecarURL(for: raw))
             ) as? [String: Any]
         )
-        #expect(object["schemaVersion"] as? Int == 3)
+        #expect(object["schemaVersion"] as? Int == 4)
         #expect(object["orientation"] as? String == "rotate90Clockwise")
         #expect((object["channelMix"] as? [String: Any])?["kind"] as? String == "redBlueSwap")
         #expect(object["exposureEV"] as? Double == 1)
@@ -531,7 +531,7 @@ struct WorkspaceExposureAdjustmentTests {
         // A's complete newest state reached A's sidecar, and only A's.
         #expect(store.saved(for: Self.url) == held)
         #expect(store.saved(for: Self.otherURL) == nil)
-        #expect(store.writeSummary == ["exposure-adjustment.orf:none:identity:1.2EV"])
+        #expect(store.writeSummary == ["exposure-adjustment.orf:none:identity:1.2EV:defaultNeutralPatch"])
 
         // A's preview never landed in B.
         let stillB = try Self.preview(state)

@@ -110,6 +110,43 @@ enum PreviewTestData {
         return preview(width: width, height: height, values: values)
     }
 
+    /// A white-balance estimate with plausible, self-consistent contents, for
+    /// a source that is built by hand rather than processed.
+    ///
+    /// Both initialisers it uses are module-internal, which is the point of
+    /// them: only `RAWWhiteBalanceEstimator` mints an estimate in production,
+    /// and a test reaching them through `@testable` is doing so deliberately.
+    /// The numbers agree with each other — every gain is `targetMean` over its
+    /// own plane's mean — so a reader of a fixture is not shown a measurement
+    /// that could not have happened.
+    static func whiteBalanceEstimate(
+        region: RAWActiveAreaRegion = RAWActiveAreaRegion(
+            originRow: 0, originColumn: 0, width: 2, height: 2
+        )
+    ) -> RAWWhiteBalanceEstimate {
+        let target = 0.5
+        let means = [0.25, 0.5, 0.125, 0.5]
+        func plane(_ index: Int) -> RAWColorPlaneStatistics {
+            RAWColorPlaneStatistics(sampleCount: 1, mean: means[index])
+        }
+        return RAWWhiteBalanceEstimate(
+            gains: RAWWhiteBalanceGains(
+                plane0: Float(target / means[0]),
+                plane1: Float(target / means[1]),
+                plane2: Float(target / means[2]),
+                plane3: Float(target / means[3])
+            ),
+            provenance: RAWNeutralPatchWhiteBalanceSource(
+                region: region,
+                scalePolicy: .preserveStrongestMeasuredPlane,
+                statistics: RAWNeutralPatchStatistics(
+                    plane0: plane(0), plane1: plane(1), plane2: plane(2), plane3: plane(3)
+                ),
+                targetMean: target
+            )
+        )
+    }
+
     /// A prepared workspace source wrapping a synthetic pre-mix preview, so a
     /// test can exercise `render` without decoding anything.
     ///
@@ -117,7 +154,8 @@ enum PreviewTestData {
     /// and the effective orientation is whatever the user asked for.
     static func source(
         _ preview: SceneLinearPreviewImage,
-        url: URL = URL(fileURLWithPath: "/tmp/synthetic-preview.orf")
+        url: URL = URL(fileURLWithPath: "/tmp/synthetic-preview.orf"),
+        whiteBalance: UserWhiteBalanceAdjustment = .defaultNeutralPatch
     ) -> WorkspacePreviewPipeline.Source {
         var metadata = RAWTestData.metadata()
         metadata.geometry.flip = 0
@@ -125,9 +163,8 @@ enum PreviewTestData {
             preview: preview,
             metadata: metadata,
             url: url,
-            neutralPatch: RAWActiveAreaRegion(
-                originRow: 0, originColumn: 0, width: 2, height: 2
-            )
+            whiteBalance: whiteBalance,
+            estimate: whiteBalanceEstimate()
         )
     }
 

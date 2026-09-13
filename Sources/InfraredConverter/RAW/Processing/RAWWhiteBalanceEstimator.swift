@@ -157,10 +157,24 @@ public struct RAWWhiteBalanceEstimator: Sendable {
     /// `Float32` would add rounding error to the one number every gain is
     /// derived from, for no measurable gain.
     ///
-    /// - Throws: `RAWProcessingError`.
+    /// ## Cancellation
+    ///
+    /// Polled **once per row of the region**, and once before the walk
+    /// begins. The patch is small — a sixteenth of the shorter edge, so a few
+    /// hundred rows on a twelve-megapixel frame — but this stage is now on the
+    /// path a user re-triggers by clicking, and a stage on that path that
+    /// could not be stopped would be the one place the chain kept working for
+    /// a patch nobody wants any more.
+    ///
+    /// A cancelled measurement throws `CancellationError` and returns no
+    /// statistics. It is not a measurement failure and must not be reported as
+    /// one.
+    ///
+    /// - Throws: `RAWProcessingError`, or `CancellationError`.
     public func measureNeutralPatch(
         in mosaic: LinearRAWMosaic,
-        region: RAWActiveAreaRegion
+        region: RAWActiveAreaRegion,
+        cancellation: ProcessingCancellation = .none
     ) throws -> RAWNeutralPatchStatistics {
         guard mosaic.isGeometryConsistent else {
             throw RAWProcessingError.invalidGeometry(
@@ -186,8 +200,13 @@ public struct RAWWhiteBalanceEstimator: Sendable {
         var sum0 = 0.0, sum1 = 0.0, sum2 = 0.0, sum3 = 0.0
         var count0 = 0, count1 = 0, count2 = 0, count3 = 0
 
+        // Before anything is walked: a caller that has already superseded this
+        // measurement gets no work done for it at all.
+        try cancellation.check()
+
         try mosaic.values.withUnsafeBufferPointer { input in
             for row in region.originRow..<rowLimit {
+                try cancellation.check()
                 let rowOffset = row * width
                 for column in region.originColumn..<columnLimit {
                     let index = rowOffset + column
@@ -277,7 +296,8 @@ public struct RAWWhiteBalanceEstimator: Sendable {
     ///   - region: the active-image rectangle to measure. Never cropped to
     ///     fit; an out-of-bounds region is an error.
     ///   - scalePolicy: how the measured means become gains.
-    /// - Throws: `RAWProcessingError`. In particular
+    ///   - cancellation: polled by the measurement, once per region row.
+    /// - Throws: `RAWProcessingError`, or `CancellationError`. In particular
     ///   `.insufficientPatchSamples` when a plane the sensor layout genuinely
     ///   produces received no samples from `region` — a gain is never
     ///   invented for it — and `.invalidPlaneMean` when a measured mean is
@@ -285,9 +305,12 @@ public struct RAWWhiteBalanceEstimator: Sendable {
     public func estimateNeutralPatch(
         in mosaic: LinearRAWMosaic,
         region: RAWActiveAreaRegion,
-        scalePolicy: RAWWhiteBalanceEstimationScalePolicy = .preserveStrongestMeasuredPlane
+        scalePolicy: RAWWhiteBalanceEstimationScalePolicy = .preserveStrongestMeasuredPlane,
+        cancellation: ProcessingCancellation = .none
     ) throws -> RAWWhiteBalanceEstimate {
-        let statistics = try measureNeutralPatch(in: mosaic, region: region)
+        let statistics = try measureNeutralPatch(
+            in: mosaic, region: region, cancellation: cancellation
+        )
 
         // Every plane the layout produces must have been measured, and must
         // have a mean that can scale to a target. A plane the layout does not

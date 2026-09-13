@@ -130,7 +130,7 @@ struct WorkspacePreviewPipelineTests {
         ]
     )
     func neutralPatchIsWellFormed(width: Int, height: Int) {
-        let region = WorkspacePreviewPipeline.centredNeutralPatch(
+        let region = UserWhiteBalanceAdjustment.defaultRegion(
             width: width, height: height
         )
 
@@ -160,7 +160,7 @@ struct WorkspacePreviewPipelineTests {
 
     @Test("The E-PL3's active area gets a 190-sample square in the middle")
     func neutralPatchOnTheReferenceGeometry() throws {
-        let region = WorkspacePreviewPipeline.centredNeutralPatch(width: 4056, height: 3040)
+        let region = UserWhiteBalanceAdjustment.defaultRegion(width: 4056, height: 3040)
         #expect(region.width == 190)
         #expect(region.height == 190)
         #expect(region.originRow == 1425)
@@ -177,7 +177,7 @@ struct WorkspacePreviewPipelineTests {
     @Test("The computed patch is always a valid region of its own mosaic")
     func neutralPatchValidatesAgainstItsMosaic() throws {
         for (width, height) in [(8, 8), (64, 48), (4056, 3040), (33, 2)] {
-            let region = WorkspacePreviewPipeline.centredNeutralPatch(
+            let region = UserWhiteBalanceAdjustment.defaultRegion(
                 width: width, height: height
             )
             try region.validate(inWidth: width, height: height)

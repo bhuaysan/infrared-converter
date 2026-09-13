@@ -84,15 +84,15 @@ final class RenderProbe: @unchecked Sendable {
     var cancelledCount: Int { withLock { cancelled } }
     var requested: [UserOrientationAdjustment] { withLock { states } }
 
-    /// The render function to hand `CoalescingPreviewRenderer`.
+    /// The work function to hand a `PreviewRenderSlot`.
     ///
     /// It blocks where a real full-frame render would be working, and checks
     /// cancellation where a real one polls it.
-    var render: CoalescingPreviewRenderer.Render {
-        { [self] adjustments, cancellation in
+    var render: PreviewRenderSlot.Work {
+        { [self] request, cancellation in
             withLock {
                 started += 1
-                states.append(adjustments.orientation)
+                states.append(request.adjustments.orientation)
             }
             didStart.signal()
 

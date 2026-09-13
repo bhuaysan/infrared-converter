@@ -120,9 +120,10 @@ public struct RAWWhiteBalancer: Sendable {
     /// - Throws: `RAWProcessingError`.
     public func apply(
         to mosaic: LinearRAWMosaic,
-        gains: RAWWhiteBalanceGains
+        gains: RAWWhiteBalanceGains,
+        cancellation: ProcessingCancellation = .none
     ) throws -> WhiteBalancedRAWMosaic {
-        try apply(to: mosaic, gains: gains, source: .explicit)
+        try apply(to: mosaic, gains: gains, source: .explicit, cancellation: cancellation)
     }
 
     /// The single implementation both public entry points reach.
@@ -135,7 +136,8 @@ public struct RAWWhiteBalancer: Sendable {
     private func apply(
         to mosaic: LinearRAWMosaic,
         gains: RAWWhiteBalanceGains,
-        source: RAWWhiteBalanceSource
+        source: RAWWhiteBalanceSource,
+        cancellation: ProcessingCancellation
     ) throws -> WhiteBalancedRAWMosaic {
         try gains.validate()
 
@@ -165,6 +167,10 @@ public struct RAWWhiteBalancer: Sendable {
         // Four locals rather than a per-sample call through the gains value:
         // the lookup below is then a switch over registers, with no
         // allocation and no dictionary, on every one of ~12 million samples.
+        // Before the output buffer is allocated: a superseded pass costs
+        // nothing rather than a full-frame allocation it will throw away.
+        try cancellation.check()
+
         let gain0 = gains.plane0
         let gain1 = gains.plane1
         let gain2 = gains.plane2
@@ -187,6 +193,14 @@ public struct RAWWhiteBalancer: Sendable {
 
                 var index = 0
                 for row in 0..<height {
+                    // Once per row. The buffer is left exactly as many
+                    // elements initialised as have been written, so unwinding
+                    // deinitialises precisely those and no half-written image
+                    // escapes.
+                    if cancellation.isCancelled {
+                        initializedCount = index
+                        throw CancellationError()
+                    }
                     for column in 0..<width {
                         guard let plane = layout.colorPlaneIndex(row: row, column: column) else {
                             initializedCount = index
@@ -257,9 +271,12 @@ public struct RAWWhiteBalancer: Sendable {
     /// to re-balance from the normalised source.
     public func apply(
         to processed: ProcessedRAWMosaic,
-        gains: RAWWhiteBalanceGains
+        gains: RAWWhiteBalanceGains,
+        cancellation: ProcessingCancellation = .none
     ) throws -> WhiteBalancedProcessedRAWMosaic {
-        let balanced = try apply(to: processed.mosaic, gains: gains, source: .explicit)
+        let balanced = try apply(
+            to: processed.mosaic, gains: gains, source: .explicit, cancellation: cancellation
+        )
         return WhiteBalancedProcessedRAWMosaic(source: processed, mosaic: balanced)
     }
 
@@ -272,9 +289,10 @@ public struct RAWWhiteBalancer: Sendable {
     /// black subtraction and normalisation are not re-run.
     public func apply(
         gains: RAWWhiteBalanceGains,
-        replacing previous: WhiteBalancedProcessedRAWMosaic
+        replacing previous: WhiteBalancedProcessedRAWMosaic,
+        cancellation: ProcessingCancellation = .none
     ) throws -> WhiteBalancedProcessedRAWMosaic {
-        try apply(to: previous.source, gains: gains)
+        try apply(to: previous.source, gains: gains, cancellation: cancellation)
     }
 
     // MARK: - Applying an estimate
@@ -300,9 +318,13 @@ public struct RAWWhiteBalancer: Sendable {
     /// same estimate's neutral-patch provenance.
     public func apply(
         to mosaic: LinearRAWMosaic,
-        estimate: RAWWhiteBalanceEstimate
+        estimate: RAWWhiteBalanceEstimate,
+        cancellation: ProcessingCancellation = .none
     ) throws -> WhiteBalancedRAWMosaic {
-        try apply(to: mosaic, gains: estimate.gains, source: estimate.source)
+        try apply(
+            to: mosaic, gains: estimate.gains, source: estimate.source,
+            cancellation: cancellation
+        )
     }
 
     /// Applies an estimate to a normalised result, keeping that whole
@@ -310,10 +332,12 @@ public struct RAWWhiteBalancer: Sendable {
     /// a later re-estimate can start from the same normalised mosaic.
     public func apply(
         to processed: ProcessedRAWMosaic,
-        estimate: RAWWhiteBalanceEstimate
+        estimate: RAWWhiteBalanceEstimate,
+        cancellation: ProcessingCancellation = .none
     ) throws -> WhiteBalancedProcessedRAWMosaic {
         let balanced = try apply(
-            to: processed.mosaic, gains: estimate.gains, source: estimate.source
+            to: processed.mosaic, gains: estimate.gains, source: estimate.source,
+            cancellation: cancellation
         )
         return WhiteBalancedProcessedRAWMosaic(source: processed, mosaic: balanced)
     }
@@ -322,8 +346,9 @@ public struct RAWWhiteBalancer: Sendable {
     /// from its normalised source rather than from its balanced values.
     public func apply(
         estimate: RAWWhiteBalanceEstimate,
-        replacing previous: WhiteBalancedProcessedRAWMosaic
+        replacing previous: WhiteBalancedProcessedRAWMosaic,
+        cancellation: ProcessingCancellation = .none
     ) throws -> WhiteBalancedProcessedRAWMosaic {
-        try apply(to: previous.source, estimate: estimate)
+        try apply(to: previous.source, estimate: estimate, cancellation: cancellation)
     }
 }

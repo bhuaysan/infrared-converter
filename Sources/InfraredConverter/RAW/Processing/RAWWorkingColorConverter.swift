@@ -97,10 +97,15 @@ public struct RAWWorkingColorConverter: Sendable {
     ///   - image: linear camera-native RGB, as `RAWDemosaicer` produces.
     ///   - transform: which working space, by which matrix, obtained how.
     ///     Required — there is deliberately no default.
-    /// - Throws: `RAWProcessingError`.
+    ///   - cancellation: polled once per image row, on both the identity and
+    ///     the general path. A cancelled conversion throws `CancellationError`
+    ///     and produces no image; it is not a processing failure and must not
+    ///     be reported as one.
+    /// - Throws: `RAWProcessingError`, or `CancellationError`.
     public func convert(
         _ image: DemosaicedRAWRGBImage,
-        using transform: RAWCameraToWorkingColorTransform
+        using transform: RAWCameraToWorkingColorTransform,
+        cancellation: ProcessingCancellation = .none
     ) throws -> WorkingColorRGBImage {
         guard image.isGeometryConsistent else {
             throw RAWProcessingError.invalidGeometry(
@@ -117,11 +122,17 @@ public struct RAWWorkingColorConverter: Sendable {
             demosaicProcessing: image.processing
         )
 
+        // Before anything is allocated or swept: a superseded pass does no
+        // work at all.
+        try cancellation.check()
+
         let values: [Float]
         if transform.matrix.isIdentity {
-            values = try Self.identityValues(image)
+            values = try Self.identityValues(image, cancellation: cancellation)
         } else {
-            values = try Self.transformedValues(image, matrix: transform.matrix)
+            values = try Self.transformedValues(
+                image, matrix: transform.matrix, cancellation: cancellation
+            )
         }
 
         return WorkingColorRGBImage(
@@ -141,9 +152,12 @@ public struct RAWWorkingColorConverter: Sendable {
     /// again.
     public func convert(
         _ processed: DemosaicedProcessedRAWImage,
-        using transform: RAWCameraToWorkingColorTransform
+        using transform: RAWCameraToWorkingColorTransform,
+        cancellation: ProcessingCancellation = .none
     ) throws -> WorkingColorProcessedRAWImage {
-        let image = try convert(processed.image, using: transform)
+        let image = try convert(
+            processed.image, using: transform, cancellation: cancellation
+        )
         return WorkingColorProcessedRAWImage(source: processed, image: image)
     }
 
@@ -155,9 +169,10 @@ public struct RAWWorkingColorConverter: Sendable {
     /// reaches through `previous.source` and never touches `previous.image`.
     public func convert(
         using newTransform: RAWCameraToWorkingColorTransform,
-        replacing previous: WorkingColorProcessedRAWImage
+        replacing previous: WorkingColorProcessedRAWImage,
+        cancellation: ProcessingCancellation = .none
     ) throws -> WorkingColorProcessedRAWImage {
-        try convert(previous.source, using: newTransform)
+        try convert(previous.source, using: newTransform, cancellation: cancellation)
     }
 
     // MARK: - Identity
@@ -176,10 +191,16 @@ public struct RAWWorkingColorConverter: Sendable {
     /// defended by the general path is defended here too: a
     /// `WorkingColorRGBImage` this converter produced holds finite values
     /// whichever path made it. That sweep reads, and allocates nothing.
-    private static func identityValues(_ image: DemosaicedRAWRGBImage) throws -> [Float] {
+    private static func identityValues(
+        _ image: DemosaicedRAWRGBImage,
+        cancellation: ProcessingCancellation
+    ) throws -> [Float] {
         try image.values.withUnsafeBufferPointer { input in
             var base = 0
             for row in 0..<image.height {
+                // Once per row. Nothing has been allocated on this path, so
+                // there is no partial buffer to abandon — only the sweep.
+                try cancellation.check()
                 for column in 0..<image.width {
                     let red = input[base]
                     let green = input[base + 1]
@@ -217,7 +238,8 @@ public struct RAWWorkingColorConverter: Sendable {
     /// than recomputed by division.
     private static func transformedValues(
         _ image: DemosaicedRAWRGBImage,
-        matrix: RAWColorMatrix3x3
+        matrix: RAWColorMatrix3x3,
+        cancellation: ProcessingCancellation
     ) throws -> [Float] {
         // Loaded once, outside the per-pixel loop.
         let m00 = matrix.m00, m01 = matrix.m01, m02 = matrix.m02
@@ -233,6 +255,13 @@ public struct RAWWorkingColorConverter: Sendable {
             try image.values.withUnsafeBufferPointer { input in
                 var base = 0
                 for row in 0..<height {
+                    // Once per row. `initializedCount` is left at exactly the
+                    // elements written, so unwinding deinitialises those and no
+                    // half-converted image escapes.
+                    if cancellation.isCancelled {
+                        initializedCount = base
+                        throw CancellationError()
+                    }
                     for column in 0..<width {
                         let cameraRed = input[base]
                         let cameraGreen = input[base + 1]

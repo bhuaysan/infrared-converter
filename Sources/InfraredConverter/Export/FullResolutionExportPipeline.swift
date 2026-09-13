@@ -86,21 +86,31 @@ public struct FullResolutionExportRender: Sendable {
     public let metadata: RAWMetadata
     /// The snapshot this was rendered from.
     public let request: ExportRequest
-    /// The region the white balance was estimated from, in full-resolution
-    /// sensor (pre-orientation) active-area coordinates.
-    public let neutralPatch: RAWActiveAreaRegion
+    /// What the estimator measured and produced for this export: the resolved
+    /// region, the per-plane statistics, the target mean and the gains.
+    ///
+    /// The same estimate the preview would produce for the same file and the
+    /// same `ImageAdjustments.whiteBalance`, because it comes from the same
+    /// resolver and the same estimator. A test compares the two.
+    public let estimate: RAWWhiteBalanceEstimate
 
     init(
         image: ExposedSceneLinearRGBImage,
         metadata: RAWMetadata,
         request: ExportRequest,
-        neutralPatch: RAWActiveAreaRegion
+        estimate: RAWWhiteBalanceEstimate
     ) {
         self.image = image
         self.metadata = metadata
         self.request = request
-        self.neutralPatch = neutralPatch
+        self.estimate = estimate
     }
+
+    /// The region the white balance was estimated from, in full-resolution
+    /// sensor (pre-orientation) active-area coordinates.
+    public var neutralPatch: RAWActiveAreaRegion { estimate.region }
+    /// The multipliers the estimate produced, indexed by CFA colour plane.
+    public var whiteBalanceGains: RAWWhiteBalanceGains { estimate.gains }
 
     /// Width in pixels, as viewed — after orientation.
     public var pixelWidth: Int { image.width }
@@ -119,7 +129,9 @@ public struct FullResolutionExportRender: Sendable {
 ///
 /// ```text
 /// ExportRequest = RAW URL + ImageAdjustments
-///     ↓  RAWWorkingImagePipeline      the SHARED front half
+///     ↓  RAWBasePreparationPipeline   decode, normalise
+///     ↓  RAWWorkingImagePipeline      the SHARED front half,
+///                                     with adjustments.whiteBalance
 /// WorkingColorRGBImage                full resolution, scene-linear, pre-creative
 ///     ↓  IRChannelMixer               adjustments.channelMix
 /// IRChannelMixedRGBImage
@@ -181,11 +193,13 @@ public struct FullResolutionExportRender: Sendable {
 /// ## Cancellation
 ///
 /// The three adjustment stages and the encoder poll `cancellation` once per
-/// row. The RAW front half does not — none of its stages does — so an export
-/// cancelled during decoding stops at the task boundary rather than inside the
-/// pass. A cancelled export throws `CancellationError`, which is deliberately
-/// not a `FullResolutionExportError`: nobody wanting the result is not the
-/// same as being unable to produce it.
+/// row, and so now do the white-balance estimate, the balancer, the demosaicer
+/// and the working-colour conversion. What still does not is the decode and
+/// the normalisation, so an export cancelled during decoding stops at the task
+/// boundary rather than inside the pass. A cancelled export throws
+/// `CancellationError`, which is deliberately not a
+/// `FullResolutionExportError`: nobody wanting the result is not the same as
+/// being unable to produce it.
 public struct FullResolutionExportPipeline: Sendable {
     public init() {}
 
@@ -207,8 +221,21 @@ public struct FullResolutionExportPipeline: Sendable {
     ) throws -> FullResolutionExportRender {
         let prepared: PreparedWorkingImage
         do {
+            // The user's own white balance, resolved against this file's
+            // active area by the one resolver and measured by the one
+            // estimator — the same two the preview uses. There is no export
+            // white balance, no export patch and no export default.
+            //
+            // It reads the file rather than any workspace cache, deliberately.
+            // A document may be holding a normalised mosaic for exactly this
+            // photograph, and consuming it would make an export depend on what
+            // happened to be open. See
+            // `docs/decisions/0019-interactive-white-balance.md`, Decision 12.
             prepared = try RAWWorkingImagePipeline().prepare(
-                decoding: request.rawURL, using: decoder
+                decoding: request.rawURL,
+                using: decoder,
+                whiteBalance: request.adjustments.whiteBalance,
+                cancellation: cancellation
             )
         } catch is CancellationError {
             throw CancellationError()
@@ -232,7 +259,7 @@ public struct FullResolutionExportPipeline: Sendable {
             image: exposed,
             metadata: prepared.metadata,
             request: request,
-            neutralPatch: prepared.neutralPatch
+            estimate: prepared.estimate
         )
     }
 
