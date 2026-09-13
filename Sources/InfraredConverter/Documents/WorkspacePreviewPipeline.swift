@@ -150,7 +150,12 @@ struct WorkspacePreviewPipeline {
     static let initialChannelMix = UserChannelMixAdjustment.identity
 
     /// The camera-to-working transform a freshly opened file gets.
-    static let initialTransform = RAWCameraToWorkingColorTransform.sensorRGBIdentityFalseColor
+    ///
+    /// Owned by `RAWWorkingImagePipeline`, which is the shared RAW front half
+    /// the export path uses too. Restated here rather than duplicated: a
+    /// second literal would be a second decision that could drift from this
+    /// one without anything failing.
+    static let initialTransform = RAWWorkingImagePipeline.cameraToWorkingTransform
 
     /// How large the interactive preview a freshly opened file gets may be.
     ///
@@ -169,7 +174,7 @@ struct WorkspacePreviewPipeline {
     /// photograph rotate. Only a user can do that, and that is the separate
     /// term in `effectiveOrientation(for:adjustments:)`.
     static func orientation(for metadata: RAWMetadata) -> RAWImageOrientation? {
-        metadata.geometry.orientation
+        RAWWorkingImagePipeline.orientation(for: metadata)
     }
 
     /// The file's recorded orientation and the user's correction, kept
@@ -184,13 +189,8 @@ struct WorkspacePreviewPipeline {
         for metadata: RAWMetadata,
         adjustments: ImageAdjustments
     ) throws -> EffectiveImageOrientation {
-        guard let source = orientation(for: metadata) else {
-            throw OrientationError.unsupportedDecoderOrientation(
-                flip: metadata.geometry.flip
-            )
-        }
-        return EffectiveImageOrientation(
-            source: source, userAdjustment: adjustments.orientation
+        try RAWWorkingImagePipeline.effectiveOrientation(
+            for: metadata, adjustments: adjustments
         )
     }
 
@@ -219,7 +219,7 @@ struct WorkspacePreviewPipeline {
     /// The fraction of the shorter active-area dimension the neutral patch
     /// spans. A sixteenth is large enough to average thousands of samples of
     /// every CFA plane and small enough to stay well inside the frame.
-    static let neutralPatchDivisor = 16
+    static let neutralPatchDivisor = RAWWorkingImagePipeline.neutralPatchDivisor
 
     /// A centred, even-sided square in active-image coordinates.
     ///
@@ -230,14 +230,7 @@ struct WorkspacePreviewPipeline {
     /// This is a deterministic placeholder for a picker, not an estimate of
     /// where the neutral part of a photograph is.
     static func centredNeutralPatch(width: Int, height: Int) -> RAWActiveAreaRegion {
-        let shorter = min(width, height)
-        let side = max(2, (shorter / neutralPatchDivisor) & ~1)
-        return RAWActiveAreaRegion(
-            originRow: max(0, (height - side) / 2),
-            originColumn: max(0, (width - side) / 2),
-            width: min(side, width),
-            height: min(side, height)
-        )
+        RAWWorkingImagePipeline.centredNeutralPatch(width: width, height: height)
     }
 
     /// Decodes a RAW file and runs every stage up to and including the preview
@@ -277,20 +270,14 @@ struct WorkspacePreviewPipeline {
         using decoder: RAWDecoder,
         policy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy
     ) throws -> Source {
-        let decoded = try decoder.decodeMosaic(at: url)
-        let normalized = try RAWMosaicNormalizer().process(decoded)
-
-        let region = Self.centredNeutralPatch(
-            width: normalized.mosaic.width,
-            height: normalized.mosaic.height
+        // The shared RAW front half: decode, normalise, white balance,
+        // demosaic, camera → working, at sensor resolution. Identical code to
+        // the one the full-resolution export runs, which is what makes an
+        // export the same rendering as the preview rather than a second
+        // pipeline that resembles it.
+        let prepared = try RAWWorkingImagePipeline().prepare(
+            decoding: url, using: decoder
         )
-        let estimate = try RAWWhiteBalanceEstimator()
-            .estimateNeutralPatch(in: normalized.mosaic, region: region)
-
-        let balanced = try RAWWhiteBalancer().apply(to: normalized, estimate: estimate)
-        let demosaiced = try RAWDemosaicer().demosaic(balanced)
-        let working = try RAWWorkingColorConverter()
-            .convert(demosaiced.image, using: Self.initialTransform)
 
         // The reduction point, and the end of this phase. Everything above
         // this line is full resolution and every buffer it produced — the
@@ -308,13 +295,13 @@ struct WorkspacePreviewPipeline {
         // one now — even the identity — would retain a mixed buffer that a
         // later mix could only be composed onto.
         let reduced = try SceneLinearPreviewReducer()
-            .reduce(working, policy: policy)
+            .reduce(prepared.image, policy: policy)
 
         return Source(
             preview: reduced,
-            metadata: decoded.metadata,
+            metadata: prepared.metadata,
             url: url,
-            neutralPatch: region
+            neutralPatch: prepared.neutralPatch
         )
     }
 
