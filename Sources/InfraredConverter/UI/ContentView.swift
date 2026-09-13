@@ -7,6 +7,16 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @State private var documentState = DocumentState()
 
+    /// Whether the next click on the preview picks a neutral patch.
+    ///
+    /// **Transient UI state, and deliberately not part of `ImageAdjustments`.**
+    /// Being about to pick is not an editing decision: it renders nothing,
+    /// persists nothing, and means nothing to an export. Only the committed
+    /// region is canonical, and it reaches the document through
+    /// `pickNeutralPatch(atX:y:)`. See
+    /// `docs/decisions/0019-interactive-white-balance.md`, Decision 10.
+    @State private var isPickingNeutralPatch = false
+
     private static let rawFileExtensions = [
         "orf", "arw", "nef", "nrw", "cr2", "cr3", "raf", "rw2"
     ]
@@ -22,6 +32,10 @@ struct ContentView: View {
                 Button("Open RAW…", action: openRAW)
                 Divider().frame(height: 18)
                 ExportControl(documentState: documentState)
+                Divider().frame(height: 18)
+                WhiteBalanceControl(
+                    documentState: documentState, isPicking: $isPickingNeutralPatch
+                )
                 Divider().frame(height: 18)
                 ChannelMixControl(documentState: documentState)
                 Divider().frame(height: 18)
@@ -51,7 +65,12 @@ struct ContentView: View {
 
         case .decoded(let loaded):
             HSplitView {
-                OwnedPreviewView(owned: loaded.owned)
+                OwnedPreviewView(
+                    owned: loaded.owned,
+                    whiteBalance: loaded.adjustments.whiteBalance,
+                    isPicking: $isPickingNeutralPatch,
+                    pick: documentState.pickNeutralPatch(atX:y:)
+                )
                     .frame(minWidth: 320)
                 RAWInspectorView(loaded: loaded)
                     .frame(minWidth: 280, idealWidth: 320, maxWidth: 420)
@@ -128,6 +147,10 @@ struct ContentView: View {
         }
 
         if panel.runModal() == .OK, let url = panel.url {
+            // The picker is a mode, and a mode that survived a file switch
+            // would arm the next photograph's first click without anyone
+            // asking for it.
+            isPickingNeutralPatch = false
             documentState.open(url)
         }
     }
@@ -142,6 +165,16 @@ struct ContentView: View {
 /// screen would say so.
 private struct OwnedPreviewView: View {
     let owned: DocumentState.OwnedPreview
+    /// The **requested** white balance, so the overlay moves with the click
+    /// rather than with the render that follows it.
+    let whiteBalance: UserWhiteBalanceAdjustment
+    @Binding var isPicking: Bool
+    /// Receives a committed pick, in active-area unit coordinates.
+    let pick: (Double, Double) -> Void
+
+    /// The inset the image is laid out with. Named once, because the click
+    /// mapping and the overlay both have to agree with it exactly.
+    private static let imagePadding: Double = 12
 
     var body: some View {
         ZStack {
@@ -149,10 +182,8 @@ private struct OwnedPreviewView: View {
 
             switch owned {
             case .rendered(let preview):
-                Image(decorative: preview.image, scale: 1)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .padding(12)
+                pickablePreview(preview)
+                    .padding(Self.imagePadding)
 
             case .unavailable(let failure):
                 VStack(spacing: 8) {
@@ -175,6 +206,129 @@ private struct OwnedPreviewView: View {
                 }
                 .padding(40)
             }
+        }
+    }
+
+    /// The preview, the patch overlay, and the click that commits a pick.
+    ///
+    /// ## Why a `GeometryReader` and not a tap location alone
+    ///
+    /// Because the click has to be mapped, and the mapping needs the
+    /// rectangle the picture actually occupies. An aspect-fitted image is
+    /// letterboxed, often generously, and treating the view's bounds as the
+    /// image's would put every pick in the wrong place — by more, the more
+    /// the window's proportions differ from the photograph's.
+    ///
+    /// SwiftUI will not say where it put the picture, so the layout rule is
+    /// reproduced, once, in `PreviewPatchGeometry.fittedImage`, and both the
+    /// click and the overlay are derived from the same value. Nothing here
+    /// computes geometry of its own.
+    ///
+    /// ## What the mapping depends on
+    ///
+    /// The displayed pixel dimensions and the **effective orientation** — the
+    /// file's own composed with the user's correction, read from the preview
+    /// that is actually on screen. Not the channel mix, not the exposure, and
+    /// not the preview's resolution: the first two change every pixel's value
+    /// and no pixel's position, and the third is a fraction that normalised
+    /// coordinates cancel out.
+    @ViewBuilder
+    private func pickablePreview(_ preview: WorkspacePreview) -> some View {
+        GeometryReader { geometry in
+            let layout = PreviewPatchGeometry.fittedImage(
+                pixelWidth: preview.pixelWidth,
+                pixelHeight: preview.pixelHeight,
+                inWidth: geometry.size.width,
+                height: geometry.size.height
+            )
+
+            ZStack(alignment: .topLeading) {
+                Image(decorative: preview.image, scale: 1)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: geometry.size.width, height: geometry.size.height)
+
+                if let layout, let overlay = patchOverlay(preview, in: layout) {
+                    NeutralPatchOverlay(isPicking: isPicking)
+                        .frame(width: overlay.width, height: overlay.height)
+                        .offset(x: overlay.originX, y: overlay.originY)
+                        .allowsHitTesting(false)
+                }
+            }
+            .contentShape(Rectangle())
+            // A drag with no minimum distance, rather than a tap: the commit
+            // happens on mouse **up**, once, and a press that turns into a
+            // drag still produces exactly one canonical request. Nothing is
+            // requested while the pointer moves — re-estimating and
+            // re-demosaicing per pointer-move is work nobody asked for. See
+            // ADR 0019, Decision 10.
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onEnded { value in
+                        guard isPicking, let layout else { return }
+                        guard let point = PreviewPatchGeometry.sourcePoint(
+                            viewX: value.location.x,
+                            viewY: value.location.y,
+                            image: layout,
+                            orientation: preview.effectiveOrientation
+                        ) else {
+                            // Outside the picture. Refused rather than clamped
+                            // to the nearest edge, and the mode stays armed so
+                            // the user can simply click again.
+                            return
+                        }
+                        pick(point.x, point.y)
+                        isPicking = false
+                    },
+                including: isPicking ? .all : .subviews
+            )
+        }
+        .accessibilityLabel(
+            isPicking
+                ? "Preview. Click a neutral area to set the white balance."
+                : "Preview"
+        )
+    }
+
+    /// Where the patch currently in force appears on the displayed image.
+    ///
+    /// Derived from the **canonical adjustment** and the current layout, every
+    /// time this view is laid out, so it follows a window resize, a rotation
+    /// and a change of preview resolution without any of them being handled.
+    /// No view coordinate is stored anywhere, and none is ever persisted.
+    ///
+    /// The active-area dimensions come from the preview's own resolution
+    /// record — the full-resolution, unoriented ones — because that is the
+    /// space a normalised region is a fraction of.
+    private func patchOverlay(
+        _ preview: WorkspacePreview, in layout: FittedRect
+    ) -> FittedRect? {
+        guard let region = try? whiteBalance.normalizedRegion(
+            activeAreaWidth: preview.fullResolutionSourcePixelWidth,
+            activeAreaHeight: preview.fullResolutionSourcePixelHeight
+        ) else { return nil }
+
+        return PreviewPatchGeometry.displayedRect(
+            for: region, image: layout, orientation: preview.effectiveOrientation
+        )
+    }
+}
+
+/// The marker for the neutral patch: a thin rectangle, drawn in two colours so
+/// it is visible on a bright patch and on a dark one.
+///
+/// It is deliberately small and quiet. The patch is a sixteenth of the shorter
+/// edge, so on a common window it is a few dozen points across, and anything
+/// heavier would obscure the very samples a user is trying to judge.
+private struct NeutralPatchOverlay: View {
+    let isPicking: Bool
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .strokeBorder(Color.black.opacity(0.7), lineWidth: 3)
+            Rectangle()
+                .strokeBorder(isPicking ? Color.accentColor : Color.white, lineWidth: 1.5)
         }
     }
 }
@@ -297,7 +451,9 @@ private struct RAWInspectorView: View {
                 row("Recorded orientation", Self.recordedOrientationDescription(preview))
                 row("Your correction", Self.userOrientationDescription(preview))
                 row("Orientation applied", Self.orientationDescription(preview))
-                row("White balance", "Neutral patch, \(Self.regionDescription(preview.neutralPatch))")
+                row("White balance", Self.whiteBalanceDescription(preview))
+                row("Measured patch", Self.regionDescription(preview.neutralPatch))
+                row("Gains", Self.gainsDescription(preview.whiteBalanceGains))
                 row("Camera → working", Self.transformDescription(
                     processing.cameraToWorkingTransformSource
                 ))
@@ -386,6 +542,34 @@ private struct RAWInspectorView: View {
 
     private static func regionDescription(_ region: RAWActiveAreaRegion) -> String {
         "\(region.width) × \(region.height) at (\(region.originRow), \(region.originColumn))"
+    }
+
+    /// Which white balance was applied, and that a person chose where — or did
+    /// not.
+    ///
+    /// Read from the preview's own record of what it was prepared with, so the
+    /// panel cannot describe a patch the pipeline did not measure. While a new
+    /// patch is being prepared this row is one state behind the control, which
+    /// is correct: the control shows the request, the inspector describes the
+    /// image on screen.
+    private static func whiteBalanceDescription(_ preview: WorkspacePreview) -> String {
+        switch preview.whiteBalanceAdjustment {
+        case .defaultNeutralPatch:
+            return "Default centred patch — not an automatic white balance"
+        case .neutralPatch:
+            return "Neutral patch — your choice"
+        }
+    }
+
+    /// The multipliers the estimator produced, in CFA colour-plane order.
+    ///
+    /// Four, not three: an RGBG layout has two independent green planes, and
+    /// collapsing them here would hide the one number most likely to be
+    /// interesting on a converted camera.
+    private static func gainsDescription(_ gains: RAWWhiteBalanceGains) -> String {
+        gains.gainsByColorPlane
+            .map { String(format: "%.3f", $0) }
+            .joined(separator: "  ")
     }
 
     private static func transformDescription(
@@ -546,6 +730,76 @@ private struct OrientationControls: View {
         }
         .buttonStyle(.bordered)
         .disabled(!documentState.canAdjust)
+    }
+}
+
+
+/// The infrared white-balance control: arm the picker, and undo it.
+///
+/// Two buttons, because there are two things the project can honestly offer:
+/// point at a neutral part of the photograph, or go back to the deterministic
+/// centred patch. Neither is an automatic white balance, and the control does
+/// not suggest otherwise.
+///
+/// It changes one field of `DocumentState`'s canonical adjustment record and
+/// nothing else. No view here measures a sample, multiplies a gain or knows
+/// that `RAWWhiteBalanceEstimator` exists: the workspace re-prepares the
+/// reduced preview from the retained normalised mosaic with whatever region it
+/// now holds.
+///
+/// ## What is here and what is not
+///
+/// The armed/disarmed state is `@State` in `ContentView` and never reaches
+/// `ImageAdjustments`: being about to pick is not an editing decision. Only
+/// the committed region is canonical. See ADR 0019, Decision 10.
+///
+/// Deliberately absent: temperature and tint sliders, manual R/G/B gain
+/// fields, grey-world or any other automatic estimate, per-camera white
+/// balance profiles, and anything that would choose a patch for the user. A
+/// freshly opened file with no saved decision gets the centred placeholder,
+/// and it stays that way until a person points somewhere else.
+private struct WhiteBalanceControl: View {
+    let documentState: DocumentState
+    @Binding var isPicking: Bool
+
+    var body: some View {
+        let whiteBalance = documentState.whiteBalanceAdjustment
+
+        HStack(spacing: 8) {
+            Toggle(isOn: $isPicking) {
+                Label("Pick Neutral", systemImage: "eyedropper")
+            }
+            .toggleStyle(.button)
+            .help("Click a neutral area of the photograph to balance from it")
+            .accessibilityLabel("Pick a neutral patch")
+
+            Text(whiteBalance.shortDescription)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 84, alignment: .leading)
+                .help(whiteBalance.diagnosticDescription)
+
+            Button(action: documentState.resetWhiteBalance) {
+                Label("Reset White Balance", systemImage: "arrow.counterclockwise")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .help("""
+                Return to the default centred patch — the orientation, the channel mix \
+                and the exposure are unchanged
+                """)
+            .accessibilityLabel("Reset white balance to the default centred patch")
+            .disabled(whiteBalance.isDefault)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("White balance: \(whiteBalance.diagnosticDescription)")
+        .disabled(!documentState.canAdjust)
+        .onChange(of: documentState.canAdjust) { _, canAdjust in
+            // A file that cannot be adjusted cannot be picked on either, and a
+            // picker left armed across that transition would be a mode with no
+            // way out.
+            if !canAdjust { isPicking = false }
+        }
     }
 }
 
