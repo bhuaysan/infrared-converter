@@ -403,17 +403,37 @@ UInt16 RGB export samples              73,981,440 bytes  (~74 MB)
 the reduced preview, for comparison     37,724,160 bytes  (~36 MB)
 ```
 
-The export path's largest simultaneous buffers are the working image, the mixed
-image and the oriented image — at most three of the 148 MB buffers alive at
-once, plus the 74 MB result. The RAW front half's own intermediates (the
-decoded, normalised and white-balanced mosaics and the camera-native image) go
-out of scope when `prepare` returns, because it uses the bare-image overloads
-rather than the chain-retaining wrappers.
+The export path's largest simultaneous buffers are the four scene-linear
+`Float32` images the adjustment stages produce:
+
+```text
+working   the shared front half's result
+mixed     IRChannelMixer
+oriented  ImageOrienter
+exposed   SceneLinearExposer
+```
+
+They are all in scope inside one function, so the conservative bound is **four
+× 148 MB ≈ 592 MB** while the last of them is being written. ARC may release
+earlier than the end of scope; nothing here depends on that, and no measurement
+of peak RSS is claimed. Once `render` returns, only the exposed image survives,
+and the encoder's 74 MB `UInt16` buffer is allocated beside that one alone.
+
+The RAW front half's own intermediates — the decoded, normalised and
+white-balanced mosaics and the camera-native image — go out of scope when
+`prepare` returns, because it uses the bare-image overloads rather than the
+chain-retaining wrappers. Retaining that chain would have added roughly another
+270 MB for no purpose — the same 270 MB the preview path's existing figures
+account for, since its retained 36 MB buffer replaced a ~420 MB chain.
 
 An **identity mix and an upright orientation share their input's buffer** rather
-than copying it, so a neutral export is considerably cheaper than that bound; so
-is a `0 EV` exposure. No claim is made about peak RSS, and none of these figures
-is a measurement of it.
+than copying it, and so does a `0 EV` exposure, so a neutral export allocates
+one full-resolution `Float32` image and the `UInt16` result — not four and a
+result.
+
+None of these figures is a measurement of peak RSS, and none is presented as
+one: they are the sizes the geometry and the element types imply, checked
+against the real frame by a test.
 
 ## Consequences
 

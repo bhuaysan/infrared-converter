@@ -165,11 +165,16 @@ public struct FullResolutionExportRender: Sendable {
 /// ## Cost and memory
 ///
 /// The most expensive thing the application does, and deliberately so. For the
-/// 4056×3040 reference frame, one full-resolution `Float32` RGB buffer is
-/// about 148 MB, and the path holds at most three of them alive at once
-/// (working, mixed, oriented) plus the 74 MB `UInt16` result. An identity mix
-/// and an upright orientation share their input's buffer rather than copying
-/// it, so a neutral export is considerably cheaper than that bound.
+/// 4056×3040 reference frame one full-resolution `Float32` RGB buffer is about
+/// 148 MB, and the four the adjustment stages produce — working, mixed,
+/// oriented, exposed — are all in scope inside `applyAdjustments`, so the
+/// conservative bound is about 592 MB while the last is being written. Once
+/// `render` returns only the exposed image survives, and the encoder's 74 MB
+/// `UInt16` buffer is allocated beside that one alone.
+///
+/// An identity mix, an upright orientation and a `0 EV` exposure each hand
+/// their input's buffer back rather than copying it, so a neutral export
+/// allocates one `Float32` image and the result.
 ///
 /// It belongs off the main thread, and `DocumentState` runs it there.
 ///
