@@ -28,6 +28,20 @@ swift run InfraredConverter
 There is no external setup step: LibRaw is vendored into the package and built
 from source.
 
+### Running it is not the same as shipping it
+
+`swift run` produces a bare executable, not an `.app` bundle, and macOS decides
+an application's activation policy from its bundle. A process with no
+`Info.plist` gets `.prohibited`, which may not appear in the Dock, may not own
+the menu bar, and **may not put a window on screen** — so the app used to start,
+run and show nothing, with no error and no log line.
+
+`InfraredConverterApp.init()` therefore asks for `.regular` explicitly, which is
+what a bundle's `Info.plist` would have asked for. That makes `swift run` usable
+for development. It is not a substitute for an application bundle: a
+distributable build still needs a bundle identifier, a display name, document
+types, an icon, code signing and entitlements, and none of those exist yet.
+
 ### Continuous integration
 
 `.github/workflows/ci.yml` runs `swift build` and `swift test` on macOS for
