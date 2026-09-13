@@ -396,6 +396,61 @@ final class DocumentState {
         case unavailable(RAWPathFailure)
     }
 
+    /// Where one export has got to.
+    ///
+    /// One closed enum rather than several booleans, for the reason
+    /// `AdjustmentPersistence` is one: "running", "finished" and "failed" are
+    /// mutually exclusive states of a single thing, and a pair of flags can
+    /// represent combinations that cannot happen.
+    ///
+    /// It is **not** part of the adjustment state and is not persisted.
+    /// Exporting is producing an artefact, not editing a photograph: nothing
+    /// here is written to the sidecar, and a failed export leaves the
+    /// document exactly as it was. See
+    /// `docs/decisions/0018-full-resolution-tiff-export.md`, Decision 9.
+    enum ExportStatus {
+        /// Nothing has been exported, or the last one has been acknowledged.
+        case idle
+        /// A full-resolution render and write is running, for this snapshot.
+        case exporting(ExportRequest, destination: URL)
+        /// A file was written.
+        case succeeded(TIFFExportResult)
+        /// It was not. The error is kept as a value, not as a sentence.
+        case failed(ExportFailure)
+
+        var isRunning: Bool {
+            if case .exporting = self { return true }
+            return false
+        }
+    }
+
+    /// An export that did not produce a file.
+    struct ExportFailure {
+        /// The snapshot that was being exported — its own copy, so it still
+        /// describes what was asked for however the document has changed
+        /// since.
+        let request: ExportRequest
+        /// Where the file would have gone. Nothing was written there.
+        let destination: URL
+        /// What went wrong, kept typed.
+        let error: any Error
+
+        /// The export path's own error, when that is what this is. A caller
+        /// that wants to know *which* step failed asks for this rather than
+        /// parsing a message.
+        var exportError: FullResolutionExportError? {
+            error as? FullResolutionExportError
+        }
+
+        var message: String {
+            (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+
+        var failureReason: String? {
+            (error as? LocalizedError)?.failureReason
+        }
+    }
+
     /// What the application-owned pipeline achieved for one file, as one
     /// value.
     ///
@@ -439,6 +494,26 @@ final class DocumentState {
         )
     }
 
+    /// Renders one export snapshot at full resolution and writes it.
+    ///
+    /// Injected so a test can hold an export open, make one fail, and observe
+    /// exactly which request reached it; production passes
+    /// `fullResolutionTIFFExport` and nothing else ever does.
+    ///
+    /// It takes a `URL` and an `ImageAdjustments` — never a preview, a
+    /// `Source` or a `CGImage`. There is no parameter through which the pixels
+    /// on screen could reach a file.
+    typealias ExportRun = @Sendable (
+        ExportRequest, URL, any RAWDecoder
+    ) throws -> TIFFExportResult
+
+    /// The real thing: decode the RAW file again, at full resolution.
+    nonisolated static let fullResolutionTIFFExport: ExportRun = { request, destination, decoder in
+        try FullResolutionExportPipeline().export(
+            request, to: destination, using: decoder
+        )
+    }
+
     private(set) var status: Status = .empty
 
     /// Decisions this workspace could not make durable, oldest first.
@@ -446,6 +521,9 @@ final class DocumentState {
     /// Appended to only when a document leaves the screen with something at
     /// stake. Empty in normal operation: a successful save adds nothing.
     private(set) var unsavedAdjustments: [UnsavedAdjustment] = []
+
+    /// Where the most recent export has got to.
+    private(set) var exportStatus: ExportStatus = .idle
 
     private let decoder: RAWDecoder
     private let store: any ImageAdjustmentStore
@@ -459,7 +537,17 @@ final class DocumentState {
     /// minutes of full-resolution work into suites that are about scheduling.
     /// Production passes the workspace policy and nothing else ever does.
     private let previewPolicy: PreviewResolutionPolicy
+    private let exportRun: ExportRun
     private var decodeTask: Task<Void, Never>?
+
+    /// The export in flight, if any.
+    ///
+    /// Deliberately **not** cancelled by `open(_:)`. An export is bound to the
+    /// snapshot it started with, and a user who starts a twelve-megapixel
+    /// render and then looks at the next photograph has not changed their mind
+    /// about the file they asked for. See
+    /// `docs/decisions/0018-full-resolution-tiff-export.md`, Decision 11.
+    private var exportTask: Task<Void, Never>?
 
     /// Which open this is. Incremented by every `open(_:)`.
     ///
@@ -524,12 +612,14 @@ final class DocumentState {
         decoder: RAWDecoder = LibRawDecoder(),
         store: any ImageAdjustmentStore = JSONSidecarImageAdjustmentStore(),
         render: @escaping PreviewRender = DocumentState.pipelineRender,
-        previewPolicy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy
+        previewPolicy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy,
+        exportRun: @escaping ExportRun = DocumentState.fullResolutionTIFFExport
     ) {
         self.decoder = decoder
         self.store = store
         self.render = render
         self.previewPolicy = previewPolicy
+        self.exportRun = exportRun
     }
 
     var selectedFileURL: URL? {
@@ -1061,6 +1151,108 @@ final class DocumentState {
     /// it has rendered; and like it, it leaves the other adjustments exactly
     /// as they were.
     func resetExposure() { setExposure(.neutral) }
+
+    // MARK: - Exporting
+
+    /// The snapshot an export started now would use, or `nil` when there is
+    /// nothing this application can export.
+    ///
+    /// Two things make it `nil`, and both are refusals rather than omissions:
+    /// no document, and a document whose **application-owned** pipeline did
+    /// not produce an image. The LibRaw diagnostic reference is deliberately
+    /// not a fallback — it is a different decode with different processing,
+    /// and exporting it would quietly hand the user a file this pipeline did
+    /// not make. See `docs/decisions/0012-independent-raw-paths.md`.
+    ///
+    /// The adjustments are the **current canonical** ones, which is the whole
+    /// point of reading them here: they are what the user has asked for, not
+    /// what the last preview managed to display and not what the sidecar last
+    /// accepted. An export requested while a preview render is still in
+    /// flight, or while a save has failed, uses the state on the controls.
+    var exportRequest: ExportRequest? {
+        guard case .decoded(let loaded) = status, loaded.isAdjustable else { return nil }
+        return ExportRequest(rawURL: loaded.url, adjustments: loaded.adjustments)
+    }
+
+    /// Whether an export is running.
+    var isExporting: Bool { exportStatus.isRunning }
+
+    /// Whether the export control should be available.
+    ///
+    /// One export at a time, and the control is simply unavailable while one
+    /// runs. No queue, and no cancelling the first with the second: both would
+    /// be more mechanism than a single-file export needs, and a user who
+    /// wants a different rendering can wait for this file and ask again. See
+    /// `docs/decisions/0018-full-resolution-tiff-export.md`, Decision 10.
+    var canExport: Bool { exportRequest != nil && !isExporting }
+
+    /// The filename to suggest in a save panel, by the one rule that owns it.
+    var suggestedExportFilename: String? {
+        exportRequest.map { ExportDestinationPolicy.suggestedFilename(for: $0.rawURL) }
+    }
+
+    /// Renders the current canonical state at full resolution and writes it to
+    /// `destination`.
+    ///
+    /// The snapshot — the RAW URL and the adjustments — is taken **here**, at
+    /// the start, and is never consulted again. Everything the user does
+    /// afterwards, including opening another photograph, leaves this export
+    /// alone; and this export leaves the document alone, including its
+    /// sidecar, which it never writes.
+    ///
+    /// Does nothing when there is nothing to export or an export is already
+    /// running. That is the same refusal `canExport` reports, restated where
+    /// it is enforced rather than only where it is displayed.
+    func exportTIFF(to destination: URL) {
+        guard let request = exportRequest, exportTask == nil else { return }
+
+        exportStatus = .exporting(request, destination: destination)
+
+        let decoder = self.decoder
+        let run = self.exportRun
+        exportTask = Task.detached(priority: .userInitiated) {
+            let outcome = Result { try run(request, destination, decoder) }
+            await MainActor.run { [weak self] in
+                self?.finishExport(outcome, request: request, destination: destination)
+            }
+        }
+    }
+
+    /// Clears a finished export's status.
+    ///
+    /// Only a finished one: a running export is not something a caller can
+    /// dismiss, because the file is still being written.
+    func acknowledgeExport() {
+        guard !isExporting else { return }
+        exportStatus = .idle
+    }
+
+    private func finishExport(
+        _ outcome: Result<TIFFExportResult, any Error>,
+        request: ExportRequest,
+        destination: URL
+    ) {
+        exportTask = nil
+        switch outcome {
+        case .success(let result):
+            Log.export.info(
+                """
+                Exported \(request.rawURL.lastPathComponent, privacy: .public) to \
+                \(result.destination.lastPathComponent, privacy: .public): \
+                \(result.diagnosticDescription, privacy: .public)
+                """
+            )
+            exportStatus = .succeeded(result)
+        case .failure(let error) where error is CancellationError:
+            // Nobody wanted it. No file, no error, nothing to tell the user.
+            exportStatus = .idle
+        case .failure(let error):
+            Self.log(error, path: "Export", url: request.rawURL)
+            exportStatus = .failed(
+                ExportFailure(request: request, destination: destination, error: error)
+            )
+        }
+    }
 
     // MARK: - Requesting a render of one complete state
 

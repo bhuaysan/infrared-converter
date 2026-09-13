@@ -7,4 +7,5 @@ enum Log {
 
     static let raw = Logger(subsystem: subsystem, category: "RAW")
     static let ui = Logger(subsystem: subsystem, category: "UI")
+    static let export = Logger(subsystem: subsystem, category: "export")
 }

@@ -21,6 +21,8 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 Button("Open RAW…", action: openRAW)
                 Divider().frame(height: 18)
+                ExportControl(documentState: documentState)
+                Divider().frame(height: 18)
                 ChannelMixControl(documentState: documentState)
                 Divider().frame(height: 18)
                 ExposureControl(documentState: documentState)
@@ -700,6 +702,82 @@ private struct ExposureControl: View {
 /// What does appear is the state a user needs to know about: the image is
 /// correct and the saved copy is not, so closing the file now would lose the
 /// edit — for this photograph, or for one already left behind.
+/// The export control: one button, a save panel, and what happened.
+///
+/// The view decides nothing about the export. It collects a destination and
+/// calls `DocumentState.exportTIFF(to:)`; the snapshot, the rendering and the
+/// file are the application layer's and the pipeline's. There is no quality
+/// setting, no bit-depth chooser and no colour-space picker, because there is
+/// exactly one export format in this version and offering options for
+/// decisions that have already been made would be a lie about the pipeline.
+///
+/// Cancelling the panel does nothing at all: no task, no file, no error, and
+/// no status to dismiss.
+private struct ExportControl: View {
+    let documentState: DocumentState
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button("Export TIFF…", action: export)
+                .buttonStyle(.bordered)
+                .help("Render this photograph from the RAW file at full resolution "
+                    + "and write a 16-bit sRGB TIFF")
+                .accessibilityLabel("Export 16-bit TIFF")
+                .disabled(!documentState.canExport)
+            status
+        }
+    }
+
+    @ViewBuilder
+    private var status: some View {
+        switch documentState.exportStatus {
+        case .idle:
+            EmptyView()
+        case .exporting(let request, _):
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Exporting \(request.rawURL.lastPathComponent)…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .succeeded(let result):
+            Button(action: documentState.acknowledgeExport) {
+                Label(
+                    "\(result.destination.lastPathComponent) — \(result.pixelWidth) × "
+                        + "\(result.pixelHeight), 16 bit",
+                    systemImage: "checkmark.circle"
+                )
+                .font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .help("Exported. Click to dismiss.")
+        case .failed(let failure):
+            Button(action: documentState.acknowledgeExport) {
+                Label(failure.message, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            .buttonStyle(.borderless)
+            .help(failure.failureReason ?? failure.message)
+        }
+    }
+
+    private func export() {
+        guard let suggestion = documentState.suggestedExportFilename else { return }
+        let panel = NSSavePanel()
+        panel.title = "Export 16-bit TIFF"
+        panel.allowedContentTypes = [TIFFExporter.contentType]
+        panel.nameFieldStringValue = suggestion
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        // The panel is also where overwriting is agreed to: it asks, and the
+        // writer never overwrites anything the user did not choose here.
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        documentState.exportTIFF(to: url)
+    }
+}
+
 private struct AdjustmentSaveStatus: View {
     let documentState: DocumentState
 
