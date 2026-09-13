@@ -1146,6 +1146,131 @@ from the 8-bit preview. Rendering an encoded buffer again would apply the transf
 function twice, compound quantisation, recover no clipped highlight — and look
 entirely plausible.
 
+### The second end path: full-resolution export
+
+Everything above describes the interactive half. The application has a second
+end path, and it does not branch off the first: it starts again from the RAW
+file.
+
+```text
+ExportRequest = RAW URL + ImageAdjustments
+    ↓  RAWWorkingImagePipeline      decode → normalise → WB → demosaic → convert
+WorkingColorRGBImage                full resolution, scene-linear, pre-creative
+    ↓  IRChannelMixer               adjustments.channelMix
+    ↓  ImageOrienter                file orientation + adjustments.orientation
+    ↓  SceneLinearExposer           adjustments.exposure
+ExposedSceneLinearRGBImage          extended linear sRGB, still unclamped
+    ↓  ExportImageEncoder           clip → sRGB → 16-bit quantisation
+ExportEncodedImage
+    ↓  TIFFExporter                 temp file → finalise → move
+a 16-bit RGB TIFF
+```
+
+See [ADR 0018](decisions/0018-full-resolution-tiff-export.md).
+
+#### What is shared, and what is not
+
+| | interactive preview | full-resolution export |
+| --- | --- | --- |
+| RAW front half | `RAWWorkingImagePipeline` | the same code |
+| preview reduction | yes, by `PreviewResolutionPolicy` | **never** |
+| channel mix | `IRChannelMixer` | the same |
+| orientation | `ImageOrienter` | the same |
+| exposure arithmetic | `SceneLinearExposure` | the same |
+| where exposure is applied | inside the display pass | `SceneLinearExposer`, its own stage |
+| range policy | `.hardClipToDisplayRange` | `.hardClipToExportRange` |
+| transfer function | `SRGBTransferFunction` | the same |
+| quantisation | `round(x × 255)` | `round(x × 65535)` |
+| destination | a `CGImage` on screen | a TIFF file on disk |
+
+The export path takes a `URL` and an `ImageAdjustments`. It has no parameter
+for a preview, a `WorkspacePreviewPipeline.Source`, a `CGImage` or a
+`PreviewResolutionPolicy`, so preview pixels and preview *sizes* cannot reach
+it — which is why two documents of one photograph at different preview
+resolutions produce byte-identical exports.
+
+#### The exposure stage
+
+```text
+scale    = 2^EV                     SceneLinearExposure, shared with the display path
+exposed  = sceneLinear × scale      per component, in Double, narrowed once
+```
+
+Nothing is clipped here. A value this stage lifts above `1` reaches the export
+range policy still above `1`, and a value a negative exposure brings back into
+range is encoded rather than already destroyed. The identity (`0 EV`) hands the
+same immutable array back, bit patterns intact, and still sweeps for non-finite
+values so the output contract holds on both paths.
+
+#### The export encoder
+
+```text
+clipped = min(max(x, 0), 1)         hard, named, counted in both directions
+encoded = sRGB OETF(clipped)        the shared piecewise curve, in Double
+sample  = round(encoded × 65535)    half away from zero
+```
+
+| | |
+| --- | --- |
+| Bits per component | 16 |
+| Components | 3, interleaved `R G B` |
+| Alpha | none — there is no alpha channel |
+| Storage | `[UInt16]`, so no byte order exists before the file writer |
+| Endpoints | `0 → 0`, `0.5 → 32768`, `1 → 65535`, exactly |
+
+`1 → 65535` is arithmetic *plus rounding*, exactly as `1 → 255` is on the
+display path: the `Double` encoding of `1` is one ULP below `1`, so the product
+is `65534.999999999998…` and rounding to nearest recovers `65535`.
+
+**Sixteen bits is not a range.** A normalised integer TIFF's samples run
+`0…65535` and mean `0…1`; more bits buy finer steps inside that range, not a
+larger one. So the unbounded working representation still needs an explicit,
+counted clip, and the encoder records `clippedLowSampleCount` and
+`clippedHighSampleCount` for the same reason the display stage does.
+
+The encoder refuses an image whose provenance says it was reduced for preview,
+with `ExportEncodingError.previewReducedSource`. The export pipeline cannot
+produce one; the guard exists for anything that later hands it an image from
+the interactive path.
+
+#### The file
+
+`ExportCGImageAdapter` is the one place samples become bytes, and it declares
+the host byte order to CoreGraphics rather than assuming it. The image is
+tagged `CGColorSpace.sRGB`, so the transfer function the encoder applied once
+is not applied again by a reader.
+
+`TIFFExporter` writes to a replacement directory on the destination's own
+volume, finalises there, and only then moves the completed file into place —
+ImageIO has no commit semantics of its own, and a failed
+`CGImageDestinationFinalize` can leave a partial file behind. A failed export
+therefore leaves the destination exactly as it was.
+
+The pixels are already permuted into viewing order, so the file's orientation
+tag is `1`, in both the top-level property and the TIFF dictionary. Copying the
+RAW file's orientation across would rotate the photograph twice.
+
+### What the export stage does not do
+
+| Stage | Applied? |
+| --- | --- |
+| Hard export-range clipping to `0...1` | **yes** |
+| sRGB transfer function | **yes** |
+| Quantisation to 16 bits | **yes** |
+| Exposure | no — upstream, by `SceneLinearExposer`, and not reapplied |
+| Preview reduction | no — refused outright |
+| Tone mapping of any kind | no |
+| Highlight reconstruction | no |
+| Automatic rescaling of out-of-range values | no |
+| Contrast, saturation, curves, LUTs | no |
+| Sharpening / noise reduction / resizing | no |
+| Orientation / crop / resampling | no — orientation is upstream, and forwarded |
+| Adjustment metadata, XMP, private tags, recipes | no — none is written to the file |
+| The capture date | no — see ADR 0018, Decision 13 |
+
+`isValidatedInfraredCalibration` is still `false`. A 16-bit file is a more
+precise record of the same unvalidated rendering.
+
 ### What the linear stage does not do
 
 | Stage | Applied? |
@@ -1996,10 +2121,12 @@ One application-owned reference demosaic algorithm is decided and implemented,
 the working representation is extended linear sRGB (ADR 0006) reached through
 an explicit provenance-carrying transform, a linear 3×3 creative channel mix
 sits after that boundary (ADR 0007), the eight standard orientations are
-applied as their own lossless geometry stage (ADR 0009), and the result now
-reaches a monitor through an explicit exposure, a named clip, the sRGB
-transfer function and 8-bit quantisation (ADR 0008). What remains open is
-everything downstream of *that*, plus image quality:
+applied as their own lossless geometry stage (ADR 0009), the result reaches a
+monitor through an explicit exposure, a named clip, the sRGB transfer function
+and 8-bit quantisation (ADR 0008), and it reaches a **file** through the same
+adjustments at full resolution, its own named clip, the same transfer function
+and 16-bit quantisation (ADR 0018). What remains open is everything downstream
+of *those*, plus image quality:
 
 - **The rest of the infrared creative colour transform** — false-colour
   mapping, hue remapping, LUT-based finishing. Channel mixing is decided; these
@@ -2026,10 +2153,11 @@ everything downstream of *that*, plus image quality:
   restored before the first render (ADR 0013). What does not exist: recipes and
   presets, any reuse of a record across images, a document format, watching a
   sidecar for external edits, and undo/redo.
-- **Any adjustment other than orientation.** Exposure, the white-balance
-  patch, the camera transform and the channel mix are still fixed
-  application-layer choices with no controls, and the recipe format that
-  would hold them is deliberately undefined.
+- **Any adjustment beyond the three that exist.** Orientation (ADR 0010), the
+  creative channel mix (ADR 0016) and exposure (ADR 0017) are user decisions
+  with controls and a sidecar. The white-balance patch and the camera transform
+  are still fixed application-layer choices with no controls, and the recipe
+  format that would hold any of it is deliberately undefined.
 - **Preview caching and eviction.** Preview *resolution* is decided (ADR 0015):
   the workspace reduces once, immediately after the camera-to-working
   transform, and retains only that reduced scene-linear buffer. Cancellation is
@@ -2040,11 +2168,10 @@ everything downstream of *that*, plus image quality:
   to make white balance interactive. It needs its own invariant and per-layout
   handling, and until it exists a CFA mosaic is never resized at all (ADR
   0015).
-- **A full-resolution render path.** The reduced preview is explicitly a cache;
-  a full-resolution render re-runs from the RAW file. Nothing implements one
-  yet.
-- **Export**, which needs its own bit depth, its own colour decisions and its
-  own ADR, and must not reuse the 8-bit preview buffer.
+- **Export beyond one 16-bit TIFF.** The full-resolution render path and a
+  16-bit sRGB TIFF exist (ADR 0018) and restart from the RAW file. JPEG, PNG,
+  DNG, OpenEXR, floating-point TIFF, batch export, export presets, resizing and
+  output sharpening do not.
 - The **final production-quality Bayer algorithm**. `.bilinearBayer` is a
   correctness reference, not an image-quality answer.
 - An **X-Trans algorithm**. The layout is recognised and explicitly refused

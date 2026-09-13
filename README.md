@@ -78,8 +78,8 @@ work for every adjustment. Those figures are the scene-linear buffers alone — 
 document also holds the LibRaw diagnostic reference, the display images and the
 decoder metadata beside them, and no claim is made about their size. The
 reduced preview is a **disposable cache** — the RAW file plus its canonical
-adjustments remain the source of truth, and a future full-resolution render
-will start from the file, never from these pixels. See
+adjustments remain the source of truth, and the full-resolution render starts
+from the file, never from these pixels. See
 [ADR 0015](docs/decisions/0015-reduced-resolution-preview.md).
 
 The retained buffer is **pre-creative**: the reduction is the last thing that
@@ -121,13 +121,15 @@ records what it did and explicitly did not do.
   the number of clipped samples recorded. It is deliberately **not** a tone
   pipeline.
 - **Exposure** is the third user adjustment and the first continuous one: a
-  slider (−4 to +4 EV, in twentieths of a stop) whose value the display stage
-  applies as `× 2^EV` to the unclamped scene-linear preview, before clipping.
-  It reruns only the mix, orientation and display stages; a drag is coalesced
-  by the same renderer as every other control, with no debounce. A sidecar may
-  hold any finite value from −10 to +10 EV; a value beyond the slider is shown
-  as saved and not altered. See
+  slider (−4 to +4 EV, in twentieths of a stop) whose value is applied as
+  `× 2^EV` to the unclamped scene-linear image, before clipping, by the shared
+  `SceneLinearExposure` primitive. It reruns only the mix, orientation and
+  display stages; a drag is coalesced by the same renderer as every other
+  control, with no debounce. A sidecar may hold any finite value from −10 to
+  +10 EV; a value beyond the slider is shown as saved and not altered. See
   [ADR 0017](docs/decisions/0017-interactive-exposure.md).
+- **Export** is a second end path, and it starts again from the RAW file. See
+  [Full-resolution export](#full-resolution-export) below.
 
 What the app-owned pipeline puts on screen, for a freshly opened file with no
 saved decisions: a centred neutral-patch white balance, bilinear demosaicing,
@@ -170,12 +172,13 @@ that restores the rotation rather than making the image upright, and it resets
 the orientation only. See
 [ADR 0010](docs/decisions/0010-user-owned-orientation-adjustment.md).
 
-### One record, two adjustments
+### One record, three adjustments
 
 ```text
 ImageAdjustments
  ├── orientation    one of eight states, composed onto the file's own
- └── channelMix     identity | red/blue swap | an explicit 3×3 matrix
+ ├── channelMix     identity | red/blue swap | an explicit 3×3 matrix
+ └── exposure       a finite EV from −10 to +10, applied as × 2^EV
 ```
 
 Both are fields of one record, and every render request is that whole record —
@@ -194,18 +197,91 @@ OLYMPUS.ORF.iradjustments.json     the user's decisions, and the only place they
 
 ```json
 {
-  "schemaVersion" : 2,
+  "schemaVersion" : 3,
   "orientation" : "rotate90Clockwise",
-  "channelMix" : { "kind" : "redBlueSwap" }
+  "channelMix" : { "kind" : "redBlueSwap" },
+  "exposureEV" : 1.25
 }
 ```
 
-Schema version 2 added `channelMix`. A version 1 record — orientation alone —
-still reads, and migrates to the identity mix, because that is the state it was
-actually saved in rather than a guess about a missing field; it is written back
-as version 2 the next time it is saved. A version this build does not know is
-refused outright rather than read around, because a setting whose omission
-would change the photograph must never be silently ignored.
+Schema version 2 added `channelMix` and version 3 added `exposureEV`. Older
+records still read and migrate to the identity mix and `0 EV` — the state they
+were actually saved in, rather than a guess about a missing field — and are
+written back at the current version the next time they are saved. A version
+this build does not know is refused outright rather than read around, because a
+setting whose omission would change the photograph must never be silently
+ignored.
+
+Export adds no field and changes no schema. Exporting produces an artefact; it
+is not an edit.
+
+### Full-resolution export
+
+The workspace shows a reduced, 8-bit preview. That preview is never the
+photograph, and it is never what gets exported. **Export TIFF…** takes the RAW
+file's URL and the current canonical `ImageAdjustments`, and renders the
+photograph again from the file, at the sensor's own resolution:
+
+```text
+ExportRequest = RAW URL + ImageAdjustments
+   ↓                             RAWWorkingImagePipeline
+decode, normalise, white         WorkingColorRGBImage (full resolution)
+balance, demosaic, convert         ← the same code the preview runs
+   ↓                             IRChannelMixer      adjustments.channelMix
+   ↓                             ImageOrienter       file + adjustments.orientation
+   ↓                             SceneLinearExposer  adjustments.exposure
+                                 ExposedSceneLinearRGBImage (still unclamped)
+   ↓                             ExportImageEncoder
+clip, sRGB, 16-bit quantisation  ExportEncodedImage (display referred)
+   ↓                             TIFFExporter
+temp file → finalise → move      a 16-bit RGB TIFF, tagged sRGB
+```
+
+On the E-PL3 fixture that is a **2048 × 1535 preview and a 4056 × 3040
+export**, of one RAW file and one adjustment state — and the export is derived
+from the file, not from the preview.
+
+That is structural, not a convention. `ExportRequest` has two stored
+properties, a `URL` and an `ImageAdjustments`, and there is no API anywhere in
+the export path that accepts a preview, a `WorkspacePreviewPipeline.Source`, a
+`CGImage` or a `PreviewResolutionPolicy`. Two documents of the same photograph
+at different preview resolutions produce byte-identical exports, because the
+export never learns what those resolutions were.
+
+Preview and export are also not two colour pipelines. They share the RAW front
+half, all three adjustment stages, the exposure arithmetic
+(`SceneLinearExposure`) and the transfer function (`SRGBTransferFunction`).
+They differ in exactly four places, each deliberate:
+
+| | preview | export |
+| --- | --- | --- |
+| resolution | reduced, longest edge 2048 | the sensor's own active area |
+| range policy | `.hardClipToDisplayRange` | `.hardClipToExportRange` |
+| bit depth | 8 per component | 16 per component |
+| destination | a `CGImage` on screen | a TIFF file on disk |
+
+The file is 16-bit unsigned integer RGB, three channels, no alpha, sRGB
+primaries and transfer function, with an embedded sRGB profile.
+
+> **Sixteen bits is not a range.** A normalised integer TIFF's samples run
+> `0…65535` and mean `0…1`; more bits buy finer steps, not a larger range. The
+> unbounded scene-linear values are therefore clipped by an explicitly named
+> policy, and both directions are counted and reported.
+
+The pixels are physically oriented, so the file's orientation tag is `1` — a
+copied RAW orientation would rotate the photograph twice in every other
+application. Nothing is written to the destination until a complete TIFF has
+been encoded in a temporary directory on the same volume, so a failed export
+leaves whatever was there untouched. The RAW file is opened for reading only,
+as always.
+
+An export is a **snapshot** taken when it starts: the URL and the adjustments
+as they are at that moment. It does not wait for a pending preview render — the
+canonical state is what the user asked for, not what the screen has caught up
+to — it works while a sidecar save has failed, it never writes the sidecar
+itself, and opening another photograph does not cancel it or change what it
+exports. One export runs at a time; the button is unavailable while it does.
+See [ADR 0018](docs/decisions/0018-full-resolution-tiff-export.md).
 
 Still legacy diagnostic behaviour: the LibRaw processed-RGB decode. It is no
 longer the workspace image. It supplies the inspector's decoder facts and a
@@ -216,8 +292,9 @@ Still absent: any tone control — contrast, curves, highlight recovery,
 saturation, automatic exposure, a histogram; a white-balance control; a channel-mix matrix editor;
 arbitrary rotation, straightening and crop; undo/redo; filter and capture
 profiles, recipes and presets beyond the two built-in mixes, so a saved record
-belongs to one photograph and cannot be reused; export of any kind; a cache
-across opens; zoom or 1:1 inspection; Metal.
+belongs to one photograph and cannot be reused; every export format but one —
+JPEG, PNG, DNG, OpenEXR, floating-point TIFF, batch export and export presets;
+a cache across opens; zoom or 1:1 inspection; Metal.
 
 There are two decode paths, and they are not interchangeable:
 

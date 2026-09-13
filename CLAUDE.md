@@ -344,13 +344,13 @@ Individual stages must remain independently testable and movable where technical
 
 The working representation is established **before** the infrared channel/color transform, not after it. That ordering was originally hypothesised the other way round; implementation showed that a creative channel mix is only meaningful once the RGB axes it remixes are defined, so the stage operates inside the working representation and leaves it unchanged. See `docs/decisions/0006-working-color-space.md` and `docs/decisions/0007-infrared-channel-mixing.md`.
 
-The pipeline's "Display or Export Transform" step is now partly implemented, and only partly: a display preview boundary exists — exposure, hard display-range clipping, the sRGB transfer function, 8-bit quantisation — while export does not, and neither does any tone stage. See `docs/decisions/0008-display-preview-rendering.md`. Display and export remain separate decisions: an export path must choose its own bit depth and color handling and must never reuse the 8-bit preview buffer.
+The pipeline's "Display or Export Transform" step is implemented as **two separate boundaries**, and no tone stage exists at either. The display boundary — exposure, hard display-range clipping, the sRGB transfer function, 8-bit quantisation — is `docs/decisions/0008-display-preview-rendering.md`. The export boundary — hard export-range clipping, the same transfer function, 16-bit quantisation — is `docs/decisions/0018-full-resolution-tiff-export.md`. They share the arithmetic that is genuinely one rule (`SceneLinearExposure`, `SRGBTransferFunction`) and each owns its own range policy, bit depth and destination. Neither may reuse the other's buffer, and an export must never start from the 8-bit preview.
 
 Between the working representation and the creative channel mix there is now one more boundary, and it is the only stage in the pipeline that changes how many pixels there are: the **preview reduction**. It produces the reduced scene-linear rendition the interactive workspace holds, leaves the colour space, the linearity and the numeric range unchanged, and is deliberately absent from any full-resolution path. See `docs/decisions/0015-reduced-resolution-preview.md`.
 
 The creative channel mix that follows it is a **user adjustment**, not a fixed application choice. It is applied in the interactive half of the pipeline, to the retained **pre-mix** reduced preview — never composed onto a previous mix, and never baked into what a document holds open — and it forms one complete render state with the user's orientation correction and exposure. See `docs/decisions/0016-interactive-channel-mixer.md`.
 
-Exposure is the third user adjustment. It has no stage of its own: the display boundary's existing `× 2^EV`, in the linear domain and before the range policy, is given the user's value instead of a constant `0 EV`. It is not tone mapping. See `docs/decisions/0017-interactive-exposure.md`.
+Exposure is the third user adjustment. Its arithmetic is `SceneLinearExposure` — `× 2^EV`, in the linear domain, before whichever range policy follows — and that one primitive is the only place it is written. The interactive path applies it inside the display boundary, where it has always lived; the full-resolution export applies it as a stage of its own, `SceneLinearExposer`, so the adjusted scene-linear image exists before anything clips or quantises it. It is not tone mapping. See `docs/decisions/0017-interactive-exposure.md` and its amendment.
 
 Image orientation is a stage of its own, between the infrared channel/color transform and the display or export transform. It is **discrete geometry**: the eight standard orientations, applied as an exact permutation of whole pixels, lossless and with every component's bit pattern preserved. It is the only stage that changes where a pixel is, or that can exchange the image's width and height. See `docs/decisions/0009-application-owned-orientation.md`.
 
@@ -761,7 +761,7 @@ The invariant is:
 
 Avoid decoding the RAW file again after every slider movement.
 
-Any material preview-vs-export differences must be documented and tested. The resolution is one such difference and is now permanent: preview pixels are never export truth, and a full-resolution render re-runs from the RAW file rather than from a retained preview buffer.
+Any material preview-vs-export differences must be documented and tested. The resolution is one such difference and is now permanent: preview pixels are never export truth, and a full-resolution render re-runs from the RAW file rather than from a retained preview buffer. That path exists — `FullResolutionExportPipeline` — and takes a `URL` plus one `ImageAdjustments` and nothing else, so no preview, preview policy or `CGImage` can reach it. The differences that remain are named in `docs/decisions/0018-full-resolution-tiff-export.md`: resolution, range policy, bit depth and destination. Everything else is the same code.
 
 The architecture should not prevent future before/after or split-preview modes.
 
@@ -839,6 +839,22 @@ Every export path must choose an explicit output color space and embed an approp
 Do not overwrite an existing file without explicit user intent.
 
 RAW source files must never be modified.
+
+The first of those targets exists. **16-bit TIFF export restarts from the RAW
+file**: an export is a `URL` plus one complete `ImageAdjustments`, rendered
+again at the sensor's own resolution through the same primitives the preview
+uses, and there is no API through which a preview, a preview policy or a
+`CGImage` could reach it. The export path shares the RAW front half
+(`RAWWorkingImagePipeline`), the three adjustment stages, the exposure
+arithmetic (`SceneLinearExposure`) and the transfer function
+(`SRGBTransferFunction`) with the preview; it differs only in resolution, in
+its own range policy, and in quantising to 16 bits rather than 8. Bit depth is
+not range: a normalised integer TIFF still needs an explicitly decided, counted
+clip. The pixels are physically oriented and the file's orientation tag is
+therefore `1`. Nothing is written to the destination until a complete file has
+been encoded somewhere disposable. An export is an artefact, never an edit: it
+does not write the sidecar, and a failed save does not block it. See
+`docs/decisions/0018-full-resolution-tiff-export.md`.
 
 ---
 
@@ -1079,7 +1095,7 @@ Examples:
 ```text
 docs/decisions/0001-use-libraw.md
 docs/decisions/0006-working-color-space.md
-docs/decisions/0018-metal-render-pipeline.md
+docs/decisions/0019-metal-render-pipeline.md
 ```
 
 The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`. The creative channel-mix stage that depends on it is `docs/decisions/0007-infrared-channel-mixing.md`, the display boundary that turns its result into pixels is `docs/decisions/0008-display-preview-rendering.md`, the geometry stage between them is `docs/decisions/0009-application-owned-orientation.md`, and the user-owned orientation adjustment composed onto that is `docs/decisions/0010-user-owned-orientation-adjustment.md`.
@@ -1093,6 +1109,8 @@ That the interactive workspace re-renders a **reduced** scene-linear rendition r
 That the creative channel mix is a canonical **user adjustment**, that the retained preview is therefore pre-mix, that the mix moved from `prepare` to `render` and forms one complete render state with the orientation, that the reduced domain has two image types so mixes cannot compose, and that the sidecar schema is at version 2 with a tested version 1 migration, is `docs/decisions/0016-interactive-channel-mixer.md` — whose amendment makes schema dispatch exhaustive and refuses a built-in mix that carries a matrix.
 
 That exposure is the third canonical user adjustment and the first continuous one, that it is applied by the existing display-stage primitive as `× 2^EV` before the range policy, that its persisted range is `−10…+10 EV` while the slider offers `−4…+4`, that a slider drag is handled by the existing coalescing renderer with no debounce, and that the sidecar schema is at version 3 with tested version 1 and 2 migrations, is `docs/decisions/0017-interactive-exposure.md`.
+
+That the full-resolution export restarts from the RAW file with the same canonical adjustments, that preview and export share the RAW front half and every adjustment stage and diverge only at resolution, range policy, bit depth and destination, why the exposure arithmetic and the sRGB transfer function each became one shared primitive, why a 16-bit integer TIFF still needs an explicit counted clip, why the pixels are oriented and the orientation tag is `1`, and why an export is a snapshot that neither waits for a preview nor writes a sidecar, is `docs/decisions/0018-full-resolution-tiff-export.md`.
 
 ADR numbers are assigned in the order decisions are actually made; do not reuse a number that is already taken.
 
@@ -1458,6 +1476,17 @@ Pause and reconsider when code begins to show any of these patterns:
 - the full-resolution scene-linear image kept alive only because the UI may rotate again
 - an interactive adjustment that reruns RAW decode, normalisation, white balance, demosaicing or the reduction
 - preview pixels treated as export truth, or an export path that starts from a retained preview buffer
+- exporting from a `WorkspacePreview`, its `CGImage`, or anything else the interactive path retains
+- upscaling the reduced preview for final output
+- an export path with its own independent channel-mix, exposure or transfer-function arithmetic
+- passing a `PreviewResolutionPolicy`, a preview image or a preview `Source` into full-resolution export
+- double-applying orientation through permuted pixels plus a TIFF orientation tag that is not `1`
+- quantising to 8 bit, or through a display buffer, anywhere on the way to a 16-bit export
+- writing directly into the final destination before the encode has succeeded, so a failure leaves a plausible-looking file
+- an export using the last durable sidecar state instead of the current canonical adjustments
+- an export that waits for a preview render in order to reuse its pixels
+- an export that writes the sidecar, or a save failure that blocks an export
+- a bit depth treated as a range, so that "16-bit" is taken to mean scene-linear values need no range policy
 - a reduced buffer wearing a full-resolution type, so that only `width < sensorWidth` distinguishes them
 - a preview size chosen inside a processing stage, or hard-coded anywhere but the size policy
 - a reduction performed after the creative channel mix, baking one mix into the retained buffer
@@ -1476,7 +1505,7 @@ Pause and reconsider when code begins to show any of these patterns:
 - a continuous adjustment bypassing the complete-state coalescing renderer, or given its own timer, debounce or queue
 - clamping scene-linear exposure results before the display stage's explicit range policy
 - first rendering `0 EV` and then restoring a saved exposure
-- a second exposure primitive beside `DisplayPreviewRenderer`'s, or exposure arithmetic in a view or in `DocumentState`
+- a second exposure primitive beside `SceneLinearExposure`, or exposure arithmetic in a view, in `DocumentState`, or copied into an encoder
 - a saved exposure outside the slider's range silently changed because a control displayed it
 - full RAW decode on every slider move without measurement or caching rationale
 - every feature depending directly on LibRaw

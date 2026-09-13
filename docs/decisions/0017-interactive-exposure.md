@@ -307,3 +307,51 @@ reads the file once and performs the LibRaw diagnostic decode once.
 Tone mapping, curves, contrast, highlights/shadows, highlight recovery,
 automatic exposure, a histogram, white-balance controls, export, undo/redo,
 presets and recipes, and any GPU path.
+
+## Amendment (2026-09-13) — the exposure primitive is shared
+
+Decision 1 above says:
+
+> `DisplayPreviewRenderer` multiplied by `2^EV` before exposure was a user
+> decision, and it remains the single authority on what `exposureEV` does to a
+> pixel.
+
+That was accurate while the display was the only consumer. It stopped being
+accurate when [ADR 0018](0018-full-resolution-tiff-export.md) added a
+full-resolution export, which applies the same user decision and must not go
+anywhere near an 8-bit display renderer to do it.
+
+The arithmetic moved into `SceneLinearExposure`, and the ownership now reads:
+
+```text
+UserExposureAdjustment     the person's intent, validated and persisted
+SceneLinearExposure        the mathematics: scale = 2^EV, exposed = v × scale
+DisplayPreviewRenderer     display clipping and 8-bit sRGB encoding
+ExportImageEncoder         export clipping and 16-bit sRGB encoding
+```
+
+Nothing about the decisions above changed:
+
+- the persisted range is still `−10 … +10 EV`, refused rather than clamped;
+- the slider still offers `−4 … +4`, quantised to 1/20 stop;
+- exposure is still applied in the linear domain, **before** any range policy,
+  so a value it lifts above `1` is clipped by the policy that owns clipping and
+  a value a negative exposure brings back is rendered;
+- `UserExposureAdjustment` still performs no arithmetic and still has no
+  `scale` property;
+- `WorkspacePreviewPipeline.displaySettings(for:)` still passes `ev` through
+  unchanged;
+- `DisplayRenderSettings.exposureScale` still returns `2^EV` — it now asks the
+  primitive for it rather than computing it.
+
+What changed is that there is one implementation of `× 2^EV` instead of the two
+a copy into the export path would have produced, and a test compares the two
+paths' exposed values bit pattern by bit pattern. The same argument applied to
+the sRGB transfer function, which is now `SRGBTransferFunction` and is called
+by both encoders.
+
+The two paths still differ in **where** the multiplication sits: the preview
+applies it inside its display pass, as it always has, and the export applies it
+as a stage of its own, `SceneLinearExposer`, so that the adjusted scene-linear
+image exists as an inspectable value before anything clips or quantises it. See
+ADR 0018, Decision 4.
