@@ -173,6 +173,15 @@ public struct DisplayRenderSettings: Equatable, Sendable {
         self.encoding = encoding
     }
 
+    /// This exposure as the shared scene-linear primitive.
+    ///
+    /// The settings carry the number; `SceneLinearExposure` owns what it
+    /// means. The export path applies the same primitive to the same value
+    /// without going near these settings or this renderer, which is the point
+    /// of the primitive existing. See
+    /// `docs/decisions/0018-full-resolution-tiff-export.md`.
+    public var exposure: SceneLinearExposure { SceneLinearExposure(ev: exposureEV) }
+
     /// The linear multiplier `2^exposureEV`.
     ///
     /// Exact for integer stops: `exp2(0) == 1`, `exp2(1) == 2`,
@@ -181,7 +190,7 @@ public struct DisplayRenderSettings: Equatable, Sendable {
     /// Not guaranteed finite — a finite but enormous EV produces an infinite
     /// scale, which the renderer refuses. This property reports what the
     /// arithmetic gives; it does not sanitise it.
-    public var exposureScale: Double { exp2(exposureEV) }
+    public var exposureScale: Double { exposure.scale }
 
     /// A one-line summary for diagnostics and reports.
     public var diagnosticDescription: String {

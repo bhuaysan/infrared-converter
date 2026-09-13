@@ -144,15 +144,13 @@ public struct DisplayPreviewRenderer: Sendable {
         // this call gets nothing built for it at all.
         try cancellation.check()
 
-        let scale = settings.exposureScale
-        // Both halves are checked. `2^EV` is finite for a NaN EV in neither
-        // direction, but it *is* finite for `−infinity`: `exp2(−infinity)` is
-        // `0`, a perfectly usable-looking scale that would silently render a
-        // black frame from a nonsense exposure. The EV itself has to be finite
-        // too, which is why this is not a check on the scale alone.
-        guard settings.exposureEV.isFinite, scale.isFinite else {
+        // The shared scene-linear primitive, not arithmetic of this stage's
+        // own. `SceneLinearExposure` states why both halves of its
+        // applicability check are needed.
+        let exposure = settings.exposure
+        guard exposure.isApplicable else {
             throw DisplayRenderingError.nonFiniteExposure(
-                exposureEV: settings.exposureEV, scale: scale
+                exposureEV: exposure.ev, scale: exposure.scale
             )
         }
 
@@ -211,11 +209,12 @@ public struct DisplayPreviewRenderer: Sendable {
                         )
                     }
 
-                    // Exposure, in the linear domain, before anything else.
-                    // Multiplied in Double and narrowed exactly once: a
-                    // Float32 product can overflow where the mathematical
-                    // result cannot.
-                    let exposed = Float(Double(sceneLinear) * scale)
+                    // Exposure, in the linear domain, before anything else,
+                    // by the shared primitive. The export encoder applies the
+                    // identical arithmetic to the identical value; that is
+                    // what makes a preview and an export the same rendering
+                    // at two bit depths rather than two pipelines.
+                    let exposed = exposure.applied(to: sceneLinear)
                     guard exposed.isFinite else {
                         throw DisplayRenderingError.nonFiniteExposedValue(
                             row: row, column: column, channel: channel, exposureEV: exposureEV
@@ -334,10 +333,7 @@ public struct DisplayPreviewRenderer: Sendable {
     static func encode(_ displayLinear: Double, as encoding: DisplayEncoding) -> Double {
         switch encoding {
         case .sRGB:
-            if displayLinear <= 0.003_130_8 {
-                return 12.92 * displayLinear
-            }
-            return 1.055 * pow(displayLinear, 1.0 / 2.4) - 0.055
+            return SRGBTransferFunction.encode(displayLinear)
         }
     }
 
