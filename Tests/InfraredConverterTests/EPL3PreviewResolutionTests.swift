@@ -140,25 +140,41 @@ struct EPL3PreviewResolutionTests {
 
     /// Opening a photograph reads it and writes nothing. The sidecar is
     /// written only after an adjustment has rendered, and this suite makes
-    /// none — so the fixture directory must look exactly as it did.
+    /// none — so the directory must look exactly as it did.
+    ///
+    /// Run against an **isolated copy** of the fixture. The assertion is that
+    /// no sidecar appears, and that is only a statement about this code if
+    /// there was demonstrably none to begin with: a developer who has ever
+    /// rotated the fixture in the application has one beside their own copy,
+    /// and asserting on their directory would be asserting on their history.
+    /// See `RAWFixtures.withIsolatedCopy`.
     @Test("Opening the fixture writes no sidecar and changes no bytes")
     func openingWritesNothing() throws {
-        let url = try #require(RAWFixtures.olympusORF)
-        let sidecar = JSONSidecarImageAdjustmentStore.sidecarURL(for: url)
-        let before = try Self.digest(of: url)
-        let attributesBefore = try FileManager.default.attributesOfItem(atPath: url.path)
+        try RAWFixtures.withIsolatedCopy { url in
+            let sidecar = JSONSidecarImageAdjustmentStore.sidecarURL(for: url)
+            #expect(!FileManager.default.fileExists(atPath: sidecar.path))
 
-        _ = try WorkspacePreviewPipeline()
-            .render(decoding: url, using: LibRawDecoder(), adjustments: .none)
+            let before = try Self.digest(of: url)
+            let attributesBefore = try FileManager.default.attributesOfItem(atPath: url.path)
 
-        #expect(!FileManager.default.fileExists(atPath: sidecar.path))
-        #expect(try Self.digest(of: url) == before)
+            _ = try WorkspacePreviewPipeline()
+                .render(decoding: url, using: LibRawDecoder(), adjustments: .none)
 
-        let attributesAfter = try FileManager.default.attributesOfItem(atPath: url.path)
-        #expect(attributesAfter[.size] as? Int == attributesBefore[.size] as? Int)
-        #expect(
-            attributesAfter[.modificationDate] as? Date
-                == attributesBefore[.modificationDate] as? Date
-        )
+            #expect(!FileManager.default.fileExists(atPath: sidecar.path))
+            #expect(try Self.digest(of: url) == before)
+
+            let attributesAfter = try FileManager.default.attributesOfItem(atPath: url.path)
+            #expect(attributesAfter[.size] as? Int == attributesBefore[.size] as? Int)
+            #expect(
+                attributesAfter[.modificationDate] as? Date
+                    == attributesBefore[.modificationDate] as? Date
+            )
+
+            // And nothing else appeared beside it either.
+            let contents = try FileManager.default.contentsOfDirectory(
+                at: url.deletingLastPathComponent(), includingPropertiesForKeys: nil
+            )
+            #expect(contents.map(\.lastPathComponent) == [url.lastPathComponent])
+        }
     }
 }

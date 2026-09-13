@@ -33,24 +33,14 @@ struct EPL3FullResolutionExportTests {
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    /// Copies the fixture into a temporary directory of its own, runs `body`
-    /// against the copy, and removes the directory afterwards.
+    /// Runs `body` against an isolated temporary copy of the fixture.
     ///
     /// The copy is what makes these tests independent of the developer's own
     /// working state: an `.iradjustments.json` beside the original is simply
-    /// not there beside the copy.
+    /// not there beside the copy, and the directory contains exactly one file
+    /// until a test writes into it. See `RAWFixtures.withIsolatedCopy`.
     static func withIsolatedFixture<T>(_ body: (URL) throws -> T) throws -> T {
-        let original = try #require(RAWFixtures.olympusORF)
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("infrared-epl3-export-\(UUID().uuidString)")
-        try FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true
-        )
-        defer { try? FileManager.default.removeItem(at: directory) }
-
-        let copy = directory.appendingPathComponent(original.lastPathComponent)
-        try FileManager.default.copyItem(at: original, to: copy)
-        return try body(copy)
+        try RAWFixtures.withIsolatedCopy(body)
     }
 
     // MARK: - Dimensions
