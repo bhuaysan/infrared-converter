@@ -17,9 +17,12 @@ WORKING-COLOUR RGB DOMAIN   three Float32 per pixel; linear; extended linear sRG
     WorkingColorRGBImage        full resolution; the processing truth
     SceneLinearPreviewImage     reduced for the interactive workspace
     IRChannelMixedRGBImage
+    OrientedSceneLinearRGBImage
+    ExposedSceneLinearRGBImage  every canonical adjustment applied
 
-DISPLAY-REFERRED DOMAIN     three UInt8 per pixel; sRGB-encoded; clipped
-    DisplayEncodedPreviewImage
+DISPLAY-REFERRED DOMAIN     sRGB-encoded; clipped; no longer light
+    DisplayEncodedPreviewImage  three UInt8 per pixel — the screen
+    ExportEncodedImage          three UInt16 per pixel — a file
 ```
 
 The **mosaic domain** runs from LibRaw's unpacked samples to a white-balanced
@@ -28,8 +31,11 @@ values per pixel, still linear, still the sensor's own filter responses, and
 still not in any colour space. The **working-colour RGB domain** begins at an
 explicit camera-to-working transform: the same layout, the same linearity, but
 the values are now coordinates in a defined space. The **display-referred
-domain** begins at the display renderer, and is the first place in the whole
-project where a number is no longer proportional to light.
+domain** begins at whichever encoder a rendering ends at — the display
+renderer for the screen, the export encoder for a file — and is the first place
+in the whole project where a number is no longer proportional to light. There
+are two encoders and one domain: they differ in their range policy, their bit
+depth and their destination, and in nothing else.
 
 The middle two are the pair most easily confused, so they are named apart
 everywhere:
