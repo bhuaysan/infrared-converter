@@ -389,8 +389,9 @@ decoding stops at the task boundary rather than inside the pass.
 | cancelled by a newer request | yes (ADR 0011) | no — it is bound to its snapshot |
 | writes the sidecar | yes, after a successful render | never |
 
-Everything above the resolution row is identical code. Everything below it is
-each path's own, and each difference is named.
+Every row marked "the same" is literally the same code, called twice. Every
+other row is a deliberate difference, and there are no undeliberate ones: the
+list is exhaustive.
 
 ## Memory
 
