@@ -240,7 +240,7 @@ source + adjustments
 
 This architecture must make undo/redo, presets, recipes, batch processing, parameter comparison, and sidecars possible without modifying source data.
 
-The adjustment sidecar is the first of those to exist. It holds the complete adjustment record — today the orientation correction and the creative channel mix — and it is written and read as a whole, never field by field. A RAW file is an immutable input — never rewritten, appended to, re-tagged or replaced — and a user's decisions live in one application-owned JSON file beside it, named by one rule in one place. It is read **before** the file is decoded, so the first render is already the saved state; it is written only after a state has rendered successfully and is still the current one; and a record it cannot understand stops the open rather than becoming `ImageAdjustments.none`. See `docs/decisions/0013-adjustment-sidecar.md`.
+The adjustment sidecar is the first of those to exist. It holds the complete adjustment record — today the white-balance choice, the orientation correction, the creative channel mix and the exposure — and it is written and read as a whole, never field by field. A RAW file is an immutable input — never rewritten, appended to, re-tagged or replaced — and a user's decisions live in one application-owned JSON file beside it, named by one rule in one place. It is read **before** the file is decoded, so the first render is already the saved state; it is written only after a state has rendered successfully and is still the current one; and a record it cannot understand stops the open rather than becoming `ImageAdjustments.none`. See `docs/decisions/0013-adjustment-sidecar.md`.
 
 ## Processing stages have explicit boundaries
 
@@ -341,6 +341,8 @@ Preview / Export
 ```
 
 Individual stages must remain independently testable and movable where technically necessary.
+
+Infrared white balance is a **user adjustment**, not a fixed application choice — but it stays where it is, in the mosaic domain, before demosaicing. It is the one adjustment upstream of the preview reduction, so changing it re-prepares that preview from a retained normalised mosaic rather than being applied to it. The user's decision is persisted as the **neutral region they chose**, in normalised active-area coordinates, and the gains are re-derived from the RAW file every time, by one resolver and one estimator, for the preview and the export alike. See `docs/decisions/0019-interactive-white-balance.md`.
 
 The working representation is established **before** the infrared channel/color transform, not after it. That ordering was originally hypothesised the other way round; implementation showed that a creative channel mix is only meaningful once the RGB axes it remixes are defined, so the stage operates inside the working representation and leaves it unchanged. See `docs/decisions/0006-working-color-space.md` and `docs/decisions/0007-infrared-channel-mixing.md`.
 
@@ -583,13 +585,13 @@ The RAW core must not assume:
 
 White balance must operate against CFA/color-plane metadata supplied by the decoder.
 
-Potential modes:
+The neutral-patch picker exists. A user clicks a neutral part of the displayed photograph; the click is mapped back through the aspect-fit layout and the effective orientation into **normalised active-area coordinates**, and that region is what the sidecar records. Never the gains, never view coordinates, never preview pixels. A file with no saved decision gets `.defaultNeutralPatch` — the deterministic centred square this project has always measured — which is a placeholder and is deliberately not called an automatic white balance.
+
+Potential further modes:
 
 - Camera WB
 - Auto IR
 - Foliage
-- Neutral target picker
-- Custom sampled point
 - Manual multipliers
 - Saved camera/filter/capture-configuration WB
 
@@ -753,6 +755,8 @@ That strategy is now decided, and it is the first of the two branches. The inter
 
 The retained reduced preview is **pre-creative**: the reduction is the last thing that has happened to it. That is what makes a creative mix adjustable at all — a mix is applied to those values, never composed onto a previous mix — and it is enforced by the types rather than by a runtime check. The reduced domain has two image types, one for each side of the creative stage, so `M2 × (M1 × preview)` does not compile.
 
+What a document retains is therefore **two** buffers, not one: the full-resolution normalised mosaic — the input to the white-balance chain, and the only full-resolution thing anything keeps — and the reduced pre-mix preview. That is a deliberate, stated exception to "nothing full-resolution survives preparation", and its justification is the alternative: re-reading and re-normalising a twelve-megapixel file on every neutral-patch click, for two stages that do not depend on the patch at all. The mosaic is retained only after an open has actually produced an image.
+
 A CFA mosaic is never resized by a general image filter. Neighbouring mosaic samples are different colours, so an ordinary downscale averages across colour filters and destroys the pattern semantics a demosaicer depends on. Reduce only after the representation has become ordinary multi-channel image data, unless a deliberately CFA-aware algorithm with a proven invariant and tests exists — and none does.
 
 The invariant is:
@@ -784,6 +788,15 @@ nothing: a stage that can be superseded takes an explicit
 `ProcessingCancellation`, polls it at a documented granularity, and throws
 `CancellationError` rather than returning a partially written buffer.
 Cancellation is not a processing failure and must never be reported as one.
+
+There are two expensive costs per document, and each has its own coalescing
+slot of the same generic type: the **fast** one re-renders the retained reduced
+preview, and the **heavy** one re-prepares that preview from the retained
+normalised mosaic when the white balance changes. Two slots, because "at most
+one at a time" is a claim each has to make about itself. A heavy preparation
+that lands is followed by a render of the **latest** complete state, so an
+exposure changed while a patch was being prepared is in the result rather than
+a stop behind it. See `docs/decisions/0019-interactive-white-balance.md`.
 
 Rapid parameter changes coalesce. At most one expensive render works at a
 time **per document**, a burst collapses to the newest requested state, and no
@@ -1095,7 +1108,7 @@ Examples:
 ```text
 docs/decisions/0001-use-libraw.md
 docs/decisions/0006-working-color-space.md
-docs/decisions/0019-metal-render-pipeline.md
+docs/decisions/0020-metal-render-pipeline.md
 ```
 
 The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`. The creative channel-mix stage that depends on it is `docs/decisions/0007-infrared-channel-mixing.md`, the display boundary that turns its result into pixels is `docs/decisions/0008-display-preview-rendering.md`, the geometry stage between them is `docs/decisions/0009-application-owned-orientation.md`, and the user-owned orientation adjustment composed onto that is `docs/decisions/0010-user-owned-orientation-adjustment.md`.
@@ -1111,6 +1124,8 @@ That the creative channel mix is a canonical **user adjustment**, that the retai
 That exposure is the third canonical user adjustment and the first continuous one, that it is applied by the existing display-stage primitive as `× 2^EV` before the range policy, that its persisted range is `−10…+10 EV` while the slider offers `−4…+4`, that a slider drag is handled by the existing coalescing renderer with no debounce, and that the sidecar schema is at version 3 with tested version 1 and 2 migrations, is `docs/decisions/0017-interactive-exposure.md`.
 
 That the full-resolution export restarts from the RAW file with the same canonical adjustments, that preview and export share the RAW front half and every adjustment stage and diverge only at resolution, range policy, bit depth and destination, why the exposure arithmetic and the sRGB transfer function each became one shared primitive, why a 16-bit integer TIFF still needs an explicit counted clip, why the pixels are oriented and the orientation tag is `1`, and why an export is a snapshot that neither waits for a preview nor writes a sidecar, is `docs/decisions/0018-full-resolution-tiff-export.md`.
+
+That the infrared white balance is a canonical **user adjustment** recorded as the neutral region a person picked rather than as the gains it produced, that the workspace retains the normalised mosaic so a new patch costs no decode, that the heavy re-preparation and the fast render are separate coalescing slots whose landing order is resolved in favour of the newest complete state, that the export resolves the same intent from the file rather than from any workspace cache, that the coordinate road from a click to a sensor coordinate depends on the layout and the orientation and on nothing else, that `isIdentity` is retired in favour of `isDefault`, and that the sidecar schema is at version 4 with tested version 1, 2 and 3 migrations to the historical centred patch, is `docs/decisions/0019-interactive-white-balance.md`.
 
 ADR numbers are assigned in the order decisions are actually made; do not reuse a number that is already taken.
 
@@ -1508,6 +1523,25 @@ Pause and reconsider when code begins to show any of these patterns:
 - a second exposure primitive beside `SceneLinearExposure`, or exposure arithmetic in a view, in `DocumentState`, or copied into an encoder
 - a saved exposure outside the slider's range silently changed because a control displayed it
 - full RAW decode on every slider move without measurement or caching rationale
+- applying interactive white balance as downstream RGB gains on the reduced preview, just to avoid re-preparing — a single green multiplier cannot reproduce a demosaic that averaged two independently balanced green planes
+- per-channel white-balance gains composed onto a preview that already carries the previous gains
+- persisting preview, view or window coordinates for a neutral patch, or persisting the estimated gains as the record of the decision
+- re-decoding the RAW file for every white-balance picker change when the normalised mosaic is already retained
+- retaining the normalised mosaic for a file whose open never produced an image
+- a normalised mosaic retained alongside the decoded `UInt16` buffer it replaced
+- a hidden default neutral patch inside a shared pipeline or a processing stage, rather than an explicit resolved region
+- a second white-balance resolver or estimator on the export path
+- saving a white-balance adjustment before its complete preview renders successfully
+- letting a superseded white-balance preparation replace the current reduced source, install a preview or write a sidecar
+- re-requesting an in-flight preparation for a state that is already being prepared, so a second control restarts it
+- rendering the state a patch was picked with rather than the latest complete state once the preparation lands
+- export using workspace cached pixels or a retained mosaic instead of RAW plus the canonical white-balance intent
+- a saved white-balance patch first rendering with the default centred patch
+- mixing transient picker-drag or picker-armed state into `ImageAdjustments`
+- mapping a click onto the whole SwiftUI frame rather than through the aspect-fitted image rectangle
+- clamping a click outside the displayed image to the nearest edge instead of ignoring it
+- a picker mapping that consults the channel mix, the exposure or the preview resolution
+- a whole-record `isIdentity` that claims "no net effect on the image" once a default stage has a visible effect
 - every feature depending directly on LibRaw
 - direct Metal shader calls from UI views
 - tests requiring the entire app to run

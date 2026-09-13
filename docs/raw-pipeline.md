@@ -118,11 +118,15 @@ application black subtraction         ┐
    ↓                                  ├ RAWMosaicNormalizer
 application normalisation to Float32  ┘
    ↓
-LinearRAWMosaic (Float32, unclamped)
+LinearRAWMosaic (Float32, unclamped)   ← RETAINED by an open document;
+   │                                     the input to every white balance
    │
-   ├───→ measure a selected patch   ┐
-   │              ↓                 ├ RAWWhiteBalanceEstimator
-   │     RAWWhiteBalanceGains       ┘
+   ├───→ resolve adjustments.whiteBalance
+   │     into a RAWActiveAreaRegion       UserWhiteBalanceAdjustment
+   │              ↓
+   ├───→ measure that patch          ┐
+   │              ↓                  ├ RAWWhiteBalanceEstimator
+   │     RAWWhiteBalanceGains        ┘
    │              │
    ↓              ↓
    └───→ apply per-CFA-plane IR gains   ┐
@@ -155,8 +159,18 @@ extended linear sRGB; unclamped Float32; still linear
 
 ═══════════ the full-resolution path ends here ═════════
 everything above is transient and released when preparation
-returns; the reduced PRE-MIX buffer is what the workspace
-retains, and everything below it re-runs per adjustment
+returns — EXCEPT the normalised mosaic, which an open
+document retains so that a new neutral patch re-runs this
+half without re-reading the file. The reduced PRE-MIX buffer
+is what the workspace retains beside it, and everything
+below re-runs for the three adjustments that are downstream.
+
+Two costs, two coalescing slots:
+  HEAVY  a new white balance  → re-run from the retained
+                                mosaic, replacing the
+                                reduced buffer
+  FAST   mix, orientation,    → re-run from the reduced
+         exposure              buffer, which is unchanged
 
                   ↓
        adjustments.channelMix → IRChannelMix       ┐
@@ -297,8 +311,19 @@ Exposure joined the render half the same way. The display stage's
 `exposureEV` was always `0 EV` in the workspace; it is now the user's
 `ImageAdjustments.exposure`, passed unchanged, so the `× 2^EV` described under
 the display stage below acts on the unclamped mixed and oriented preview before
-the range policy. No stage was added and none moved. The sidecar is at schema
-version 3. See `docs/decisions/0017-interactive-exposure.md`.
+the range policy. No stage was added and none moved. See
+`docs/decisions/0017-interactive-exposure.md`.
+
+The **white balance** joined the adjustments differently, and it is the one
+that could not join the render half. It is a mosaic-domain stage upstream of
+demosaicing, so a user's neutral patch cannot be applied to the reduced
+preview; it re-runs the chain from `LinearRAWMosaic`, which is why an open
+document now retains that mosaic. `RAWWhiteBalanceEstimator` still receives an
+explicit region and has no default patch — the region is resolved from
+`ImageAdjustments.whiteBalance` by `UserWhiteBalanceAdjustment.resolvedRegion`,
+which is the only place that conversion happens, for the preview and the export
+alike. The sidecar is at schema version 4. See
+`docs/decisions/0019-interactive-white-balance.md`.
 
 `ImageOrienter` takes an `IRChannelMixedProcessedRAWImage` (or a bare
 `IRChannelMixedRGBImage`, or a reduced `IRChannelMixedPreviewImage`) **and an
@@ -2155,25 +2180,31 @@ of *those*, plus image quality:
   arrangements — whether a file names one or a person does; the continuous
   editing operations are a different problem and need interpolation.
 - **Anything about persistence beyond one photograph's own state.** The
-  orientation adjustment is saved in a JSON sidecar beside the RAW file and
+  complete adjustment record is saved in a JSON sidecar beside the RAW file and
   restored before the first render (ADR 0013). What does not exist: recipes and
   presets, any reuse of a record across images, a document format, watching a
   sidecar for external edits, and undo/redo.
-- **Any adjustment beyond the three that exist.** Orientation (ADR 0010), the
-  creative channel mix (ADR 0016) and exposure (ADR 0017) are user decisions
-  with controls and a sidecar. The white-balance patch and the camera transform
-  are still fixed application-layer choices with no controls, and the recipe
-  format that would hold any of it is deliberately undefined.
+- **Any adjustment beyond the four that exist.** The infrared white balance
+  (ADR 0019), orientation (ADR 0010), the creative channel mix (ADR 0016) and
+  exposure (ADR 0017) are user decisions with controls and a sidecar. The
+  camera-to-working transform and the demosaic algorithm are still fixed
+  application-layer choices with no controls, and the recipe format that would
+  hold any of it is deliberately undefined.
+- **Every white-balance mode except a picked neutral patch.** Temperature and
+  tint, manual per-plane gains, grey-world or any other automatic estimate, and
+  per-camera or per-filter white-balance profiles (ADR 0019).
 - **Preview caching and eviction.** Preview *resolution* is decided (ADR 0015):
   the workspace reduces once, immediately after the camera-to-working
   transform, and retains only that reduced scene-linear buffer. Cancellation is
   decided too (ADR 0011). What remains open is keeping a reduced preview across
   opens, evicting one, or persisting one to disk — none of which exists.
 - **A CFA-aware mosaic reduction.** Reducing before demosaicing would let the
-  white-balance and demosaic stages run on fewer samples, which is the only way
-  to make white balance interactive. It needs its own invariant and per-layout
-  handling, and until it exists a CFA mosaic is never resized at all (ADR
-  0015).
+  white-balance and demosaic stages run on fewer samples. Interactive white
+  balance no longer depends on it — retaining the normalised mosaic was the
+  answer (ADR 0019) — but it is still the way those stages would get cheaper,
+  and the demosaic is what dominates a patch change. It needs its own invariant
+  and per-layout handling, and until it exists a CFA mosaic is never resized at
+  all (ADR 0015).
 - **Export beyond one 16-bit TIFF.** The full-resolution render path and a
   16-bit sRGB TIFF exist (ADR 0018) and restart from the RAW file. JPEG, PNG,
   DNG, OpenEXR, floating-point TIFF, batch export, export presets, resizing and

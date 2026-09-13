@@ -44,8 +44,10 @@ display-encoded bytes, and nothing LibRaw processed reaches the screen.
 LibRaw unpack                    RAWMosaic (UInt16, active area)
    ↓                             RAWMosaicNormalizer
 black subtraction, normalisation LinearRAWMosaic (Float32, unclamped)
+                                   ← RETAINED; the input to every white balance
    ↓                             RAWWhiteBalanceEstimator / RAWWhiteBalancer
 infrared white balance           WhiteBalancedRAWMosaic
+(user-selected neutral patch)
    ↓                             RAWDemosaicer
 bilinear Bayer demosaic          DemosaicedRAWRGBImage (camera-native RGB)
    ↓                             RAWWorkingColorConverter
@@ -69,8 +71,14 @@ display stage reads it and never touches it. After a preview is rendered the
 retained scene-linear buffer is bit-identical, every value below `0` and above
 `1` still in it.
 
-Everything above the reduction runs at sensor resolution and is **released when
-the file finishes opening**. Everything below it runs on the reduced buffer,
+Everything above the reduction runs at sensor resolution. All of it is
+**released when the file finishes opening** except the normalised mosaic, which
+is kept because the white balance is a user decision that lives above the
+reduction: moving the neutral patch re-runs the estimate, the balance, the
+demosaic, the conversion and the reduction from those retained samples, and
+reads the file not at all. On the E-PL3 fixture that is a second retained
+buffer of about 49 MB beside the 36 MB preview. See
+[ADR 0019](docs/decisions/0019-interactive-white-balance.md). Everything below it runs on the reduced buffer,
 which is the only scene-linear state an open document keeps. On the Olympus
 E-PL3 fixture that is 2048 × 1535 rather than 4056 × 3040: a 36 MB
 application-owned scene-linear buffer instead of a 400 MB chain, and 3.9× less
@@ -95,8 +103,16 @@ transform, mix or exposure can be changed without decoding again, and each
 records what it did and explicitly did not do.
 
 - **White balance** is per CFA plane in the mosaic domain, with no Kelvin
-  limits. Gains are supplied explicitly or estimated from a caller-selected
-  neutral patch.
+  limits, and it is the fourth user adjustment. Gains are supplied explicitly
+  or estimated from a **selected neutral patch** — and the sidecar records the
+  patch, in normalised active-area coordinates, never the gains. "Pick Neutral"
+  arms the preview; a click is mapped back through the aspect-fit layout and
+  the displayed orientation into sensor coordinates, and the patch is drawn on
+  the image from the canonical region every time it is laid out. A file with no
+  saved decision gets the deterministic centred square this project has always
+  measured, which is a placeholder and not an automatic white balance. There is
+  no temperature, no tint and no manual gain entry. See
+  [ADR 0019](docs/decisions/0019-interactive-white-balance.md).
 - **Demosaicing** is `bilinearBayer` — the current **correctness / reference
   algorithm**, not an image-quality answer. X-Trans is recognised and
   explicitly refused.
@@ -132,7 +148,8 @@ records what it did and explicitly did not do.
   [Full-resolution export](#full-resolution-export) below.
 
 What the app-owned pipeline puts on screen, for a freshly opened file with no
-saved decisions: a centred neutral-patch white balance, bilinear demosaicing,
+saved decisions: the default centred neutral-patch white balance, bilinear
+demosaicing,
 the identity false-colour camera transform, an identity channel mix, the
 orientation the file's own metadata names, `0 EV`, hard clipping and sRGB.
 Those choices are made in the application layer, visibly, because no processing
@@ -172,23 +189,31 @@ that restores the rotation rather than making the image upright, and it resets
 the orientation only. See
 [ADR 0010](docs/decisions/0010-user-owned-orientation-adjustment.md).
 
-### One record, three adjustments
+### One record, four adjustments
 
 ```text
 ImageAdjustments
+ ├── whiteBalance   the default centred patch | a neutral region you picked
  ├── orientation    one of eight states, composed onto the file's own
  ├── channelMix     identity | red/blue swap | an explicit 3×3 matrix
  └── exposure       a finite EV from −10 to +10, applied as × 2^EV
 ```
 
-Both are fields of one record, and every render request is that whole record —
-never one field. A burst across both controls therefore collapses to one newest
+All four are fields of one record, and every request is that whole record —
+never one field. A burst across the controls therefore collapses to one newest
 complete state: nothing in between is rendered, put on screen or written. The
 record is serialisable and versioned, and it is saved: one JSON sidecar beside
 the RAW file, written after exactly that state has rendered and read back
 before the first render on the next open. See
-[ADR 0013](docs/decisions/0013-adjustment-sidecar.md) and
-[ADR 0016](docs/decisions/0016-interactive-channel-mixer.md).
+[ADR 0013](docs/decisions/0013-adjustment-sidecar.md),
+[ADR 0016](docs/decisions/0016-interactive-channel-mixer.md) and
+[ADR 0019](docs/decisions/0019-interactive-white-balance.md).
+
+The white balance is the one field that is not applied to the retained reduced
+preview — it is upstream of demosaicing — so changing it re-prepares that
+preview from the retained normalised mosaic. That is a scheduling difference
+and nothing else: it is a field like the other three, one request is still one
+complete state, and the export still takes the whole record.
 
 ```text
 OLYMPUS.ORF                        an immutable input; never written to
@@ -197,20 +222,37 @@ OLYMPUS.ORF.iradjustments.json     the user's decisions, and the only place they
 
 ```json
 {
-  "schemaVersion" : 3,
+  "schemaVersion" : 4,
   "orientation" : "rotate90Clockwise",
   "channelMix" : { "kind" : "redBlueSwap" },
-  "exposureEV" : 1.25
+  "exposureEV" : 1.25,
+  "whiteBalance" : {
+    "kind" : "neutralPatch",
+    "region" : {
+      "originX" : 0.4766,
+      "originY" : 0.4688,
+      "width" : 0.0468,
+      "height" : 0.0625
+    }
+  }
 }
 ```
 
-Schema version 2 added `channelMix` and version 3 added `exposureEV`. Older
-records still read and migrate to the identity mix and `0 EV` — the state they
-were actually saved in, rather than a guess about a missing field — and are
-written back at the current version the next time they are saved. A version
-this build does not know is refused outright rather than read around, because a
-setting whose omission would change the photograph must never be silently
-ignored.
+The white balance records **where the user pointed**, as fractions of the RAW
+active image area in sensor axes, and never the multipliers it produced. A gain
+is an answer and a patch is the question: the gains are re-derived from the file
+every time, by the same estimator the export uses, so improving the estimator
+does not leave every saved photograph rendering by arithmetic that no longer
+exists. A file with no picked patch records `{ "kind" : "defaultNeutralPatch" }`.
+
+Schema version 2 added `channelMix`, version 3 added `exposureEV` and version 4
+added `whiteBalance`. Older records still read and migrate to the identity mix,
+`0 EV` and the **default centred patch** — the state they were actually saved
+in, rather than a guess about a missing field — and are written back at the
+current version the next time they are saved. Reading rewrites nothing. A
+version this build does not know is refused outright rather than read around,
+because a setting whose omission would change the photograph must never be
+silently ignored.
 
 Export adds no field and changes no schema. Exporting produces an artefact; it
 is not an edit.
@@ -224,9 +266,12 @@ photograph again from the file, at the sensor's own resolution:
 
 ```text
 ExportRequest = RAW URL + ImageAdjustments
+   ↓                             RAWBasePreparationPipeline
+decode, normalise                LinearRAWMosaic (full resolution)
    ↓                             RAWWorkingImagePipeline
-decode, normalise, white         WorkingColorRGBImage (full resolution)
-balance, demosaic, convert         ← the same code the preview runs
+white balance (the same patch    WorkingColorRGBImage (full resolution)
+and estimator), demosaic,          ← the same code the preview runs
+convert
    ↓                             IRChannelMixer      adjustments.channelMix
    ↓                             ImageOrienter       file + adjustments.orientation
    ↓                             SceneLinearExposer  adjustments.exposure
@@ -606,9 +651,28 @@ See [RAW/README.md](RAW/README.md).
   records, and departing from that is a manual act. There is no camera-model
   table, no filename heuristic and no automatic straightening — the E-PL3
   fixture records EXIF 1 and is shown sideways until someone rotates it.
-- **Two things are adjustable: orientation and the channel mix.** Exposure, the
-  white-balance patch and the camera transform are still fixed
-  application-layer choices with no controls.
+- **Four things are adjustable: the white balance, the orientation, the channel
+  mix and the exposure.** The camera-to-working transform, the demosaic
+  algorithm and the preview resolution are still fixed application-layer
+  choices with no controls.
+- **The white balance is patch-driven only.** There is no temperature, no tint,
+  no manual per-plane gain entry, and no automatic estimate of any kind — no
+  grey-world, no white-patch, no scene analysis. A file with no saved decision
+  measures the deterministic centred square, which is a placeholder, not a
+  guess about the photograph.
+- **The picker takes a click, not a drag.** It places a patch of the default
+  size — a sixteenth of the shorter active-area edge, square in sensor samples
+  — around the point, shifted inside the frame if it would overhang. There is
+  no rubber-band rectangle and no resize handle.
+- **A refused white balance replaces the preview with its error**, exactly as a
+  refused rotation does. The requested patch stays in the controls and the
+  sidecar keeps the last state that rendered, so picking elsewhere recovers;
+  but the previous picture is not kept on screen. That is one rule for all four
+  adjustments, and changing it should be changed for all four at once.
+- **A document now holds two buffers, not one.** The normalised full-resolution
+  mosaic is retained so a new patch costs no decode — about 49 MB on the E-PL3
+  fixture — beside the 36 MB reduced preview. During a file switch made
+  mid-render, two documents briefly hold one pair each.
 - **The mix control offers two choices.** Identity and Red/Blue Swap. An
   explicit 3×3 matrix is a persistable, renderable state and there is no editor
   for one, so a saved matrix is shown and kept but cannot be authored in the
@@ -619,21 +683,18 @@ See [RAW/README.md](RAW/README.md).
 - **Arbitrary rotation does not exist.** Orientation is a discrete permutation
   of whole pixels. Straightening, crop and perspective correction would need
   resampling, and none of that is implemented.
-- Export does not exist. The 8-bit preview buffer is a preview and must not be
-  written to a file as though it were one.
-- Exposure is not adjustable from the UI. The renderer takes any EV and the
-  workspace passes `0`.
 - **The interactive preview is a reduced rendition, and softer than the file.**
   It is capped at 2048 pixels on the longest edge, so a window maximised on a
   large display shows it mildly upscaled. There is no zoom and no 1:1
   inspection path.
-- **Changing anything upstream of the reduction means re-opening the file.**
-  White balance, the demosaic algorithm and the camera transform all live above
-  the reduction point, and none of them is adjustable today; when they become
-  adjustable they will re-prepare from the RAW file rather than from the
-  retained preview.
+- **Changing the demosaic algorithm or the camera transform means re-opening
+  the file.** Both live above the reduction point and neither is adjustable
+  today. The white balance lives there too and *is* adjustable: it re-prepares
+  from the retained normalised mosaic, which is the pattern those two would
+  follow if they gained controls.
 - A reduced, **pre-mix** preview is held for as long as a file is open, so that
-  a change of orientation or channel mix reprocesses instead of decoding:
+  a change of orientation, channel mix or exposure reprocesses instead of
+  decoding:
   2048 × 1535 × 3 `Float32`, about 36 MB for the E-PL3 fixture. That is the
   application-owned scene-linear buffer, not the whole document — the LibRaw
   reference, the display images and the metadata are held beside it. There is
