@@ -76,6 +76,46 @@ public enum ImageAdjustmentError: Error, Equatable {
     /// restated at the persistence boundary so the refusal names the sidecar
     /// rather than a processing stage the user never chose to run.
     case nonFiniteChannelMixCoefficient(index: Int, value: Double)
+    /// A persisted white balance names a kind this version does not model — a
+    /// typo, a corrupted file, or a token a newer version writes.
+    ///
+    /// Reported verbatim, and never read as the default centred patch:
+    /// balancing from the middle of the frame when the user chose a grey card
+    /// in the corner would look exactly like success.
+    case unknownWhiteBalanceKind(token: String)
+    /// A persisted white balance is missing a field its kind requires — the
+    /// `kind` token itself, or the `region` a picked patch is.
+    case missingWhiteBalanceField(field: String)
+    /// A persisted white balance carries a field its kind does not have — the
+    /// default patch carrying a `region`.
+    ///
+    /// The mirror image of `missingWhiteBalanceField`, and the same rule that
+    /// refuses a built-in channel mix carrying a matrix: the record says two
+    /// different things about which samples were measured, and there is no
+    /// reading of it that is not a guess.
+    case unexpectedWhiteBalanceField(field: String, kind: String)
+    /// A persisted neutral patch is missing one of its four coordinates.
+    ///
+    /// All four are required: the rectangle *is* the four numbers, and there
+    /// is no value a missing origin or extent could be defaulted to.
+    case missingNeutralPatchField(field: String)
+    /// A persisted neutral-patch coordinate is NaN or an infinity.
+    case nonFiniteNeutralPatchCoordinate(field: String, value: Double)
+    /// A persisted neutral patch has a width or height that is zero or
+    /// negative.
+    ///
+    /// An empty selection measures nothing, and a negative one is not a
+    /// rectangle at all.
+    case emptyNeutralPatch(width: Double, height: Double)
+    /// A persisted neutral patch starts before the active area or ends past
+    /// it.
+    ///
+    /// Refused rather than clamped. A clamped patch measures different samples
+    /// from the ones the record names, which would silently change the white
+    /// balance of the photograph.
+    case neutralPatchOutsideActiveArea(
+        originX: Double, originY: Double, width: Double, height: Double
+    )
     /// An exposure compensation is NaN or an infinity.
     ///
     /// Never read as `0 EV`: a value we could not use and a deliberate
@@ -111,6 +151,20 @@ extension ImageAdjustmentError: LocalizedError {
             return "The saved channel-mix matrix is not a 3×3 matrix."
         case .nonFiniteChannelMixCoefficient:
             return "The saved channel-mix matrix contains a value that is not a finite number."
+        case .unknownWhiteBalanceKind:
+            return "The saved white balance could not be understood."
+        case .missingWhiteBalanceField:
+            return "The saved white balance is incomplete."
+        case .unexpectedWhiteBalanceField:
+            return "The saved white balance contradicts itself."
+        case .missingNeutralPatchField:
+            return "The saved neutral patch is incomplete."
+        case .nonFiniteNeutralPatchCoordinate:
+            return "The saved neutral patch contains a value that is not a finite number."
+        case .emptyNeutralPatch:
+            return "The saved neutral patch has no area."
+        case .neutralPatchOutsideActiveArea:
+            return "The saved neutral patch lies outside the image."
         case .nonFiniteExposureAdjustment:
             return "The saved exposure is not a finite number."
         case .exposureAdjustmentOutOfRange:
@@ -171,6 +225,46 @@ extension ImageAdjustmentError: LocalizedError {
             return """
                 Channel-mix coefficient \(index) is \(value), which is not a finite number \
                 and cannot describe a transform.
+                """
+        case .unknownWhiteBalanceKind(let token):
+            return """
+                "\(token)" is not one of the white balances this version models. It is \
+                reported rather than treated as the default centred patch, because a value \
+                we could not read and a deliberate decision to measure the middle of the \
+                frame are different facts.
+                """
+        case .missingWhiteBalanceField(let field):
+            return """
+                The saved white balance does not contain "\(field)", which its kind requires.
+                """
+        case .unexpectedWhiteBalanceField(let field, let kind):
+            return """
+                The saved white balance is "\(kind)", which is defined by its name alone, and \
+                it also contains "\(field)". The record says two different things about which \
+                samples were measured, so it is refused rather than read with part of it \
+                ignored.
+                """
+        case .missingNeutralPatchField(let field):
+            return """
+                A neutral patch is four fractions of the active image area, and the record \
+                does not contain "\(field)".
+                """
+        case .nonFiniteNeutralPatchCoordinate(let field, let value):
+            return """
+                The neutral patch's \(field) is \(value), which is not a finite number and \
+                cannot describe a rectangle.
+                """
+        case .emptyNeutralPatch(let width, let height):
+            return """
+                The neutral patch measures \(width) × \(height) of the active area. Both \
+                extents must be greater than zero; an empty selection measures no samples.
+                """
+        case .neutralPatchOutsideActiveArea(let originX, let originY, let width, let height):
+            return """
+                The neutral patch at \(originX), \(originY) measuring \(width) × \(height) is \
+                not inside the active image area, whose coordinates run from 0 to 1. It is \
+                refused rather than clamped, because a clamped patch measures different \
+                samples from the ones the record names.
                 """
         case .nonFiniteExposureAdjustment(let ev):
             return """

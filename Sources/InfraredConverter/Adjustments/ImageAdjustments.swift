@@ -11,20 +11,29 @@ import Foundation
 ///
 /// ## Why a record rather than a property
 ///
-/// There are three adjustments today — the orientation correction, the
-/// creative channel mix and the exposure compensation — and this is why the
-/// model was a record from the first one. Every adjustment that follows, the
-/// white-balance choice and tone settings and crop, belongs beside them rather
-/// than as another unrelated field, and the set has to be serialisable **as a
-/// set**: a recipe is "all of these together", not one of them at a time.
+/// There are four adjustments today — the orientation correction, the creative
+/// channel mix, the exposure compensation and the infrared white balance — and
+/// this is why the model was a record from the first one. Every adjustment that
+/// follows, tone settings and crop among them, belongs beside them rather than
+/// as another unrelated field, and the set has to be serialisable **as a set**:
+/// a recipe is "all of these together", not one of them at a time.
+///
+/// The white balance is the first adjustment that is not applied to the
+/// retained reduced preview — it is upstream of demosaicing, so changing it
+/// re-prepares that preview from the retained normalised mosaic. That changes
+/// what the workspace *schedules*, and deliberately nothing about this model:
+/// it is a field like the other three, one request is still one complete
+/// state, and the export still takes the whole record and nothing else. See
+/// `docs/decisions/0019-interactive-white-balance.md`.
 ///
 /// It is also what makes one render request mean one complete state. The
-/// workspace never asks for "the new orientation", "the new mix" or "the new
-/// exposure"; it asks for the whole record, so a burst of changes to any of
-/// them — a slider drag included — collapses to one newest state and nothing
-/// in between is ever rendered or written. See
-/// `docs/decisions/0016-interactive-channel-mixer.md` and
-/// `docs/decisions/0017-interactive-exposure.md`.
+/// workspace never asks for "the new orientation", "the new mix", "the new
+/// exposure" or "the new patch"; it asks for the whole record, so a burst of
+/// changes to any of them — a slider drag included — collapses to one newest
+/// state and nothing in between is ever rendered or written. See
+/// `docs/decisions/0016-interactive-channel-mixer.md`,
+/// `docs/decisions/0017-interactive-exposure.md` and
+/// `docs/decisions/0019-interactive-white-balance.md`.
 ///
 /// This is the first step toward the versioned `InfraredRecipe` the project
 /// will need. It is deliberately not that format: a recipe also references
@@ -56,12 +65,13 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// 1    orientation
     /// 2    orientation, channelMix
     /// 3    orientation, channelMix, exposureEV
+    /// 4    orientation, channelMix, exposureEV, whiteBalance
     /// ```
     ///
-    /// Versions 2 and 3 exist because a channel mix and an exposure each change
-    /// the rendered image, and the rule below says an image-affecting field
-    /// needs its own version. Version 1 and 2 records still read, as the
-    /// migration in `init(from:)` describes.
+    /// Versions 2, 3 and 4 exist because a channel mix, an exposure and a white
+    /// balance each change the rendered image, and the rule below says an
+    /// image-affecting field needs its own version. Version 1, 2 and 3 records
+    /// still read, as the migration in `init(from:)` describes.
     ///
     /// Derived from `PersistedSchemaVersion.current` rather than written as a
     /// literal, so the list of versions this build reads and the version it
@@ -113,17 +123,37 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// `docs/decisions/0017-interactive-exposure.md`.
     public var exposure: UserExposureAdjustment
 
+    /// The infrared white balance the user chose, as **intent**:
+    /// `.defaultNeutralPatch`, or a neutral rectangle they picked.
+    ///
+    /// Resolved into an active-area region and then into gains by the RAW
+    /// front half, every time, for the preview and for the export alike. The
+    /// gains are never stored here and never persisted. See
+    /// `docs/decisions/0019-interactive-white-balance.md`.
+    ///
+    /// It is the one adjustment that is **upstream of demosaicing**: changing
+    /// it cannot be applied to the retained reduced preview and re-prepares
+    /// that preview from the retained normalised mosaic instead. That is a
+    /// scheduling fact, not a modelling one — it is a field of this record like
+    /// the other three, and one request still means one complete state.
+    ///
+    /// Its default is not the identity. `.defaultNeutralPatch` measures real
+    /// samples and produces real multipliers; see `isDefault`.
+    public var whiteBalance: UserWhiteBalanceAdjustment
+
     /// Builds a record of the user's decisions at this build's schema version.
     ///
     /// There is deliberately no version parameter. See `schemaVersion`.
     public init(
         orientation: UserOrientationAdjustment = .identity,
         channelMix: UserChannelMixAdjustment = .identity,
-        exposure: UserExposureAdjustment = .neutral
+        exposure: UserExposureAdjustment = .neutral,
+        whiteBalance: UserWhiteBalanceAdjustment = .defaultNeutralPatch
     ) {
         self.orientation = orientation
         self.channelMix = channelMix
         self.exposure = exposure
+        self.whiteBalance = whiteBalance
     }
 
     /// A freshly opened file's adjustments: the user has decided nothing.
@@ -134,30 +164,66 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// capture, not because anything decided it is not one.
     public static let none = ImageAdjustments()
 
-    /// Whether this record has **no net effect on the image**.
-    ///
-    /// Every adjustment it holds is the identity: no orientation correction on
-    /// top of what the file records, no creative channel remapping, and
-    /// exactly `0 EV`. It is one question about the whole record, because a
-    /// record that leaves the geometry and the channels alone and lifts the
-    /// exposure by a tenth of a stop does affect the image.
-    ///
-    /// Three things it does **not** mean, each of which it has been read as:
+    /// Whether every adjustment in this record is the value a freshly opened
+    /// file with no sidecar gets.
     ///
     /// ```text
-    /// "the user decided nothing"      identity is a decision a person can
-    ///                                 reach and save — Reset, or Identity on
-    ///                                 the mix control
-    /// "nothing is on disk"            identity is written like any other
-    ///                                 state; see ADR 0013, Decision 6
-    /// "no provenance was recorded"    an .explicit matrix that happens to be
-    ///                                 the identity has no net effect and is
-    ///                                 still not `.identity`
+    /// orientation    no correction on top of what the file records
+    /// channelMix     no creative remapping
+    /// exposure       exactly 0 EV
+    /// whiteBalance   the application's default centred neutral patch
     /// ```
     ///
-    /// It compares net effects, and nothing else.
-    public var isIdentity: Bool {
-        orientation.isIdentity && channelMix.isIdentity && exposure.isIdentity
+    /// ## It replaced `isIdentity`, and the difference matters
+    ///
+    /// This property used to be called `isIdentity` and meant **no net effect
+    /// on the image**. That reading survived three adjustments and died on the
+    /// fourth: the default white balance estimates real multipliers from real
+    /// samples, so `ImageAdjustments.none` visibly changes the photograph, and
+    /// a property claiming otherwise would have been false for every record in
+    /// the application.
+    ///
+    /// The honest split is between two different questions, and only one of
+    /// them can be answered from a record:
+    ///
+    /// ```text
+    /// isDefault        "has the user departed from the defaults?"
+    ///                  a fact about this record. Answerable here.
+    ///
+    /// has no effect    "would rendering with these adjustments change the
+    ///                  pixels?" Not answerable here at all: the white balance
+    ///                  is intent, and whether its gains come out as 1,1,1,1
+    ///                  depends on the photograph. Pretending otherwise would
+    ///                  be exactly the kind of plausible-looking claim this
+    ///                  project refuses to make.
+    /// ```
+    ///
+    /// So this is a question about **decisions**, not about pixels.
+    ///
+    /// Two things it does *not* mean, each of which `isIdentity` was read as:
+    ///
+    /// ```text
+    /// "the user decided nothing"      the defaults are states a person can
+    ///                                 deliberately reach and save — Reset
+    ///                                 Orientation, Identity, Reset Exposure,
+    ///                                 Reset White Balance
+    /// "nothing is on disk"            a default record is written like any
+    ///                                 other; see ADR 0013, Decision 6
+    /// ```
+    /// It compares each field against **its default value**, not against its
+    /// net effect. An `.explicit` matrix that happens to be the identity
+    /// leaves the channels alone and is still not `.identity`: it carries
+    /// different provenance and persists differently, so a record holding one
+    /// is not a record of the defaults. That is the same distinction
+    /// `UserChannelMixAdjustment.isIdentity` deliberately does not make.
+    ///
+    /// Equivalent to `self == .none`, and written out so that adding a field
+    /// without deciding what its default is fails to compile here.
+    public var isDefault: Bool {
+        orientation == .identity
+            && channelMix == .identity
+            && exposure == .neutral
+            && whiteBalance == .defaultNeutralPatch
     }
 }
 
@@ -186,14 +252,15 @@ public struct ImageAdjustments: Equatable, Sendable {
 /// requires a new schema version, and an older client must refuse that
 /// version rather than read around it.**
 ///
-/// The rule has now been applied twice rather than merely written down.
+/// The rule has now been applied three times rather than merely written down.
 /// `channelMix` changes the rendered image, so adding it raised the version
-/// from 1 to 2, and `exposureEV` raised it from 2 to 3 — neither was slipped
-/// into an older version as an optional field — and a build that reads only an
-/// older version refuses a newer record outright rather than opening it
-/// without the field. In the other direction, versions 1 and 2 are still read,
-/// because what each absent field meant is known exactly: no remapping, and
-/// `0 EV`.
+/// from 1 to 2, `exposureEV` raised it from 2 to 3, and `whiteBalance` raised
+/// it from 3 to 4 — none was slipped into an older version as an optional
+/// field — and a build that reads only an older version refuses a newer record
+/// outright rather than opening it without the field. In the other direction,
+/// versions 1, 2 and 3 are still read, because what each absent field meant is
+/// known exactly: no remapping, `0 EV`, and the default centred neutral patch
+/// every build of this project estimated from.
 extension ImageAdjustments {
     /// Every schema version this build reads, as a closed set.
     ///
@@ -222,11 +289,13 @@ extension ImageAdjustments {
         case channelMix = 2
         /// `orientation`, `channelMix` and `exposureEV`.
         case exposure = 3
+        /// `orientation`, `channelMix`, `exposureEV` and `whiteBalance`.
+        case whiteBalance = 4
 
         /// The version this build writes. Named explicitly, so adding a case
         /// does not by itself change what is written; a test asserts that it
         /// is the highest case.
-        static let current = PersistedSchemaVersion.exposure
+        static let current = PersistedSchemaVersion.whiteBalance
 
         /// The first version any build of this project wrote.
         static let first = PersistedSchemaVersion.orientationOnly
@@ -239,6 +308,7 @@ extension ImageAdjustments: Codable {
         case orientation
         case channelMix
         case exposureEV
+        case whiteBalance
     }
 
     /// Reads a persisted record, refusing anything it cannot fully understand
@@ -261,17 +331,27 @@ extension ImageAdjustments: Codable {
     /// ## The migrations
     ///
     /// ```text
-    /// v1    orientation                        → channelMix = .identity, exposure = 0 EV
-    /// v2    orientation, channelMix            → exposure = 0 EV
-    /// v3    orientation, channelMix, exposureEV → read as written
+    /// v1    orientation          → mix .identity, 0 EV, default neutral patch
+    /// v2    + channelMix         → 0 EV, default neutral patch
+    /// v3    + exposureEV         → default neutral patch
+    /// v4    + whiteBalance       → read as written
     /// ```
     ///
-    /// Version 1 predates the creative mix and versions 1 and 2 predate the
-    /// exposure control, so such a record describes a photograph that was
-    /// rendered with no remapping and at `0 EV` — which the workspace always
-    /// passed. Those are the states the record was actually saved in. That
-    /// makes this a **migration** rather than a default: it is not a guess
-    /// about a missing field, it is what the absent field meant.
+    /// Version 1 predates the creative mix, versions 1 and 2 predate the
+    /// exposure control, and versions 1 to 3 predate the white-balance picker.
+    /// Such a record describes a photograph that was rendered with no
+    /// remapping, at `0 EV`, and white-balanced from the application's centred
+    /// neutral patch — which is what the workspace always did. Those are the
+    /// states the record was actually saved in. That makes this a
+    /// **migration** rather than a default: it is not a guess about a missing
+    /// field, it is what the absent field meant.
+    ///
+    /// The white-balance migration is the one worth stating out loud, because
+    /// the tempting wrong answer is close by. An older record migrates to
+    /// `.defaultNeutralPatch` — the *same deterministic centred patch* — and
+    /// **not** to identity gains. Identity gains would open every previously
+    /// saved photograph with a different white balance from the one it was
+    /// saved with, and nothing would say so.
     ///
     /// A record that carries a field its version does not have is a different
     /// thing entirely and is refused. Reading it would break the rule below in
@@ -320,22 +400,37 @@ extension ImageAdjustments: Codable {
         case .orientationOnly:
             try Self.refuse(.channelMix, in: container, schemaVersion: version)
             try Self.refuse(.exposureEV, in: container, schemaVersion: version)
+            try Self.refuse(.whiteBalance, in: container, schemaVersion: version)
             // The migration. Not a default for a field that went missing: an
-            // absent mix in version 1 *is* the identity, and an absent exposure
-            // *is* 0 EV, because version 1 rendered exactly that.
-            self.init(orientation: orientation, channelMix: .identity, exposure: .neutral)
+            // absent mix in version 1 *is* the identity, an absent exposure
+            // *is* 0 EV, and an absent white balance *is* the default centred
+            // patch, because version 1 rendered exactly that.
+            self.init(
+                orientation: orientation,
+                channelMix: .identity,
+                exposure: .neutral,
+                whiteBalance: .defaultNeutralPatch
+            )
 
         case .channelMix:
             try Self.refuse(.exposureEV, in: container, schemaVersion: version)
+            try Self.refuse(.whiteBalance, in: container, schemaVersion: version)
             let channelMix = try Self.require(
                 UserChannelMixAdjustment.self, .channelMix,
                 in: container, schemaVersion: version
             )
-            // The migration: version 2 predates the exposure control and
-            // rendered at 0 EV.
-            self.init(orientation: orientation, channelMix: channelMix, exposure: .neutral)
+            // The migration: version 2 predates the exposure control and the
+            // white-balance picker; it rendered at 0 EV from the default
+            // centred patch.
+            self.init(
+                orientation: orientation,
+                channelMix: channelMix,
+                exposure: .neutral,
+                whiteBalance: .defaultNeutralPatch
+            )
 
         case .exposure:
+            try Self.refuse(.whiteBalance, in: container, schemaVersion: version)
             let channelMix = try Self.require(
                 UserChannelMixAdjustment.self, .channelMix,
                 in: container, schemaVersion: version
@@ -344,7 +439,34 @@ extension ImageAdjustments: Codable {
                 UserExposureAdjustment.self, .exposureEV,
                 in: container, schemaVersion: version
             )
-            self.init(orientation: orientation, channelMix: channelMix, exposure: exposure)
+            // The migration: version 3 predates the white-balance picker and
+            // rendered from the default centred patch.
+            self.init(
+                orientation: orientation,
+                channelMix: channelMix,
+                exposure: exposure,
+                whiteBalance: .defaultNeutralPatch
+            )
+
+        case .whiteBalance:
+            let channelMix = try Self.require(
+                UserChannelMixAdjustment.self, .channelMix,
+                in: container, schemaVersion: version
+            )
+            let exposure = try Self.require(
+                UserExposureAdjustment.self, .exposureEV,
+                in: container, schemaVersion: version
+            )
+            let whiteBalance = try Self.require(
+                UserWhiteBalanceAdjustment.self, .whiteBalance,
+                in: container, schemaVersion: version
+            )
+            self.init(
+                orientation: orientation,
+                channelMix: channelMix,
+                exposure: exposure,
+                whiteBalance: whiteBalance
+            )
         }
     }
 
@@ -384,14 +506,18 @@ extension ImageAdjustments: Codable {
     ///
     /// Nothing else is possible: no in-memory record carries any other
     /// version, which is what makes every publicly constructible value
-    /// round-trip. A migrated version 1 or 2 record is therefore written back
-    /// as version 3 the next time it is saved — with the identity mix and the
-    /// `0 EV` it was migrated to, which is the state it was already in.
+    /// round-trip. A migrated version 1, 2 or 3 record is therefore written
+    /// back as version 4 the next time it is saved — with the identity mix, the
+    /// `0 EV` and the default neutral patch it was migrated to, which is the
+    /// state it was already in. Reading rewrites nothing: an older record is
+    /// upgraded on disk only when the user's next decision renders and is
+    /// saved.
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(Self.currentSchemaVersion, forKey: .schemaVersion)
         try container.encode(orientation, forKey: .orientation)
         try container.encode(channelMix, forKey: .channelMix)
         try container.encode(exposure, forKey: .exposureEV)
+        try container.encode(whiteBalance, forKey: .whiteBalance)
     }
 }

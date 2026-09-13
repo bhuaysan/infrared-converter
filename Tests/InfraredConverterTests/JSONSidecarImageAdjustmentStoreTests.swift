@@ -219,7 +219,7 @@ struct JSONSidecarImageAdjustmentStoreTests {
 
     /// A sidecar written by the build before the channel mix existed. It is
     /// read, not refused: what its absent mix meant is known exactly.
-    @Test("A version 1 sidecar loads with the identity mix")
+    @Test("A version 1 sidecar loads with the identity mix, 0 EV and the default patch")
     func aVersionOneSidecarMigrates() throws {
         try Self.withSandbox { sandbox in
             try sandbox.writeSidecar(
@@ -238,21 +238,22 @@ struct JSONSidecarImageAdjustmentStoreTests {
             try #expect(sandbox.sidecarText().contains("\"schemaVersion\": 1"))
             #expect(!(try sandbox.sidecarText().contains("channelMix")))
 
-            // And the next save writes version 3, with the state it migrated
+            // And the next save writes version 4, with the state it migrated
             // to.
             try Self.store.save(loaded, for: sandbox.raw)
             let text = try sandbox.sidecarText()
-            #expect(text.contains("\"schemaVersion\" : 3"))
+            #expect(text.contains("\"schemaVersion\" : 4"))
             #expect(text.contains("\"identity\""))
             #expect(text.contains("\"exposureEV\" : 0"))
+            #expect(text.contains("\"defaultNeutralPatch\""))
             try #expect(Self.store.load(for: sandbox.raw) == loaded)
             #expect(sandbox.rawIsUnchanged)
         }
     }
 
-    // MARK: - Schema version 3, through a real file
+    // MARK: - Schema versions 3 and 4, through a real file
 
-    @Test("A version 2 sidecar loads at 0 EV, and its next save is version 3")
+    @Test("A version 2 sidecar loads at 0 EV and the default patch, and saves as version 4")
     func aVersionTwoSidecarMigrates() throws {
         try Self.withSandbox { sandbox in
             let original = """
@@ -264,14 +265,16 @@ struct JSONSidecarImageAdjustmentStoreTests {
             #expect(loaded.orientation == .halfTurn)
             #expect(loaded.channelMix == .redBlueSwap)
             #expect(loaded.exposure == .neutral)
+            #expect(loaded.whiteBalance == .defaultNeutralPatch)
             // Reading migrates in memory and writes nothing.
             try #expect(sandbox.sidecarText() == original)
 
             try Self.store.save(loaded, for: sandbox.raw)
             let text = try sandbox.sidecarText()
-            #expect(text.contains("\"schemaVersion\" : 3"))
+            #expect(text.contains("\"schemaVersion\" : 4"))
             #expect(text.contains("\"exposureEV\" : 0"))
             #expect(text.contains("\"redBlueSwap\""))
+            #expect(text.contains("\"defaultNeutralPatch\""))
             try #expect(Self.store.load(for: sandbox.raw) == loaded)
             #expect(sandbox.rawIsUnchanged)
         }
