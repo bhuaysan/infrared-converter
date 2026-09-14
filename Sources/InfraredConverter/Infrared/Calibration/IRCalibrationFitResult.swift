@@ -147,6 +147,12 @@ public struct IRCalibrationFitMetrics: Equatable, Sendable {
 }
 
 /// Which algorithm produced a transform.
+///
+/// Stored so that a reader knows what produced a matrix — and so that a build
+/// can tell whether it is able to **re-derive** one. A fit whose method this
+/// build does not implement cannot be checked against its own evidence, and
+/// ``IRCalibrationFitVerifier`` refuses it rather than accepting a matrix on
+/// the strength of what the file says about itself.
 public struct IRCalibrationFitMethod: Equatable, Sendable {
 
     public let algorithm: String
@@ -162,6 +168,20 @@ public struct IRCalibrationFitMethod: Equatable, Sendable {
         algorithm: IRCalibrationMatrixSolver.algorithm,
         version: IRCalibrationMatrixSolver.algorithmVersion
     )
+
+    /// Whether this build can recompute a fit made by this method.
+    ///
+    /// True only for ``current``. There is one solver here and no archive of
+    /// retired ones; a historical algorithm would have to be implemented to be
+    /// reproducible, and implementing it is what would make an "unverified but
+    /// historical" status meaningful. Until then the conservative answer is the
+    /// honest one: this build cannot check that fit, so it will not carry it.
+    ///
+    /// Adding a second reproducible method is a deliberate act — a case here,
+    /// and a solver that can still produce its coefficients — not something a
+    /// version bump does by itself. See
+    /// `docs/decisions/0022-calibration-evidence-and-measurement-protocol.md`.
+    public var isReproducibleByThisBuild: Bool { self == .current }
 
     public var identity: String { "\(algorithm)@v\(version)" }
 }

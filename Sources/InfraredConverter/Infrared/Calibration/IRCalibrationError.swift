@@ -60,6 +60,15 @@ public enum IRCalibrationError: Error, Equatable {
 
     /// A chart quadrilateral that cannot produce patch regions.
     case invalidChartGeometry(reason: String)
+
+    /// The stored matrix, residuals or solver diagnostics do not follow from
+    /// the stored evidence and reference dataset.
+    ///
+    /// The refusal that makes a calibration an *artefact* rather than a matrix
+    /// with paperwork beside it: the transform is recomputed from the evidence
+    /// when a calibration is constructed, and a fit that cannot be re-derived
+    /// is not accepted. See ``IRCalibrationFitVerifier``.
+    case unverifiableFit(IRCalibrationFitVerificationFailure)
 }
 
 extension IRCalibrationError: LocalizedError {
@@ -94,6 +103,8 @@ extension IRCalibrationError: LocalizedError {
             return "This calibration's error metrics do not match its measurements."
         case .invalidChartGeometry:
             return "That is not a usable calibration chart outline."
+        case .unverifiableFit(let failure):
+            return failure.errorDescription
         }
     }
 
@@ -180,6 +191,9 @@ extension IRCalibrationError: LocalizedError {
 
         case .invalidChartGeometry(let reason):
             return reason
+
+        case .unverifiableFit(let failure):
+            return failure.failureReason
         }
     }
 }

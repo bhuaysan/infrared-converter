@@ -30,6 +30,19 @@ import Foundation
 /// between them is checked when it is constructed rather than assumed when it
 /// is read.
 ///
+/// ## The matrix is re-derived, not believed
+///
+/// Carrying the evidence is not the same as being justified by it. Constructing
+/// a calibration therefore **recomputes** the transform from the measurements
+/// and the reference dataset, through the one fitter this project has, and
+/// refuses the artefact unless the stored matrix, residuals and solver
+/// diagnostics agree with what comes out. See ``IRCalibrationFitVerifier``.
+///
+/// That runs on every path, including decoding, so the guarantee holds at the
+/// file boundary too: a hand-edited `.ircalibration.json` cannot keep a set of
+/// honest measurements and honest-looking residuals beside a matrix that has
+/// nothing to do with either.
+///
 /// ## Re-fitting
 ///
 /// The measurement set keeps its own identity. Re-fitting the same evidence —
@@ -132,6 +145,26 @@ public struct IRCalibration: Equatable, Sendable, Identifiable {
                     the evidence has \(measurements.excludedPatchCount).
                     """
             )
+        }
+
+        // Everything above is structural: it checks that the three parts
+        // name each other. None of it looks at a single coefficient, and a
+        // hand-edited file that changes the matrix while leaving the evidence
+        // and the residuals alone passes all of it.
+        //
+        // So the fit is recomputed from the evidence and the reference, and
+        // the stored matrix, residuals and solver diagnostics are held against
+        // what comes out. It runs here, on the one path every calibration
+        // takes — a fresh fit and a decoded file both arrive through this
+        // initialiser — which is what makes the claim true that a file cannot
+        // describe a calibration that could not have been constructed in
+        // memory.
+        do {
+            try IRCalibrationFitVerifier().verify(
+                fit, measurements: measurements, reference: reference
+            )
+        } catch {
+            throw .unverifiableFit(error)
         }
 
         self.id = id

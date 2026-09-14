@@ -52,23 +52,91 @@ public struct IRCalibrationFitter: Sendable {
             )
         }
 
+        let derivation = try Self.derive(measurements: measurements, reference: reference)
+
+        var residuals: [IRCalibrationPatchResidual] = []
+        residuals.reserveCapacity(derivation.residuals.count)
+        for residual in derivation.residuals {
+            residuals.append(
+                try IRCalibrationPatchResidual(
+                    patch: residual.patch,
+                    red: residual.red,
+                    green: residual.green,
+                    blue: residual.blue
+                )
+            )
+        }
+
+        return IRCalibrationFitResult(
+            matrix: derivation.matrix,
+            sourceMeasurementID: measurements.id,
+            referenceDataset: reference.identity,
+            whiteBalancePolicy: measurements.whiteBalancePolicy,
+            method: .current,
+            conditioning: derivation.conditioning,
+            metrics: try IRCalibrationFitMetrics(
+                residuals: residuals,
+                excludedPatchCount: measurements.excludedPatchCount
+            ),
+            fittedAt: now
+        )
+    }
+
+    // MARK: - The arithmetic, separated from the packaging
+
+    /// One patch's signed residual, before it becomes an
+    /// ``IRCalibrationPatchResidual``.
+    struct DerivedResidual: Equatable, Sendable {
+        let patch: IRCalibrationTargetPatchID
+        let red: Double
+        let green: Double
+        let blue: Double
+    }
+
+    /// What deriving a transform from evidence actually produces: a matrix,
+    /// the conditioning of the data it came from, and one residual per fitted
+    /// patch, in fitted order.
+    struct Derivation: Equatable, Sendable {
+        let matrix: RAWColorMatrix3x3
+        let conditioning: IRCalibrationConditioning
+        let residuals: [DerivedResidual]
+    }
+
+    /// The one place a transform is derived from evidence.
+    ///
+    /// Separated from ``fit(measurements:reference:now:)`` so that
+    /// ``IRCalibrationFitVerifier`` can recompute a stored artefact's numbers
+    /// without a second implementation of the same arithmetic — and without
+    /// building the ``IRCalibrationFitResult`` packaging it is about to
+    /// compare against. There is one solver, one white-balance derivation and
+    /// one green collapse in this project, and everything that needs them goes
+    /// through here.
+    ///
+    /// It does not compare targets: pairing a chart's measurements with
+    /// another chart's reference values is a rule about the record, enforced
+    /// by `fit` and by ``IRCalibration``, not a property of the arithmetic.
+    static func derive(
+        measurements: IRCalibrationMeasurementSet,
+        reference: IRCalibrationReferenceDataset
+    ) throws(IRCalibrationFitError) -> Derivation {
         let included = measurements.includedPatches
-        guard !included.isEmpty else { throw IRCalibrationFitError.noIncludedPatches }
+        guard !included.isEmpty else { throw .noIncludedPatches }
 
         let gains = try Self.sessionGains(for: measurements)
 
+        var patches: [IRCalibrationTargetPatchID] = []
         var samples: [IRCalibrationMatrixSolver.Sample] = []
+        patches.reserveCapacity(included.count)
         samples.reserveCapacity(included.count)
 
         for patch in included {
             guard let referenceValue = reference.value(for: patch.patch) else {
-                throw IRCalibrationFitError.missingReferenceValue(
-                    patch: patch.patch.rawValue
-                )
+                throw .missingReferenceValue(patch: patch.patch.rawValue)
             }
             let camera = try Self.cameraRGB(
                 for: patch, gains: gains, policy: measurements.domain.greenPolicy
             )
+            patches.append(patch.patch)
             samples.append(
                 IRCalibrationMatrixSolver.Sample(
                     label: patch.patch.rawValue,
@@ -82,32 +150,26 @@ public struct IRCalibrationFitter: Sendable {
 
         let solution = try IRCalibrationMatrixSolver().solve(samples)
 
-        var residuals: [IRCalibrationPatchResidual] = []
+        var residuals: [DerivedResidual] = []
         residuals.reserveCapacity(samples.count)
-        for sample in samples {
+        for (patch, sample) in zip(patches, samples) {
             let fitted = Self.apply(solution.matrix, to: sample.input)
-            residuals.append(
-                try IRCalibrationPatchResidual(
-                    patch: try IRCalibrationTargetPatchID(sample.label),
-                    red: fitted.x - sample.output.x,
-                    green: fitted.y - sample.output.y,
-                    blue: fitted.z - sample.output.z
+            let red = fitted.x - sample.output.x
+            let green = fitted.y - sample.output.y
+            let blue = fitted.z - sample.output.z
+            for (name, value) in [("red", red), ("green", green), ("blue", blue)]
+            where !value.isFinite {
+                throw .nonFiniteSample(
+                    patch: patch.rawValue, field: "residual \(name)", value: value
                 )
+            }
+            residuals.append(
+                DerivedResidual(patch: patch, red: red, green: green, blue: blue)
             )
         }
 
-        return IRCalibrationFitResult(
-            matrix: solution.matrix,
-            sourceMeasurementID: measurements.id,
-            referenceDataset: reference.identity,
-            whiteBalancePolicy: measurements.whiteBalancePolicy,
-            method: .current,
-            conditioning: solution.conditioning,
-            metrics: try IRCalibrationFitMetrics(
-                residuals: residuals,
-                excludedPatchCount: measurements.excludedPatchCount
-            ),
-            fittedAt: now
+        return Derivation(
+            matrix: solution.matrix, conditioning: solution.conditioning, residuals: residuals
         )
     }
 
