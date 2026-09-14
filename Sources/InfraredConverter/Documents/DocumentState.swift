@@ -95,6 +95,24 @@ import Observation
 /// `ImageAdjustments`. It travels the same road: one complete state per
 /// request, persisted only after that state has rendered.
 ///
+/// ## Profile definitions come from elsewhere, and can change underfoot
+///
+/// This type consumes an `IRCaptureProfileRegistry` and never reads the profile
+/// folder: `IRCaptureProfileLibrary` owns the definitions and hands a new
+/// registry here through `updateCaptureProfiles(_:)` when one is created,
+/// edited or deleted. Two things follow, and both are deliberate.
+///
+/// ```text
+/// the profile ID changed          a decision — .pending, rendered, then written
+/// the profile DEFINITION changed  not this photograph's decision — re-rendered
+///                                 for provenance, and no sidecar write at all
+/// ```
+///
+/// A render therefore writes the sidecar only when it settles a `.pending`
+/// decision. Renaming a profile must not rewrite a single photograph's record,
+/// and editing one must not touch a single adjustment. See
+/// `docs/decisions/0021-user-capture-profile-library.md`.
+///
 /// They are fields of one `ImageAdjustments` record, and every request is that
 /// whole record. Nothing here renders "the new mix", "the new rotation" or
 /// "the new exposure": a burst of changes to any control — a slider drag is
@@ -706,11 +724,22 @@ final class DocumentState {
     /// growing fake profiles to make the tests possible. Production passes
     /// `IRCaptureProfileRegistry.builtin`, which holds exactly one.
     ///
-    /// It is consulted in two places and nowhere else: when a file is opened,
-    /// and when a user picks a profile. No processing stage sees it, and an
-    /// export never does — an export carries an already-resolved profile. See
+    /// It is consulted in three places and nowhere else: when a file is
+    /// opened, when a user picks a profile, and when the profile library
+    /// replaces it. No processing stage sees it, and an export never does — an
+    /// export carries an already-resolved profile. See
     /// `docs/decisions/0020-ir-capture-profile-foundation.md`, Decision 10.
-    private let registry: IRCaptureProfileRegistry
+    ///
+    /// It is a `var` because the set of profiles is no longer fixed: a person
+    /// can create, edit and delete them while a photograph is open. It is still
+    /// **replaced, never mutated** — `IRCaptureProfileRegistry` is an immutable
+    /// value — and it is replaced through exactly one path,
+    /// `updateCaptureProfiles(_:)`, so this document is never reading a
+    /// definition that changed underneath it. This document does not own the
+    /// library and never reads the profile folder; `IRCaptureProfileLibrary`
+    /// does both. See
+    /// `docs/decisions/0021-user-capture-profile-library.md`.
+    private var registry: IRCaptureProfileRegistry
     private let render: PreviewRender
     private let prepareSource: SourcePreparation
 
@@ -821,6 +850,10 @@ final class DocumentState {
         /// already `status`'s generation; if a newer open arrives, this one is
         /// obsolete and must never install anything.
         let generation: Int
+        /// The profile a recovery asked for, when this open is one. It waits
+        /// with the open it belongs to: a recovery of a file that is still
+        /// settling is still that file's recovery when its turn comes.
+        let captureProfileOverride: IRCaptureProfileID?
     }
 
     private var deferredOpen: DeferredOpen?
@@ -871,7 +904,159 @@ final class DocumentState {
     /// entry: a profile identifier a user typed would name nothing, and a
     /// photograph pointing at nothing is exactly the unresolvable state this
     /// milestone refuses to create on purpose.
+    ///
+    /// Sorted by **identity**, which is what makes it reproducible. A picker
+    /// wants `captureProfileChoices` instead: that one is sorted for reading,
+    /// by a field a person can rename.
     var availableCaptureProfiles: [IRCaptureProfile] { registry.allProfiles }
+
+    /// One profile as a picker sees it: the definition, and whether it may be
+    /// applied to the photograph that is open.
+    ///
+    /// Applicability travels with the profile rather than being recomputed by
+    /// a view, so nothing on screen can invent its own idea of whether a
+    /// profile fits — and so a refusal can be **shown** rather than discovered
+    /// by pressing something that does nothing.
+    struct CaptureProfileChoice: Identifiable {
+        let profile: IRCaptureProfile
+        /// Whether this profile describes the open photograph's camera. Always
+        /// `.matches` when nothing is open: there is nothing to check against.
+        let applicability: IRCaptureProfileApplicability
+
+        var id: IRCaptureProfileID { profile.id }
+
+        /// Whether selecting it would be accepted.
+        var isApplicable: Bool { applicability.isApplicable }
+
+        /// Whether this is a profile the application ships rather than one a
+        /// person defined.
+        var isBuiltin: Bool { profile.id.isReserved }
+
+        /// Why it may not be applied, in words, or `nil` when it may.
+        var refusalDescription: String? {
+            applicability.error.flatMap { $0.failureReason ?? $0.errorDescription }
+        }
+    }
+
+    /// Every profile, ordered for a menu, each paired with whether it fits the
+    /// open photograph.
+    ///
+    /// Built-in profiles first, then user profiles by display name. A
+    /// mismatched profile is **listed and disabled**, not hidden: a person who
+    /// created a profile for another body should see that it exists and why it
+    /// cannot be used here, rather than watch it vanish and wonder whether it
+    /// was saved at all.
+    var captureProfileChoices: [CaptureProfileChoice] {
+        let metadata: RAWMetadata? = {
+            guard case .decoded(let loaded) = status else { return nil }
+            return loaded.metadata
+        }()
+        return registry.profilesForDisplay.map { profile in
+            CaptureProfileChoice(
+                profile: profile,
+                applicability: metadata.map { profile.applicability(to: $0) } ?? .matches
+            )
+        }
+    }
+
+    /// The camera the open photograph records, where it records one.
+    ///
+    /// Offered so that creating a profile while a photograph is open can
+    /// **prefill** the make and model a person would otherwise retype from the
+    /// inspector. It is convenience and nothing more: nothing in this project
+    /// reads a camera name and creates or selects a profile from it. A camera
+    /// says nothing about which filter was on the lens or what was done to the
+    /// sensor. See
+    /// `docs/decisions/0020-ir-capture-profile-foundation.md`, Decision 4.
+    ///
+    /// The decoder's normalised spellings are preferred where it has them, for
+    /// the same reason `IRCameraMatch` prefers them: they are the spellings a
+    /// later match is most likely to agree with.
+    var currentCameraIdentity: (make: String, model: String)? {
+        guard case .decoded(let loaded) = status else { return nil }
+        let identity = loaded.metadata.identity
+        guard let make = Self.nonEmpty(identity.normalizedMake ?? identity.make),
+              let model = Self.nonEmpty(identity.normalizedModel ?? identity.model)
+        else { return nil }
+        return (make: make, model: model)
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty
+        else { return nil }
+        return trimmed
+    }
+
+    /// Installs a new set of profile definitions, and re-resolves the open
+    /// photograph against it.
+    ///
+    /// The one path by which the registry is replaced. `IRCaptureProfileLibrary`
+    /// owns the definitions and calls this when a profile is created, edited or
+    /// deleted, so a document never reads the profile folder and never holds a
+    /// registry built at a different moment from every other document's.
+    ///
+    /// ## What it does not do
+    ///
+    /// It does not change a single adjustment. A white balance, an orientation,
+    /// a channel mix and an exposure belong to one photograph, and no profile
+    /// operation may reach them — not even the one that replaces the definition
+    /// this photograph is rendered under.
+    ///
+    /// It does not select a profile either. The photograph keeps the identity
+    /// it had; only the definition that identity resolves to may have changed.
+    /// And it writes nothing: the canonical state is unchanged, so there is
+    /// nothing new to make durable. Renaming a profile must not rewrite a
+    /// single sidecar.
+    func updateCaptureProfiles(_ registry: IRCaptureProfileRegistry) {
+        self.registry = registry
+        reresolveCaptureProfile()
+    }
+
+    /// Re-renders the open photograph under the current definition of the
+    /// profile it already names, when that definition has changed.
+    ///
+    /// ```text
+    /// definition unchanged      nothing happens
+    /// definition changed        re-render, so the inspector stops showing stale
+    ///                           metadata; a changed processing basis re-prepares
+    /// profile no longer stored  the resolved definition is kept in memory
+    /// ```
+    ///
+    /// The last row is the one worth stating. A profile deleted while a
+    /// photograph is open leaves that photograph rendering exactly as it was —
+    /// the resolved definition is a value this document holds — and the
+    /// consequence appears the next time the file is opened, which is where a
+    /// refusal with a remedy belongs. Silently switching it to another profile
+    /// would change the picture on screen and say nothing.
+    ///
+    /// A definition edited so that it no longer describes this camera is
+    /// treated the same way, and for the same reason: the photograph on screen
+    /// was rendered under a profile that did apply, and withdrawing it
+    /// retroactively would take a picture away in response to somebody typing
+    /// in a different window.
+    private func reresolveCaptureProfile() {
+        guard case .decoded(var loaded) = status, loaded.isAdjustable,
+              let renderer, let preparer, let source = loaded.source,
+              let resolved = try? registry.profile(for: loaded.state.captureProfile),
+              resolved != loaded.captureProfile
+        else { return }
+
+        if let refusal = resolved.applicability(to: loaded.metadata).error {
+            Self.log(refusal, path: "Capture profile", url: loaded.url)
+            return
+        }
+
+        loaded.captureProfile = resolved
+        status = .decoded(loaded)
+        requestWork(
+            for: loaded.state,
+            captureProfile: resolved,
+            source: source,
+            renderer: renderer,
+            preparer: preparer
+        )
+    }
 
     /// The user's orientation correction for the open file, or `.identity`
     /// when nothing is open.
@@ -984,6 +1169,18 @@ final class DocumentState {
     /// waits: two different RAW files have two different destinations and no
     /// race between them. See `docs/decisions/0014-adjustment-lifecycle.md`.
     func open(_ url: URL) {
+        open(url, captureProfileOverride: nil)
+    }
+
+    /// The open above, plus the one thing a recovery needs: a capture profile
+    /// that replaces the one the sidecar names.
+    ///
+    /// Private, because the only caller is
+    /// `useUncalibratedCaptureProfile()`. An override is an **explicit user
+    /// edit** — "open this photograph under that profile instead" — and it is
+    /// not something an ordinary open may do, because an ordinary open that
+    /// substituted a profile would be the silent fallback this project refuses.
+    private func open(_ url: URL, captureProfileOverride: IRCaptureProfileID?) {
         decodeTask?.cancel()
         handOverCurrentDocument()
         generation += 1
@@ -994,10 +1191,47 @@ final class DocumentState {
         deferredOpen = nil
 
         guard !isSettling(url) else {
-            deferredOpen = DeferredOpen(url: url, generation: generation)
+            deferredOpen = DeferredOpen(
+                url: url,
+                generation: generation,
+                captureProfileOverride: captureProfileOverride
+            )
             return
         }
-        startDecoding(url, generation: generation)
+        startDecoding(
+            url, generation: generation, captureProfileOverride: captureProfileOverride
+        )
+    }
+
+    /// The profile a photograph refused by its saved capture profile can be
+    /// reopened with, or `nil` when nothing is in that state.
+    ///
+    /// Always the built-in uncalibrated profile, because it is the one profile
+    /// that is guaranteed to exist and to apply to any camera. It is offered
+    /// rather than applied: a substitution nobody asked for is exactly what
+    /// `Status.captureProfileUnusable` exists to prevent.
+    var captureProfileRecovery: IRCaptureProfile? {
+        guard case .captureProfileUnusable = status else { return nil }
+        return registry.uncalibratedProfile
+    }
+
+    /// Reopens a photograph whose saved capture profile could not be used,
+    /// under the built-in uncalibrated profile.
+    ///
+    /// **An explicit user edit, not a fallback.** The distinction is the whole
+    /// of `Status.captureProfileUnusable`: nothing substitutes a profile on its
+    /// own, and this runs because a person pressed something that said what it
+    /// would do.
+    ///
+    /// What follows is the ordinary lifecycle and nothing special. The
+    /// photograph is opened with the new profile and the **saved adjustments
+    /// unchanged** — the white balance, orientation, channel mix and exposure
+    /// are the user's and a profile problem is no reason to touch them — the
+    /// owned pipeline renders it, and the sidecar is written once that render
+    /// has succeeded. A render that refuses writes nothing, as ever.
+    func useUncalibratedCaptureProfile() {
+        guard case .captureProfileUnusable(let url, _) = status else { return }
+        open(url, captureProfileOverride: .builtinUncalibrated)
     }
 
     /// Whether an older generation of this RAW file still has a write to make.
@@ -1011,7 +1245,9 @@ final class DocumentState {
     /// older generation of that file has finished writing. Everything the work
     /// needs is passed in, so a deferred start is the same call as an immediate
     /// one.
-    private func startDecoding(_ url: URL, generation: Int) {
+    private func startDecoding(
+        _ url: URL, generation: Int, captureProfileOverride: IRCaptureProfileID? = nil
+    ) {
         let decoder = self.decoder
         let store = self.store
         let registry = self.registry
@@ -1029,13 +1265,18 @@ final class DocumentState {
                 using: decoder,
                 store: store,
                 registry: registry,
+                captureProfileOverride: captureProfileOverride,
                 render: render,
                 prepareSource: prepareSource,
                 previewPolicy: previewPolicy
             ) else { return }
             guard !Task.isCancelled else { return }
             await MainActor.run { [weak self] in
-                self?.apply(outcome, generation: generation)
+                self?.apply(
+                    outcome,
+                    generation: generation,
+                    captureProfileOverride: captureProfileOverride
+                )
             }
         }
     }
@@ -1056,7 +1297,11 @@ final class DocumentState {
         guard !isSettling(deferred.url) else { return }
 
         deferredOpen = nil
-        startDecoding(deferred.url, generation: deferred.generation)
+        startDecoding(
+            deferred.url,
+            generation: deferred.generation,
+            captureProfileOverride: deferred.captureProfileOverride
+        )
     }
 
     /// Decides what happens to the document being replaced.
@@ -1182,11 +1427,12 @@ final class DocumentState {
         using decoder: RAWDecoder,
         store: any PhotographProcessingStore,
         registry: IRCaptureProfileRegistry,
+        captureProfileOverride: IRCaptureProfileID?,
         render: PreviewRender,
         prepareSource: SourcePreparation,
         previewPolicy: PreviewResolutionPolicy
     ) -> Result<Loaded, OpenFailure>? {
-        let state: PhotographProcessingState
+        var state: PhotographProcessingState
         do {
             // `nil` is the ordinary case: no sidecar, so no saved decisions
             // and no saved profile selection, so the default record — the
@@ -1197,6 +1443,15 @@ final class DocumentState {
         } catch {
             log(error, path: "Saved settings", url: url)
             return .failure(.adjustments(DocumentAdjustmentError(url: url, failure: error)))
+        }
+
+        // A recovery: the user has asked for this photograph under a different
+        // profile from the one its sidecar names. It replaces **only** the
+        // profile half — every adjustment the record carries is theirs and is
+        // untouched — and the resulting state then travels the ordinary road,
+        // resolved, rendered, and written once it has rendered.
+        if let captureProfileOverride {
+            state.captureProfile = captureProfileOverride
         }
 
         // Resolved **before** the file is decoded, and for the same reason the
@@ -1824,6 +2079,29 @@ final class DocumentState {
         loaded.persistence = .pending
         status = .decoded(loaded)
 
+        requestWork(
+            for: updated,
+            captureProfile: captureProfile,
+            source: source,
+            renderer: renderer,
+            preparer: preparer
+        )
+    }
+
+    /// Asks for whichever of the two costs a complete state needs.
+    ///
+    /// Split out of `adjustState` so that the **same** scheduling rule serves
+    /// a change of state and a change of a profile's *definition*. The two
+    /// differ in exactly one respect and it is not this one: an adjustment is a
+    /// decision and becomes `.pending`, while a redefinition is not the
+    /// photograph's decision at all and leaves persistence alone.
+    private func requestWork(
+        for state: PhotographProcessingState,
+        captureProfile: IRCaptureProfile,
+        source: WorkspacePreviewPipeline.Source,
+        renderer: PreviewRenderSlot,
+        preparer: SourcePreparationSlot
+    ) {
         // Which of the two costs this state needs is one question with one
         // answer: does the retained preview already describe the white balance
         // **and** the camera-to-working processing being asked for?
@@ -1842,7 +2120,7 @@ final class DocumentState {
         // because the preview carries the profile it was rendered under and the
         // inspector reads it from there.
         let request = SourcePreparationRequest(
-            whiteBalance: updated.adjustments.whiteBalance, captureProfile: captureProfile
+            whiteBalance: state.adjustments.whiteBalance, captureProfile: captureProfile
         )
         if source.whiteBalance != request.whiteBalance
             || source.captureProfile.processingBasis != captureProfile.processingBasis {
@@ -1877,7 +2155,7 @@ final class DocumentState {
                 PreviewRenderRequest(
                     source: source,
                     captureProfile: captureProfile,
-                    adjustments: updated.adjustments
+                    adjustments: state.adjustments
                 )
             )
         }
@@ -2064,7 +2342,9 @@ final class DocumentState {
             // white balance is still the one those pixels describe, and a
             // failed estimate must not be allowed to make it look otherwise.
             // Not eligible to be written either, and the sidecar is untouched.
-            loaded.persistence = .renderRefused
+            if case .pending = loaded.persistence {
+                loaded.persistence = .renderRefused
+            }
             status = .decoded(loaded)
         }
     }
@@ -2164,15 +2444,33 @@ final class DocumentState {
             // adjustments reach the sidecar together or not at all — a profile
             // selection that landed on disk without the state it was rendered
             // with would reopen showing something nobody ever saw.
-            loaded.persistence = write(state, for: url).map {
-                AdjustmentPersistence.saveFailed($0)
-            } ?? .saved
+            //
+            // And only for a render that settles a **decision**. `.pending` is
+            // what a decision looks like on its way to disk; a render made for
+            // any other reason — a profile whose *definition* was edited in the
+            // library, say — has nothing new to make durable, because the
+            // canonical state did not change. Renaming a profile must not
+            // rewrite a single sidecar.
+            if case .pending = loaded.persistence {
+                loaded.persistence = write(state, for: url).map {
+                    AdjustmentPersistence.saveFailed($0)
+                } ?? .saved
+            }
         case .failure(let error):
             Self.log(error, path: "Owned re-render", url: url)
             loaded.owned = .unavailable(RAWPathFailure(stage: .ownedRender, error))
             // Not eligible to be written, and the sidecar is untouched: it
             // still holds the last state that actually rendered.
-            loaded.persistence = .renderRefused
+            //
+            // Only a **pending** decision is refused, for the reason only a
+            // pending decision is written. A render the library asked for
+            // because a profile's definition changed does not make a state
+            // that was already saved unsaved: the sidecar still holds exactly
+            // the state the user decided on, and reporting otherwise would
+            // announce a lost edit that does not exist.
+            if case .pending = loaded.persistence {
+                loaded.persistence = .renderRefused
+            }
         }
         status = .decoded(loaded)
     }
@@ -2258,12 +2556,16 @@ final class DocumentState {
         }
     }
 
-    private func apply(_ outcome: Result<Loaded, OpenFailure>, generation: Int) {
+    private func apply(
+        _ outcome: Result<Loaded, OpenFailure>,
+        generation: Int,
+        captureProfileOverride: IRCaptureProfileID? = nil
+    ) {
         // Ignore a result that a newer selection has already superseded.
         guard generation == self.generation else { return }
 
         switch outcome {
-        case .success(let loaded):
+        case .success(var loaded):
             // Only an adjustable file gets slots. A prepared source nothing
             // can be rendered from gets none, so there is no path by which a
             // control could request work that is known to fail — and no file
@@ -2281,6 +2583,23 @@ final class DocumentState {
                 renderer = nil
                 preparer = nil
             }
+
+            // A recovery is a decision, and it reaches the sidecar the way
+            // every decision does: **after** it has rendered. The initial
+            // render is that render — it ran with the new profile and the saved
+            // adjustments — so there is nothing further to wait for and nothing
+            // extra to render. A file that could not be rendered writes
+            // nothing, exactly as a refused adjustment writes nothing.
+            if captureProfileOverride != nil {
+                if loaded.isAdjustable {
+                    loaded.persistence = write(loaded.state, for: loaded.url).map {
+                        AdjustmentPersistence.saveFailed($0)
+                    } ?? .saved
+                } else {
+                    loaded.persistence = .renderRefused
+                }
+            }
+
             status = .decoded(loaded)
 
         case .failure(.raw(let error)):
