@@ -210,9 +210,28 @@ at construction rather than settled by "last one wins". Which of two definitions
 a photograph meant would otherwise depend on an ordering nobody chose, that can
 differ between machines, and that changes what the photograph looks like.
 
-On disk the ambiguous pair is **both excluded and reported**, rather than one
-being chosen or the whole library being discarded. It is the same judgement as
-the corrupt-file rule below, applied to a different fault.
+Two guarantees, at two levels, and they are not the same guarantee:
+
+```text
+File store         one identity maps to exactly one filename.
+Registry           duplicate identities from any composed source are refused.
+```
+
+In the file store the stronger of the two holds by construction. A profile's
+filename *is* its identity (`profileURL(for:)`), and a payload whose id disagrees
+with the name it was found under is refused rather than reconciled (Decision 3),
+so two files cannot both claim `user.abc`: the second one is either the same
+file or a filename/payload mismatch. The duplicate scan in `loadAll()` therefore
+excludes and reports an ambiguous pair that this store cannot actually produce.
+It stays as defence in depth — the invariant is worth being true of the type
+independently of the two rules that currently imply it — but it is not where the
+guarantee comes from, and no filesystem arrangement was manufactured to make the
+branch reachable.
+
+The **registry's** refusal is the reachable one, and the one that matters: it
+composes sources the store knows nothing about, and an identity claimed twice
+across built-in and user profiles, or within either, is refused at construction
+rather than settled by "last one wins".
 
 The registry keeps two orders. `allProfiles` is sorted by identity and is what
 anything mechanical uses, because a rename cannot disturb it. `profilesForDisplay`
@@ -233,9 +252,27 @@ profile hide an entire library, and ignoring bad files would let a profile
 somebody spent time creating vanish without a word — taking every photograph
 that references it with it.
 
-Only files ending in `.irprofile.json` are scanned at all. A folder may perfectly
+Only files ending in `.irprofile.json` are ours at all. A folder may perfectly
 reasonably contain `.DS_Store`, a note, or a file a future version writes; none of
 those is a broken profile and none is reported as one.
+
+That leaves three outcomes rather than two, and the classification is explicit
+about which is which:
+
+```text
+not our suffix                   foreign      ignored in silence
+our suffix + valid identity      profile      loaded, or reported if it will not load
+our suffix + invalid identity    malformed    reported
+```
+
+`BAD PROFILE!.irprofile.json` wears our suffix: whoever wrote it meant it to be a
+capture profile, and it cannot be addressed because its name does not spell an
+identifier. Collapsing that into "not one of ours" — which is what a single
+`IRCaptureProfileID?` return did until this was split — left a person looking at
+a library missing a profile whose file they could see in the Finder, with nothing
+said. It is now `invalidProfileFilename`, carrying the path and the token, and
+the file is left exactly as it is: no identity is invented for it and nothing is
+renamed.
 
 The built-in profile is not part of any of this. It is a value this build holds
 rather than a file it reads, so a library that is entirely unreadable — or a

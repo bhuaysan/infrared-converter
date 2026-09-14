@@ -77,6 +77,16 @@ public enum IRCaptureProfilePersistenceError: Error {
         url: URL, expected: IRCaptureProfileID, found: IRCaptureProfileID
     )
 
+    /// A file wearing the `.irprofile.json` suffix whose name does not spell a
+    /// valid ``IRCaptureProfileID``.
+    ///
+    /// Not the same fault as a foreign file, and deliberately not the same
+    /// outcome. `notes.txt` is somebody's note; `BAD PROFILE!.irprofile.json`
+    /// is a capture profile that cannot be addressed, and silence about it
+    /// would leave a person staring at a library missing a profile whose file
+    /// they can see.
+    case invalidProfileFilename(url: URL, token: String, reason: String)
+
     /// A profile carries a processing basis that has no wire format, so it was
     /// not written.
     ///
@@ -103,6 +113,8 @@ public enum IRCaptureProfilePersistenceError: Error {
             return url
         case .filenameIdentityMismatch(let url, _, _):
             return url
+        case .invalidProfileFilename(let url, _, _):
+            return url
         case .duplicateIdentifier(_, let paths):
             return paths.first
         case .reservedIdentifier, .unsupportedProcessingBasis, .libraryUnavailable:
@@ -120,7 +132,10 @@ public enum IRCaptureProfilePersistenceError: Error {
         case .filenameIdentityMismatch(_, let expected, _):
             return expected
         case .cannotRead, .cannotDecode, .cannotWrite, .cannotDelete,
-             .cannotCreateDirectory, .libraryUnavailable:
+             .cannotCreateDirectory, .libraryUnavailable, .invalidProfileFilename:
+            // A malformed filename names no identity. That is the fault being
+            // reported, and deriving one from the token would be the very
+            // repair this store does not perform.
             return nil
         }
     }
@@ -137,7 +152,8 @@ public enum IRCaptureProfilePersistenceError: Error {
             return underlying
         case .unsupportedProcessingBasis(_, let underlying):
             return underlying
-        case .reservedIdentifier, .duplicateIdentifier, .filenameIdentityMismatch:
+        case .reservedIdentifier, .duplicateIdentifier, .filenameIdentityMismatch,
+             .invalidProfileFilename:
             return nil
         }
     }
@@ -178,6 +194,8 @@ extension IRCaptureProfilePersistenceError: LocalizedError {
             return "Two capture profile files claim the same identifier."
         case .filenameIdentityMismatch:
             return "A capture profile file is stored under the wrong name."
+        case .invalidProfileFilename:
+            return "A capture profile file has a name that is not a profile identifier."
         case .unsupportedProcessingBasis:
             return "That capture profile's processing cannot be saved."
         case .libraryUnavailable:
@@ -230,6 +248,13 @@ extension IRCaptureProfilePersistenceError: LocalizedError {
                 \(url.lastPathComponent) is named for "\(expected)" and contains "\(found)". \
                 It was not loaded: a profile stored at another profile's address would be \
                 overwritten the next time that one was saved.
+                """
+        case .invalidProfileFilename(let url, let token, let reason):
+            return """
+                \(url.lastPathComponent) is named as a capture profile, and "\(token)" is not \
+                a capture profile identifier: \(reason) It was not loaded, and no identifier \
+                was invented for it. Renaming it to "<identifier>.irprofile.json" — using the \
+                identifier inside the file — makes it loadable again.
                 """
         case .unsupportedProcessingBasis(let id, _):
             return """

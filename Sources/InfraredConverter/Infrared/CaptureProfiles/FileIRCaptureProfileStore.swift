@@ -113,20 +113,71 @@ public struct FileIRCaptureProfileStore: IRCaptureProfileStore {
         Self.profileURL(for: id, in: directory)
     }
 
-    /// The identity a filename claims, or `nil` when the name is not one of
-    /// ours.
+    /// What a filename in the profile folder is.
     ///
-    /// This is also what decides **which files are scanned at all**. The folder
-    /// may perfectly reasonably contain `.DS_Store`, a note a user left
-    /// themselves, or a file a future version writes; none of those is a broken
-    /// profile and none is reported as one. A file that *does* end in
-    /// `.irprofile.json` is ours, and if it will not load, that is a failure
-    /// worth telling somebody about.
-    public static func profileID(forFileNamed name: String) -> IRCaptureProfileID? {
+    /// ```text
+    /// not our suffix                     foreign      ignored in silence
+    /// our suffix + valid identity        profile      loaded, or reported
+    /// our suffix + invalid identity      malformed    reported
+    /// ```
+    ///
+    /// Three outcomes rather than two, because "is this ours?" and "is this
+    /// well-formed?" are different questions and collapsing them loses one of
+    /// the answers. `BAD PROFILE!.irprofile.json` wears our suffix: whoever
+    /// wrote it meant it to be a capture profile, and a store that quietly
+    /// skipped it would leave somebody looking at a library missing a profile
+    /// they can see in the Finder, with nothing said.
+    public enum FilenameClassification: Equatable, Sendable {
+
+        /// Not one of ours. The folder is allowed to contain `.DS_Store`, a
+        /// note somebody left themselves, or a file a future version writes;
+        /// none of those is a broken profile and none is reported as one.
+        case foreign
+
+        /// Ours, and its identity token is well-formed.
+        case profile(IRCaptureProfileID)
+
+        /// Ours by suffix, and its identity token is not a valid
+        /// ``IRCaptureProfileID``. There is no identity to load it under and
+        /// none is invented — the name is reported as it stands.
+        case malformed(token: String, reason: String)
+    }
+
+    /// Classifies one filename in the profile folder.
+    ///
+    /// This is what decides **which files are scanned at all**, and — since
+    /// the milestone that split `.foreign` from `.malformed` — which of the
+    /// unscanned ones are still worth reporting.
+    public static func classify(fileNamed name: String) -> FilenameClassification {
         let suffix = ".\(fileSuffix)"
-        guard name.hasSuffix(suffix) else { return nil }
+        guard name.hasSuffix(suffix) else { return .foreign }
+
+        // Deliberately no minimum-length guard: a file named exactly
+        // ".irprofile.json" leaves an empty token, and an empty identity is a
+        // malformed name of ours rather than a foreign file.
         let token = String(name.dropLast(suffix.count))
-        return try? IRCaptureProfileID(token)
+        do {
+            return .profile(try IRCaptureProfileID(token))
+        } catch let error as IRCaptureProfileError {
+            return .malformed(
+                token: token,
+                reason: error.failureReason ?? error.localizedDescription
+            )
+        } catch {
+            return .malformed(token: token, reason: error.localizedDescription)
+        }
+    }
+
+    /// The identity a filename claims, or `nil` when the name is not one of
+    /// ours *or* does not spell a valid identifier.
+    ///
+    /// A convenience over ``classify(fileNamed:)`` for callers that only want
+    /// the identity. Loading uses the classification itself, because the
+    /// difference between the two `nil` cases is the difference between
+    /// silence and a reported failure.
+    public static func profileID(forFileNamed name: String) -> IRCaptureProfileID? {
+        guard case .profile(let id) = classify(fileNamed: name) else { return nil }
+        return id
     }
 
     // MARK: - Loading
@@ -159,21 +210,41 @@ public struct FileIRCaptureProfileStore: IRCaptureProfileStore {
         // order failures are reported in — does not depend on how the file
         // system happened to enumerate the folder.
         for url in contents.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-            guard let expected = Self.profileID(forFileNamed: url.lastPathComponent) else {
+            switch Self.classify(fileNamed: url.lastPathComponent) {
+            case .foreign:
                 // Not one of ours. Ignored in silence, deliberately: a folder
                 // is allowed to contain other things.
                 continue
-            }
-            do {
-                loaded.append((url: url, profile: try load(url, expecting: expected)))
-            } catch {
-                failures.append(error)
+
+            case .malformed(let token, let reason):
+                // Ours by suffix, and unloadable. Reported rather than
+                // skipped: it is a profile file whose name nothing can resolve,
+                // which is exactly the kind of fault a person can fix once
+                // they are told about it.
+                failures.append(
+                    .invalidProfileFilename(url: url, token: token, reason: reason)
+                )
+
+            case .profile(let expected):
+                do {
+                    loaded.append((url: url, profile: try load(url, expecting: expected)))
+                } catch {
+                    failures.append(error)
+                }
             }
         }
 
-        // Identity ambiguity is resolved by refusing both, never by picking
-        // one. Two files claiming `user.abc` would otherwise make a
-        // photograph's rendering depend on enumeration order.
+        // Defence in depth, and deliberately not reachable through this store.
+        //
+        // A file's name *is* its identity (`profileURL(for:)`), and `load`
+        // refuses a payload whose id disagrees with the name it was found
+        // under, so on disk one identity has exactly one address and two files
+        // cannot both claim `user.abc`. The check stays because the invariant
+        // it protects — ambiguity is refused, never resolved by enumeration
+        // order — is worth being true of this type independently of the two
+        // rules that currently imply it. The reachable refusal is the
+        // registry's, which composes sources this store knows nothing about.
+        // See `docs/decisions/0021-user-capture-profile-library.md`.
         var countsByID: [IRCaptureProfileID: [URL]] = [:]
         for entry in loaded {
             countsByID[entry.profile.id, default: []].append(entry.url)

@@ -139,6 +139,135 @@ struct FileIRCaptureProfileStoreTests {
         #expect(FileIRCaptureProfileStore.profileID(forFileNamed: name) == nil)
     }
 
+    // MARK: - Classification: foreign, ours, or ours and malformed
+
+    @Test(
+        "A name without our suffix is foreign, whatever else is wrong with it",
+        arguments: [
+            ".DS_Store",
+            "notes.txt",
+            "README.md",
+            "user.abc.irprofile.json.bak",
+            "irprofile.json",
+            "user.abc.irprofile.JSON",
+        ]
+    )
+    func foreignNames(name: String) {
+        #expect(FileIRCaptureProfileStore.classify(fileNamed: name) == .foreign)
+    }
+
+    @Test("A name with our suffix and a valid token classifies as that profile")
+    func ourNames() throws {
+        let id = try IRCaptureProfileID("user.550e8400-e29b-41d4-a716-446655440000")
+        let name = FileIRCaptureProfileStore.profileURL(
+            for: id, in: URL(fileURLWithPath: "/tmp")
+        ).lastPathComponent
+
+        guard case .profile(let found) = FileIRCaptureProfileStore.classify(fileNamed: name)
+        else {
+            Issue.record("Expected .profile, got \(FileIRCaptureProfileStore.classify(fileNamed: name))")
+            return
+        }
+        #expect(found == id)
+    }
+
+    /// The Phase A fault this milestone fixed: these wear our suffix, so they
+    /// are ours, and they cannot be addressed, so they are reported. Before
+    /// the classification split they were indistinguishable from `notes.txt`.
+    @Test(
+        "A name with our suffix and an invalid token is malformed, not foreign",
+        arguments: [
+            ("BAD PROFILE!.irprofile.json", "BAD PROFILE!"),
+            (".irprofile.json", ""),
+            ("not-a-valid-identifier.irprofile.json", "not-a-valid-identifier"),
+            ("User.ABC.irprofile.json", "User.ABC"),
+            ("user..irprofile.json", "user."),
+        ]
+    )
+    func malformedNames(name: String, expectedToken: String) {
+        guard case .malformed(let token, let reason) =
+            FileIRCaptureProfileStore.classify(fileNamed: name)
+        else {
+            Issue.record("Expected .malformed for \(name)")
+            return
+        }
+        #expect(token == expectedToken)
+        // The reason comes from the identifier's own validation, so it says
+        // what is wrong rather than merely that something is.
+        #expect(!reason.isEmpty)
+    }
+
+    @Test("A malformed profile filename is reported, and costs only that file")
+    func malformedFilenameIsReported() throws {
+        try Self.withSandbox { sandbox in
+            let kept = Self.makeProfile(name: "Kept")
+            try sandbox.store.save(kept)
+
+            let badName = "BAD PROFILE!.irprofile.json"
+            let badURL = sandbox.directory.appendingPathComponent(badName)
+            try Data(#"{"schemaVersion":1}"#.utf8).write(to: badURL)
+
+            // Foreign files beside it must still be silent: the point of the
+            // split is that these two are different faults.
+            try Data().write(to: sandbox.directory.appendingPathComponent(".DS_Store"))
+            try Data("a note".utf8)
+                .write(to: sandbox.directory.appendingPathComponent("notes.txt"))
+
+            let load = sandbox.store.loadAll()
+
+            #expect(load.profiles == [kept])
+            #expect(load.failures.count == 1)
+
+            guard case .invalidProfileFilename(let url, let token, let reason) =
+                try #require(load.failures.first)
+            else {
+                Issue.record("Expected .invalidProfileFilename, got \(load.failures)")
+                return
+            }
+            // The path survives the error, so a person can be told which file.
+            #expect(url.lastPathComponent == badName)
+            #expect(token == "BAD PROFILE!")
+            #expect(!reason.isEmpty)
+
+            // Nothing was repaired, renamed or removed.
+            #expect(FileManager.default.fileExists(atPath: badURL.path))
+        }
+    }
+
+    @Test("A file named exactly .irprofile.json is an empty identity, and is reported")
+    func emptyIdentityFilenameIsReported() throws {
+        try Self.withSandbox { sandbox in
+            try sandbox.createDirectory()
+            let url = sandbox.directory.appendingPathComponent(".irprofile.json")
+            try Data(#"{"schemaVersion":1}"#.utf8).write(to: url)
+
+            let load = sandbox.store.loadAll()
+
+            #expect(load.profiles.isEmpty)
+            guard case .invalidProfileFilename(_, let token, _) =
+                try #require(load.failures.first)
+            else {
+                Issue.record("Expected .invalidProfileFilename, got \(load.failures)")
+                return
+            }
+            #expect(token == "")
+            #expect(load.failures.count == 1)
+        }
+    }
+
+    @Test("A malformed filename names no profile identity, because there is none")
+    func malformedFilenameHasNoProfileID() {
+        let error = IRCaptureProfilePersistenceError.invalidProfileFilename(
+            url: URL(fileURLWithPath: "/tmp/BAD PROFILE!.irprofile.json"),
+            token: "BAD PROFILE!",
+            reason: "reason"
+        )
+        #expect(error.profileID == nil)
+        #expect(error.url?.lastPathComponent == "BAD PROFILE!.irprofile.json")
+        #expect(error.errorDescription != nil)
+        #expect(error.failureReason?.contains("BAD PROFILE!") == true)
+    }
+
     // MARK: - Path safety
 
     @Test("A profile's file stays inside the store's directory, whatever its identity")
@@ -367,16 +496,28 @@ struct FileIRCaptureProfileStoreTests {
     /// A stub store, conforming only to the protocol, that reports two
     /// profiles sharing one identity.
     ///
-    /// `save` derives a file's name from the profile's own identity
-    /// (`profileURL(for:in:)`), so two files can never claim one id on disk —
-    /// the filename/payload-mismatch refusal above is the closest that gets,
-    /// and it refuses rather than producing a duplicate. That makes the
-    /// duplicate-identity case unreachable through `FileIRCaptureProfileStore`
-    /// itself. The refusal still has to exist, so it is proved directly
-    /// against `IRCaptureProfileStore`'s protocol surface instead: a stub
-    /// whose `loadAll()` simply hands back two profiles with the same id, fed
-    /// as `userProfiles` to `IRCaptureProfileRegistry`, which must refuse
-    /// rather than silently keep one and drop the other.
+    /// The two levels are different guarantees:
+    ///
+    /// ```text
+    /// File store    one identity maps to exactly one filename.
+    /// Registry      duplicate identities from any composed source are refused.
+    /// ```
+    ///
+    /// The file store's holds by construction: `save` derives a file's name
+    /// from the profile's own identity (`profileURL(for:in:)`), and `loadAll`
+    /// refuses a payload whose id disagrees with the name it was found under,
+    /// so two files cannot both claim one id on disk — the
+    /// filename/payload-mismatch refusal above is what that arrangement
+    /// actually produces. The duplicate-identity branch inside
+    /// `FileIRCaptureProfileStore` is therefore unreachable defence in depth,
+    /// and no contrived filesystem arrangement is manufactured here to reach
+    /// it.
+    ///
+    /// The reachable refusal is the registry's, which composes sources the
+    /// store knows nothing about, so it is proved there: a stub whose
+    /// `loadAll()` simply hands back two profiles with the same id, fed as
+    /// `userProfiles` to `IRCaptureProfileRegistry`, which must refuse rather
+    /// than silently keep one and drop the other.
     private struct DuplicateStubStore: IRCaptureProfileStore {
         let profiles: [IRCaptureProfile]
         func loadAll() -> IRCaptureProfileLibraryLoad {
