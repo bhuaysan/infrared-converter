@@ -111,8 +111,10 @@ extension IRCalibrationError: LocalizedError {
 
         case .duplicateTargetPatch(let patch):
             return """
-                "\(patch)" appears twice. Which of the two measurements a fit used would \
-                otherwise depend on ordering nobody chose.
+                "\(patch)" appears twice. Which of the two a reader should believe would \
+                otherwise depend on ordering nobody chose — and where the duplicate is a \
+                residual, the second copy silently doubles that patch's weight in every \
+                metric derived from the list.
                 """
 
         case .emptyMeasurementSet:

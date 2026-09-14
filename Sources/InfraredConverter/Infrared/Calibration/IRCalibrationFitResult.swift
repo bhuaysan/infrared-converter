@@ -60,7 +60,39 @@ public struct IRCalibrationFitMetrics: Equatable, Sendable {
     /// different claims, and the first is not a good calibration.
     public let excludedPatchCount: Int
 
-    init(residuals: [IRCalibrationPatchResidual], excludedPatchCount: Int) {
+    /// Refuses a residual list that does not name each fitted patch exactly
+    /// once.
+    ///
+    /// The invariant lives here, on the type that owns it, rather than only in
+    /// ``IRCalibration``'s cross-checks. Every number this type reports —
+    /// ``rmse``, ``meanResidual``, ``includedPatchCount``, and any future
+    /// acceptance criterion computed from them — is an average over the list,
+    /// so one patch appearing twice quietly doubles its weight and inflates
+    /// the patch count. A set comparison one level up cannot see that: the
+    /// *set* of patch identities is unchanged by a duplicate.
+    ///
+    /// Throwing rather than de-duplicating, because the two entries are not
+    /// interchangeable — which of them a reader should believe would depend on
+    /// ordering nobody chose.
+    init(
+        residuals: [IRCalibrationPatchResidual], excludedPatchCount: Int
+    ) throws(IRCalibrationError) {
+        var seen = Set<IRCalibrationTargetPatchID>()
+        for residual in residuals {
+            guard seen.insert(residual.patch).inserted else {
+                throw .duplicateTargetPatch(patch: residual.patch.rawValue)
+            }
+        }
+        guard excludedPatchCount >= 0 else {
+            throw .valueOutOfRange(
+                field: "fit.metrics.excludedPatchCount",
+                value: Double(excludedPatchCount),
+                reason: """
+                    A count of patches that were left out of the fit cannot be negative, and \
+                    a calibration reporting one is describing a fit that did not happen.
+                    """
+            )
+        }
         self.residuals = residuals.sorted { $0.patch < $1.patch }
         self.excludedPatchCount = excludedPatchCount
     }

@@ -305,7 +305,7 @@ struct IRCalibrationFitterTests {
             IRCalibrationPatchResidual(patch: CalibrationTestData.patch(2), red: 0, green: 0.2, blue: 0),
             IRCalibrationPatchResidual(patch: CalibrationTestData.patch(3), red: 0, green: 0, blue: 0.3),
         ]
-        let metrics = IRCalibrationFitMetrics(residuals: residuals, excludedPatchCount: 1)
+        let metrics = try IRCalibrationFitMetrics(residuals: residuals, excludedPatchCount: 1)
 
         // sqrt((0.01 + 0.04 + 0.09) / 9)
         #expect(abs(metrics.rmse - (0.14 / 9).squareRoot()) < 1e-15)

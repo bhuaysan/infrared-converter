@@ -1379,7 +1379,13 @@ private struct PersistedFitMetrics: Codable, CalibrationRecordField {
         let residuals = try Self.require(
             [PersistedPatchResidual].self, CodingKeys.residuals, in: container
         ).map(\.value)
-        value = IRCalibrationFitMetrics(residuals: residuals, excludedPatchCount: excludedPatchCount)
+        // A duplicate residual, or a negative excluded count, is refused by
+        // the metrics themselves — the same refusal a caller building this in
+        // memory would meet, propagating unchanged rather than being restated
+        // here as a second description of one fault.
+        value = try IRCalibrationFitMetrics(
+            residuals: residuals, excludedPatchCount: excludedPatchCount
+        )
     }
 
     func encode(to encoder: Encoder) throws {

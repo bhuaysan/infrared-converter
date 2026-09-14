@@ -92,17 +92,36 @@ public struct IRCalibration: Equatable, Sendable, Identifiable {
         // The consistency rule that matters most: a calibration claiming n
         // patches must carry n residuals, for exactly those patches. Without
         // it, "how well did it fit?" has no answer that can be checked.
-        let includedPatches = Set(measurements.includedPatches.map(\.patch))
-        let residualPatches = Set(fit.metrics.residuals.map(\.patch))
-        guard includedPatches == residualPatches else {
-            let missing = includedPatches.subtracting(residualPatches).map(\.rawValue).sorted()
-            let extra = residualPatches.subtracting(includedPatches).map(\.rawValue).sorted()
+        //
+        // Counted first, then compared element by element — both lists are
+        // sorted by patch identity, by `IRCalibrationMeasurementSet` and by
+        // `IRCalibrationFitMetrics` respectively. Deliberately **not** a `Set`
+        // comparison: two residuals for one patch and none for another leave
+        // the two sets equal while doubling that patch's weight in every
+        // derived metric. `IRCalibrationFitMetrics` already refuses a
+        // duplicate, and this is the layer that would have to notice if it
+        // ever stopped.
+        let includedPatches = measurements.includedPatches.map(\.patch)
+        let residualPatches = fit.metrics.residuals.map(\.patch)
+        guard residualPatches.count == includedPatches.count,
+              residualPatches == includedPatches
+        else {
+            let included = Set(includedPatches)
+            let residual = Set(residualPatches)
+            let missing = included.subtracting(residual).map(\.rawValue).sorted()
+            let extra = residual.subtracting(included).map(\.rawValue).sorted()
+            let duplicated = Set(
+                residualPatches.filter { patch in
+                    residualPatches.filter { $0 == patch }.count > 1
+                }
+            ).map(\.rawValue).sorted()
             throw .inconsistentResiduals(
                 reason: """
                     \(measurements.includedPatchCount) patches were fitted and \
                     \(fit.metrics.residuals.count) residuals are recorded\
                     \(missing.isEmpty ? "" : "; no residual for \(missing.joined(separator: ", "))")\
-                    \(extra.isEmpty ? "" : "; a residual for \(extra.joined(separator: ", ")), which was not fitted").
+                    \(extra.isEmpty ? "" : "; a residual for \(extra.joined(separator: ", ")), which was not fitted")\
+                    \(duplicated.isEmpty ? "" : "; more than one residual for \(duplicated.joined(separator: ", "))").
                     """
             )
         }

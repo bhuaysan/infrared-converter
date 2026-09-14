@@ -434,7 +434,7 @@ struct IRCalibrationEvidenceTests {
     func residualCountMustMatch() throws {
         let calibration = try CalibrationTestData.calibration()
 
-        let short = IRCalibrationFitMetrics(
+        let short = try IRCalibrationFitMetrics(
             residuals: Array(calibration.fit.metrics.residuals.dropLast()),
             excludedPatchCount: calibration.fit.metrics.excludedPatchCount
         )
@@ -459,6 +459,118 @@ struct IRCalibrationEvidenceTests {
         }
         #expect(reason.contains("24"))
         #expect(reason.contains("23"))
+    }
+
+    /// A duplicate cannot be caught one level up by comparing sets — the set
+    /// of patch identities is unchanged by it — so the invariant lives on the
+    /// type that owns the list.
+    @Test("A residual list naming one patch twice is refused by the metrics themselves")
+    func duplicateResidualRefused() throws {
+        let calibration = try CalibrationTestData.calibration()
+        let residuals = calibration.fit.metrics.residuals
+        let duplicated = Array(residuals.dropLast()) + [residuals[0]]
+
+        #expect(duplicated.count == residuals.count)
+        #expect(Set(duplicated.map(\.patch)).count == residuals.count - 1)
+
+        #expect(throws: IRCalibrationError.duplicateTargetPatch(patch: residuals[0].patch.rawValue)) {
+            _ = try IRCalibrationFitMetrics(
+                residuals: duplicated,
+                excludedPatchCount: calibration.fit.metrics.excludedPatchCount
+            )
+        }
+    }
+
+    @Test("A negative excluded-patch count is refused")
+    func negativeExcludedCountRefused() throws {
+        let calibration = try CalibrationTestData.calibration()
+        #expect(throws: IRCalibrationError.self) {
+            _ = try IRCalibrationFitMetrics(
+                residuals: calibration.fit.metrics.residuals, excludedPatchCount: -1
+            )
+        }
+    }
+
+    @Test("A residual for a patch that was not fitted is refused, even at the right count")
+    func residualCountRightButPatchWrong() throws {
+        let calibration = try CalibrationTestData.calibration()
+        let residuals = calibration.fit.metrics.residuals
+        let strayPatch = CalibrationTestData.patch(24)
+        #expect(residuals.contains { $0.patch == strayPatch })
+
+        // Replace one patch's residual with one for a patch of the target that
+        // is in the fit — swapped so the count is right and the identities are
+        // not.
+        var swapped = residuals
+        swapped[0] = try IRCalibrationPatchResidual(
+            patch: strayPatch,
+            red: residuals[0].red, green: residuals[0].green, blue: residuals[0].blue
+        )
+
+        #expect(throws: IRCalibrationError.duplicateTargetPatch(patch: strayPatch.rawValue)) {
+            _ = try IRCalibrationFitMetrics(
+                residuals: swapped, excludedPatchCount: calibration.fit.metrics.excludedPatchCount
+            )
+        }
+    }
+
+    @Test("A fit carrying one residual too many is refused")
+    func extraResidualRefused() throws {
+        let measurements = CalibrationTestData.measurementSet(
+            exclusions: [4: .clipped(clippedSamples: 400, totalSamples: 400)]
+        )
+        let reference = CalibrationTestData.referenceDataset(
+            for: measurements, matrix: CalibrationTestData.syntheticMatrix
+        )
+        let fit = try IRCalibrationFitter().fit(
+            measurements: measurements, reference: reference, now: CalibrationTestData.fittedAt
+        )
+        #expect(fit.metrics.includedPatchCount == 23)
+
+        // A residual for the excluded patch, added to the list: 24 residuals
+        // for 23 fitted patches.
+        let padded = IRCalibrationFitResult(
+            matrix: fit.matrix,
+            sourceMeasurementID: fit.sourceMeasurementID,
+            referenceDataset: fit.referenceDataset,
+            whiteBalancePolicy: fit.whiteBalancePolicy,
+            method: fit.method,
+            conditioning: fit.conditioning,
+            metrics: try IRCalibrationFitMetrics(
+                residuals: fit.metrics.residuals + [
+                    try IRCalibrationPatchResidual(
+                        patch: CalibrationTestData.patch(4), red: 0, green: 0, blue: 0
+                    )
+                ],
+                excludedPatchCount: fit.metrics.excludedPatchCount
+            ),
+            fittedAt: fit.fittedAt
+        )
+
+        guard case .inconsistentResiduals(let reason)? = Self.refusal(
+            try IRCalibration(
+                id: CalibrationTestData.calibrationID(),
+                name: "Honest",
+                measurements: measurements,
+                reference: reference,
+                fit: fit
+            ),
+            fit: padded
+        ) else {
+            Issue.record("Expected a residual refusal")
+            return
+        }
+        #expect(reason.contains("04"))
+    }
+
+    @Test("The honest one-residual-per-fitted-patch artefact is still accepted")
+    func oneResidualPerFittedPatchIsAccepted() throws {
+        let calibration = try CalibrationTestData.calibration()
+        #expect(calibration.fit.metrics.includedPatchCount == 24)
+        #expect(
+            calibration.fit.metrics.residuals.map(\.patch)
+                == calibration.measurements.includedPatches.map(\.patch)
+        )
     }
 
     @Test("A residual for a patch that was excluded is refused")

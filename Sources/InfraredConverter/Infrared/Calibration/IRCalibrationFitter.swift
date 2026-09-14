@@ -103,7 +103,7 @@ public struct IRCalibrationFitter: Sendable {
             whiteBalancePolicy: measurements.whiteBalancePolicy,
             method: .current,
             conditioning: solution.conditioning,
-            metrics: IRCalibrationFitMetrics(
+            metrics: try IRCalibrationFitMetrics(
                 residuals: residuals,
                 excludedPatchCount: measurements.excludedPatchCount
             ),
