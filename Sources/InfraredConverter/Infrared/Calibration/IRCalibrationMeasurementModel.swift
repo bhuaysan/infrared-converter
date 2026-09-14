@@ -181,12 +181,83 @@ public struct IRCalibrationClippingPolicy: Equatable, Sendable {
     public let maximumClippedSampleFraction: Double
 
     public static let `default` = IRCalibrationClippingPolicy(
-        normalizedClippingThreshold: 1.0,
+        validated: 1.0,
         maximumClippedSampleFraction: 0
     )
 
-    public init(normalizedClippingThreshold: Double, maximumClippedSampleFraction: Double) {
-        self.normalizedClippingThreshold = normalizedClippingThreshold
+    /// Refuses a policy that cannot describe a real decision about real
+    /// samples.
+    ///
+    /// The bounds are definitions rather than tuned constants, and each of
+    /// them rules out a policy whose *effect* would be silent:
+    ///
+    /// ```text
+    /// threshold not finite      every comparison against it is false; nothing
+    ///                           is ever clipped, and a saturated chart fits
+    /// threshold <= 0            every sample is clipped; every patch is
+    ///                           excluded, and the refusal blames the capture
+    /// fraction not finite       the exclusion comparison never fires
+    /// fraction < 0              every patch with any sample is excluded
+    /// fraction > 1              no patch is ever excluded, whatever it
+    ///                           contains
+    /// ```
+    ///
+    /// A calibration is an artefact somebody else has to be able to read, and
+    /// a policy that says "nothing is clipped" because its threshold is NaN
+    /// looks exactly like a policy that says "nothing clipped" because the
+    /// chart was well exposed. Nothing downstream could tell those apart, so
+    /// they are separated here.
+    ///
+    /// No new empirical threshold is introduced: `1.0` and `0` remain what
+    /// ``default`` is, and the bounds admit every policy a person could
+    /// deliberately mean.
+    public init(
+        normalizedClippingThreshold: Double, maximumClippedSampleFraction: Double
+    ) throws(IRCalibrationError) {
+        guard normalizedClippingThreshold.isFinite else {
+            throw .nonFiniteValue(
+                field: "clippingPolicy.normalizedClippingThreshold",
+                value: normalizedClippingThreshold
+            )
+        }
+        guard normalizedClippingThreshold > 0 else {
+            throw .valueOutOfRange(
+                field: "clippingPolicy.normalizedClippingThreshold",
+                value: normalizedClippingThreshold,
+                reason: """
+                    a threshold at or below zero calls every normalised sample clipped, which \
+                    excludes every patch and reports the fault as a badly exposed capture.
+                    """
+            )
+        }
+        guard maximumClippedSampleFraction.isFinite else {
+            throw .nonFiniteValue(
+                field: "clippingPolicy.maximumClippedSampleFraction",
+                value: maximumClippedSampleFraction
+            )
+        }
+        guard maximumClippedSampleFraction >= 0, maximumClippedSampleFraction <= 1 else {
+            throw .valueOutOfRange(
+                field: "clippingPolicy.maximumClippedSampleFraction",
+                value: maximumClippedSampleFraction,
+                reason: """
+                    a fraction of a patch's samples lies in 0...1; below zero every patch is \
+                    excluded and above one no patch ever is, whatever it contains.
+                    """
+            )
+        }
+        self.init(
+            validated: normalizedClippingThreshold,
+            maximumClippedSampleFraction: maximumClippedSampleFraction
+        )
+    }
+
+    /// The unchecked initialiser ``default`` is built through, so that the one
+    /// policy this project defines does not have to be constructed with `try!`
+    /// at file scope. Private: every other policy in the process, including
+    /// every decoded one, goes through the validating initialiser above.
+    private init(validated threshold: Double, maximumClippedSampleFraction: Double) {
+        self.normalizedClippingThreshold = threshold
         self.maximumClippedSampleFraction = maximumClippedSampleFraction
     }
 

@@ -373,6 +373,63 @@ struct IRCalibrationEvidenceTests {
         #expect(!name.contains("/"))
     }
 
+    // MARK: - Clipping policy
+
+    /// A policy is a decision about real samples. Values that cannot express
+    /// one are refused rather than stored, because their *effect* is silent:
+    /// a NaN threshold clips nothing and looks exactly like a well-exposed
+    /// chart, and a tolerance of `2` excludes nothing whatever a patch holds.
+    @Test(
+        "A clipping policy that cannot describe a decision about samples is refused",
+        arguments: [
+            (Double.nan, 0.0),
+            (Double.infinity, 0.0),
+            (0.0, 0.0),
+            (-0.5, 0.0),
+            (1.0, Double.nan),
+            (1.0, Double.infinity),
+            (1.0, -0.001),
+            (1.0, 1.0001),
+        ]
+    )
+    func invalidClippingPolicies(threshold: Double, fraction: Double) {
+        #expect(throws: IRCalibrationError.self) {
+            try IRCalibrationClippingPolicy(
+                normalizedClippingThreshold: threshold, maximumClippedSampleFraction: fraction
+            )
+        }
+    }
+
+    @Test(
+        "Every policy a person could deliberately mean is accepted",
+        arguments: [
+            (1.0, 0.0),
+            (1.0, 1.0),
+            (0.98, 0.01),
+            (1.25, 0.5),
+        ]
+    )
+    func validClippingPolicies(threshold: Double, fraction: Double) throws {
+        let policy = try IRCalibrationClippingPolicy(
+            normalizedClippingThreshold: threshold, maximumClippedSampleFraction: fraction
+        )
+        #expect(policy.normalizedClippingThreshold == threshold)
+        #expect(policy.maximumClippedSampleFraction == fraction)
+    }
+
+    /// Validation introduced no new empirical threshold: the default is the
+    /// same definition it always was — normalised saturation, and no tolerance.
+    @Test("The default clipping policy is unchanged by validation")
+    func defaultClippingPolicyUnchanged() throws {
+        #expect(IRCalibrationClippingPolicy.default.normalizedClippingThreshold == 1.0)
+        #expect(IRCalibrationClippingPolicy.default.maximumClippedSampleFraction == 0)
+        #expect(
+            try IRCalibrationClippingPolicy(
+                normalizedClippingThreshold: 1.0, maximumClippedSampleFraction: 0
+            ) == .default
+        )
+    }
+
     @Test("An anonymous measurement is refused: a calibration is somebody's claim")
     func provenanceRequiresAuthor() {
         #expect(throws: IRCalibrationError.self) {

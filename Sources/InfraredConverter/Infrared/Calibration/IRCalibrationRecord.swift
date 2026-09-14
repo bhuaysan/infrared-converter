@@ -670,7 +670,11 @@ private struct PersistedClippingPolicy: Codable, CalibrationRecordField {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        value = IRCalibrationClippingPolicy(
+        // Through the validating initialiser, like every other decoded
+        // value in this record: a hand-edited threshold of `0`, or a
+        // tolerance of `2`, is refused on the way in rather than silently
+        // changing which patches a re-read calibration would have fitted.
+        value = try IRCalibrationClippingPolicy(
             normalizedClippingThreshold: try Self.require(
                 Double.self, CodingKeys.normalizedClippingThreshold, in: container
             ),

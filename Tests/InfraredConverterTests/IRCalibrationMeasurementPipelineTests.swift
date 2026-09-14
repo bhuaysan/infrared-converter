@@ -223,7 +223,7 @@ struct IRCalibrationMeasurementPipelineTests {
 
     @Test("A tighter clipping threshold excludes more patches, and is recorded in the evidence")
     func thresholdIsRecorded() throws {
-        let policy = IRCalibrationClippingPolicy(
+        let policy = try IRCalibrationClippingPolicy(
             normalizedClippingThreshold: 0.35, maximumClippedSampleFraction: 0
         )
         let set = try IRCalibrationMeasurementPipeline().measure(
