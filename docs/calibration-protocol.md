@@ -502,8 +502,11 @@ missing, however well it fitted:
 - a serial number, when a specific body is claimed;
 - at least 12 included patches;
 - at least one degree of freedom;
-- no clipped samples among the fitted patches;
-- every fitted patch complete against the recorded colour-plane signature.
+- no clipped samples among the fitted patches.
+
+Plane completeness is not on that list, because it is not a matter of degree:
+an included patch short of a plane the signature expects is not a calibration
+with a gap, it is evidence that is refused when it is built. See section 7.
 
 ---
 
