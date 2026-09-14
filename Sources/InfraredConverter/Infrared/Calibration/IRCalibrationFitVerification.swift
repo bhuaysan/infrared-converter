@@ -31,17 +31,23 @@ import Foundation
 /// absolute   1e-12    for values near zero, where a relative test says nothing
 /// ```
 ///
-/// The forward error of a 3x3 least-squares solve is bounded by roughly the
-/// condition number of the normal equations times the machine epsilon. The
-/// conditioning floor this solver enforces
-/// (``IRCalibrationMatrixSolver/minimumNormalizedGramDeterminant``) admits data
-/// whose worst case is of the order of `1e-14`; `1e-12` leaves roughly two
-/// orders of magnitude of headroom above that.
+/// The difference this is sized against is **not** the accuracy of the fit. It
+/// is the difference between two runs of the *same* arithmetic on the same
+/// inputs, which is zero today and would be a few last places if a future
+/// build accumulated the normal equations in a different order. A few thousand
+/// ulps at unit scale covers that with room to spare and asserts nothing about
+/// how well-determined the solution was.
 ///
-/// It is far below anything a person could change and mean: a residual, a
-/// coefficient or a determinant edited by hand differs in a digit that is
-/// visible in the file, not in the thirteenth. An edit small enough to pass
-/// this test is an edit that changes no number anybody reads.
+/// It deliberately does not stretch to cover the worst case the conditioning
+/// floor admits. A change to this solver that moved a coefficient by more than
+/// a part in `1e12` has changed what the solver computes, and that belongs
+/// behind a ``IRCalibrationFitMethod`` version bump — where a reader can see
+/// it — rather than behind a tolerance wide enough to hide it.
+///
+/// At the other end it is far below anything a person could change and mean: a
+/// residual, a coefficient or a determinant edited by hand differs in a digit
+/// that is visible in the file, not in the thirteenth. An edit small enough to
+/// pass this test is an edit that changes no number anybody reads.
 ///
 /// The absolute term is needed because residuals are legitimately zero — an
 /// exact fit has no error to report — and a relative comparison of `0` against

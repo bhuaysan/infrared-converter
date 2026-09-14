@@ -633,21 +633,30 @@ architecture will agree in the last place, and the cost of that assertion being
 wrong falls on somebody's stored measurements: a chart, a lamp and an afternoon
 become unreadable because a re-derived coefficient moved by one ulp.
 
-The magnitude is justified from both sides. Above: the forward error of the
-solve is bounded by roughly the condition number of the normal equations times
-the machine epsilon, and the conditioning floor admits data whose worst case is
-of order `1e-14`, so `1e-12` leaves two orders of magnitude of headroom. Below:
-a coefficient, residual or determinant edited by a person differs in a digit
-that is visible in the file. An edit small enough to pass this test changes no
-number anybody reads.
+The magnitude is sized against the right quantity. What it has to absorb is
+not the *accuracy* of a fit — that is what the residuals and the conditioning
+are for — but the difference between two runs of the same arithmetic on the
+same inputs. That difference is zero today, and would be a few last places if a
+future build accumulated the normal equations in a different order; a few
+thousand ulps at unit scale covers it comfortably.
+
+It deliberately does **not** stretch to cover the worst case the conditioning
+floor admits. A change to the solver that moves a coefficient by more than a
+part in `1e12` has changed what the solver computes, and that belongs behind a
+fit-method version bump where a reader can see it, not behind a tolerance wide
+enough to hide it.
+
+At the other end: a coefficient, residual or determinant edited by a person
+differs in a digit that is visible in the file. An edit small enough to pass
+this test changes no number anybody reads.
 
 The absolute floor exists because an exact fit has residuals of exactly zero,
 and a relative comparison of `0` against `3e-17` compares nothing. Residuals
 live in the working representation, where the magnitudes that matter are of
 order `1`, so at that scale the two terms say the same thing.
 
-If the solver's arithmetic ever changes enough to break bit-identity, the
-answer is a fit-method version bump, not a wider tolerance.
+If the solver's arithmetic ever changes enough to break bit-identity on this
+platform, the answer is a fit-method version bump, not a wider tolerance.
 
 ### 3. An unreproducible fit method is refused
 
