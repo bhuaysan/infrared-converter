@@ -204,7 +204,7 @@ struct FileIRCalibrationStoreTests {
             let text = try #require(String(data: data, encoding: .utf8))
 
             #expect(text.contains("\n"))
-            #expect(text.contains("\"schemaVersion\" : 1"))
+            #expect(text.contains("\"schemaVersion\" : \(IRCalibration.currentSchemaVersion)"))
             #expect(try JSONSerialization.jsonObject(with: data) as? [String: Any] != nil)
         }
     }

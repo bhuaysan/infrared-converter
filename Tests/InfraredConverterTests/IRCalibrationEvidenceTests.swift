@@ -324,6 +324,7 @@ struct IRCalibrationEvidenceTests {
                 target: .colorCheckerClassic24,
                 illuminant: .d65,
                 captureContext: CalibrationTestData.context(),
+                colorPlaneSignature: CalibrationTestData.bayerSignature,
                 normalization: CalibrationTestData.normalization(),
                 whiteBalancePolicy: .none,
                 patches: [],
@@ -340,6 +341,7 @@ struct IRCalibrationEvidenceTests {
                 target: .colorCheckerClassic24,
                 illuminant: .d65,
                 captureContext: CalibrationTestData.context(),
+                colorPlaneSignature: CalibrationTestData.bayerSignature,
                 normalization: CalibrationTestData.normalization(),
                 whiteBalancePolicy: .none,
                 patches: [

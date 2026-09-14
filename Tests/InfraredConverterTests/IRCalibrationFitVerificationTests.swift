@@ -451,6 +451,7 @@ struct IRCalibrationFitVerificationTests {
             target: calibration.measurements.target,
             illuminant: calibration.measurements.illuminant,
             captureContext: calibration.measurements.captureContext,
+            colorPlaneSignature: calibration.measurements.colorPlaneSignature,
             normalization: calibration.measurements.normalization,
             whiteBalancePolicy: calibration.measurements.whiteBalancePolicy,
             patches: calibration.measurements.patches.map {

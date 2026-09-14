@@ -234,6 +234,7 @@ struct IRCalibrationStatusTests {
             target: .colorCheckerClassic24,
             illuminant: .measuredSPD(reference: "spd"),
             captureContext: CalibrationTestData.context(),
+                colorPlaneSignature: CalibrationTestData.bayerSignature,
             normalization: CalibrationTestData.normalization(),
             whiteBalancePolicy: .none,
             patches: patches,

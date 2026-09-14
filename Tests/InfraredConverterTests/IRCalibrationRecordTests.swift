@@ -88,11 +88,14 @@ struct IRCalibrationRecordTests {
         let measurements = CalibrationTestData.measurementSet(
             exclusions: [
                 1: .clipped(clippedSamples: 12, totalSamples: 400),
-                2: .incompleteColorPlanes(missing: [2, 3]),
                 3: .nonFiniteSample,
                 4: .noReferenceValue,
                 5: .excludedByOperator(reason: "a shadow, and a fingerprint"),
-            ]
+            ],
+            // Genuinely short of two planes, because an
+            // `.incompleteColorPlanes` exclusion must now describe the patch
+            // it is attached to.
+            incomplete: [2: [2, 3]]
         )
         let reference = CalibrationTestData.referenceDataset(
             for: measurements, matrix: CalibrationTestData.syntheticMatrix
@@ -170,6 +173,7 @@ struct IRCalibrationRecordTests {
             target: .colorCheckerClassic24,
             illuminant: .d65,
             captureContext: CalibrationTestData.context(),
+            colorPlaneSignature: CalibrationTestData.bayerSignature,
             normalization: CalibrationTestData.normalization(),
             whiteBalancePolicy: .none,
             patches: CalibrationTestData.measurementSet().patches,
@@ -214,6 +218,7 @@ struct IRCalibrationRecordTests {
                 target: measurements.target,
                 illuminant: measurements.illuminant,
                 captureContext: measurements.captureContext,
+                colorPlaneSignature: measurements.colorPlaneSignature,
                 normalization: measurements.normalization,
                 whiteBalancePolicy: measurements.whiteBalancePolicy,
                 patches: measurements.patches,
@@ -255,7 +260,7 @@ struct IRCalibrationRecordTests {
         let data = try Self.encode(try CalibrationTestData.calibration())
         let object = try Self.object(data)
 
-        #expect(object["schemaVersion"] as? Int == 1)
+        #expect(object["schemaVersion"] as? Int == IRCalibration.currentSchemaVersion)
         #expect(object["id"] as? String != nil)
         #expect(object["name"] as? String != nil)
         #expect(object["measurements"] != nil)
@@ -816,18 +821,68 @@ struct IRCalibrationRecordTests {
         }
     }
 
+    // MARK: - The previous schema version
+
+    /// A version 1 calibration is understood completely and is no longer
+    /// accepted as evidence: it records the colour planes each patch
+    /// *contained* and never states which planes the sensor produced, so a
+    /// systematically absent plane is invisible in it.
+    ///
+    /// Refused rather than migrated, because every available source for the
+    /// missing signature is an invention — the patches themselves are the
+    /// inference the field exists to remove, and "four planes means RGGB" is
+    /// an assumption about somebody else's camera.
+    @Test("A schema version 1 calibration is refused, and the refusal names what it lacks")
+    func schemaVersionOneIsRefused() throws {
+        var object = try Self.object(try Self.encode(try CalibrationTestData.calibration()))
+        object["schemaVersion"] = 1
+        var measurements = try #require(object["measurements"] as? [String: Any])
+        measurements.removeValue(forKey: "colorPlaneSignature")
+        object["measurements"] = measurements
+
+        do {
+            _ = try Self.decode(try Self.data(object))
+            Issue.record("A version 1 calibration was read")
+        } catch let error as IRCalibrationRecordError {
+            guard case .insufficientSchemaVersion(let found, let missing, _) = error else {
+                Issue.record("Expected .insufficientSchemaVersion, got \(error)")
+                return
+            }
+            #expect(found == 1)
+            #expect(missing == "measurements.colorPlaneSignature")
+        }
+    }
+
+    /// And it is refused as *insufficient*, not as unreadable: a version 1
+    /// file that still carries a signature field is refused for the same
+    /// reason, because the version is what states whether the field is
+    /// authoritative.
+    @Test("Version 1 is refused on its version, not on whether a field happens to be present")
+    func schemaVersionOneIsRefusedOnItsVersion() throws {
+        var object = try Self.object(try Self.encode(try CalibrationTestData.calibration()))
+        object["schemaVersion"] = 1
+
+        #expect(throws: IRCalibrationRecordError.self) {
+            _ = try Self.decode(try Self.data(object))
+        }
+    }
+
     // MARK: - Schema independence
 
     /// A calibration's schema, a profile's schema and a photograph sidecar's
     /// schema are three counters that move for three different reasons.
     @Test("The calibration schema is its own, independent of the profile and sidecar schemas")
     func schemaIndependence() {
-        #expect(IRCalibration.currentSchemaVersion == 1)
+        #expect(IRCalibration.currentSchemaVersion == 2)
         #expect(IRCaptureProfile.currentSchemaVersion == 1)
         #expect(PhotographProcessingState.currentSchemaVersion == 5)
-        // Version 1 of a calibration and version 1 of a profile are unrelated
-        // facts that happen to coincide today; nothing may assume they move
-        // together.
-        #expect(IRCalibration.PersistedSchemaVersion.allCases.count == 1)
+        // The calibration counter has now moved on its own, which is the
+        // property this test exists to hold: the profile and the sidecar did
+        // not move with it.
+        #expect(IRCalibration.PersistedSchemaVersion.allCases.count == 2)
+        #expect(
+            IRCalibration.PersistedSchemaVersion.current.rawValue
+                == IRCalibration.PersistedSchemaVersion.allCases.map(\.rawValue).max()
+        )
     }
 }

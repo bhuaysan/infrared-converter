@@ -129,6 +129,7 @@ struct IRCalibrationFitterTests {
                 target: .colorCheckerClassic24,
                 illuminant: .d65,
                 captureContext: CalibrationTestData.context(),
+                colorPlaneSignature: CalibrationTestData.bayerSignature,
                 normalization: CalibrationTestData.normalization(),
                 whiteBalancePolicy: .neutralPatch(unmeasured),
                 patches: responses.enumerated().map { index, response in
@@ -152,7 +153,6 @@ struct IRCalibrationFitterTests {
         "A neutral reference the evidence excluded is refused by the fit, whatever excluded it",
         arguments: [
             IRCalibrationPatchExclusion.clipped(clippedSamples: 400, totalSamples: 400),
-            .incompleteColorPlanes(missing: [2, 3]),
             .nonFiniteSample,
             .noReferenceValue,
             .excludedByOperator(reason: "a fingerprint across the patch"),
@@ -287,71 +287,104 @@ struct IRCalibrationFitterTests {
         }
     }
 
-    @Test("A neutral reference with no response in one channel defines no gains")
-    func neutralReferenceMissingAChannel() throws {
+    /// Incomplete evidence no longer reaches the fitter: a patch missing a
+    /// plane the recorded signature expects may exist only as *excluded*
+    /// evidence, so an included one is refused when the measurement set is
+    /// built.
+    @Test("A neutral reference missing an expected plane cannot be built as included evidence")
+    func neutralReferenceMissingAPlaneIsRefusedAsEvidence() {
         let neutral = CalibrationTestData.patch(1)
-        let measurements = try Self.measurementSet(
-            neutral: neutral,
-            neutralPlanes: [
-                try IRCalibrationPlaneMeasurement(
-                    colorPlane: 0, channel: .red, sampleCount: 100, mean: 0.6,
-                    clippedSampleCount: 0
-                ),
-                try IRCalibrationPlaneMeasurement(
-                    colorPlane: 1, channel: .green, sampleCount: 100, mean: 0.4,
-                    clippedSampleCount: 0
-                ),
-            ]
+        #expect(
+            throws: IRCalibrationError.incompletePatchMeasurement(
+                patch: neutral.rawValue, missing: [2, 3]
+            )
+        ) {
+            _ = try Self.measurementSet(
+                neutral: neutral,
+                neutralPlanes: [
+                    try IRCalibrationPlaneMeasurement(
+                        colorPlane: 0, channel: .red, sampleCount: 100, mean: 0.6,
+                        clippedSampleCount: 0
+                    ),
+                    try IRCalibrationPlaneMeasurement(
+                        colorPlane: 1, channel: .green, sampleCount: 100, mean: 0.4,
+                        clippedSampleCount: 0
+                    ),
+                ]
+            )
+        }
+    }
+
+    /// And if it is recorded *correctly* — excluded, naming the planes it
+    /// lacks — the evidence stands and the fit refuses it, so no route to a
+    /// transform balanced from a partial neutral reference exists.
+    @Test("A neutral reference that legitimately lacks a plane is refused by the fit")
+    func neutralReferenceMissingAPlaneIsRefusedByTheFit() throws {
+        let neutral = CalibrationTestData.patch(20)
+        let measurements = CalibrationTestData.measurementSet(
+            whiteBalancePolicy: .neutralPatch(neutral), incomplete: [20: [3]]
         )
+        let recorded = try #require(measurements.measurement(for: neutral))
+        #expect(recorded.exclusion == .incompleteColorPlanes(missing: [3]))
 
         #expect(
-            throws: IRCalibrationFitError.missingChannelResponse(
-                patch: neutral.rawValue, channel: "blue"
+            throws: IRCalibrationFitError.excludedNeutralReference(
+                patch: neutral.rawValue, exclusion: .incompleteColorPlanes(missing: [3])
             )
         ) {
             _ = try IRCalibrationFitter.sessionGains(for: measurements)
         }
     }
 
-    /// The `?? 1` this replaced: a fitted patch measured on a colour plane the
-    /// neutral reference never saw used to be left silently unbalanced while
-    /// every other plane was scaled.
-    @Test("A colour plane the neutral reference defines no gain for is refused, never left at 1")
-    func missingGainIsNeverIdentity() throws {
-        let neutral = CalibrationTestData.patch(1)
-        // A three-plane neutral patch — no second green — beside four-plane
-        // patches everywhere else.
-        let measurements = try Self.measurementSet(
-            neutral: neutral,
-            neutralPlanes: [
-                try IRCalibrationPlaneMeasurement(
-                    colorPlane: 0, channel: .red, sampleCount: 100, mean: 0.6,
-                    clippedSampleCount: 0
-                ),
-                try IRCalibrationPlaneMeasurement(
-                    colorPlane: 1, channel: .green, sampleCount: 100, mean: 0.4,
-                    clippedSampleCount: 0
-                ),
-                try IRCalibrationPlaneMeasurement(
-                    colorPlane: 2, channel: .blue, sampleCount: 100, mean: 0.2,
-                    clippedSampleCount: 0
-                ),
-            ]
+    /// The channel-level refusal itself still exists, one level down, where a
+    /// patch is collapsed into an RGB response.
+    @Test("A patch with no response in one channel yields no camera RGB")
+    func patchMissingAChannel() throws {
+        let incomplete = CalibrationTestData.incompletePatchMeasurement(
+            CalibrationTestData.patch(1), missing: [2]
         )
-
-        let gains = try IRCalibrationFitter.sessionGains(for: measurements)
-        #expect(gains.byColorPlane[3] == nil)
-
-        let fourPlane = try #require(measurements.measurement(for: CalibrationTestData.patch(2)))
         #expect(
-            throws: IRCalibrationFitError.missingWhiteBalanceGain(
-                patch: fourPlane.patch.rawValue, colorPlane: 3, neutralPatch: neutral.rawValue
+            throws: IRCalibrationFitError.missingChannelResponse(
+                patch: "01", channel: "blue"
             )
         ) {
             _ = try IRCalibrationFitter.cameraRGB(
-                for: fourPlane, gains: gains, policy: .meanOfGreenPlaneMeans
+                for: incomplete, gains: .unbalanced, policy: .meanOfGreenPlaneMeans
             )
         }
+    }
+
+    /// The `?? 1` this replaced: a fitted patch measured on a colour plane the
+    /// neutral reference never saw used to be left silently unbalanced while
+    /// every other plane was scaled.
+    ///
+    /// With the recorded plane signature in place, valid evidence can no
+    /// longer produce that situation — an included neutral reference carries
+    /// every expected plane — so this exercises the guard directly. It is the
+    /// defensive second layer, and it stays because the gains type must not
+    /// depend on having been built by a checked path.
+    @Test("A colour plane the neutral reference defines no gain for is refused, never left at 1")
+    func missingGainIsNeverIdentity() throws {
+        let neutral = CalibrationTestData.patch(1)
+        let partial = IRCalibrationSessionGains(
+            neutralPatch: neutral, byColorPlane: [0: 1, 1: 1.2, 2: 1.5]
+        )
+
+        #expect(try partial.gain(forColorPlane: 1, of: CalibrationTestData.patch(2)) == 1.2)
+        #expect(
+            throws: IRCalibrationFitError.missingWhiteBalanceGain(
+                patch: "02", colorPlane: 3, neutralPatch: neutral.rawValue
+            )
+        ) {
+            _ = try partial.gain(forColorPlane: 3, of: CalibrationTestData.patch(2))
+        }
+
+        // And an unbalanced session answers 1 because it means 1, not because
+        // a lookup missed.
+        #expect(
+            try IRCalibrationSessionGains.unbalanced
+                .gain(forColorPlane: 3, of: CalibrationTestData.patch(2)) == 1
+        )
     }
 
     @Test("A neutral reference at or below zero defines no gain")
@@ -435,6 +468,7 @@ struct IRCalibrationFitterTests {
             target: .colorCheckerClassic24,
             illuminant: .d65,
             captureContext: CalibrationTestData.context(),
+                colorPlaneSignature: CalibrationTestData.bayerSignature,
             normalization: CalibrationTestData.normalization(),
             whiteBalancePolicy: .neutralPatch(neutral),
             patches: patches,

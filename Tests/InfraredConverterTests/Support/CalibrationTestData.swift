@@ -90,6 +90,24 @@ enum CalibrationTestData {
         )
     }
 
+    // MARK: - Sensor layout
+
+    /// The four-plane RGGB signature every synthetic patch below is measured
+    /// against: `0 R, 1 G, 2 B, 3 G`.
+    ///
+    /// Written out here, in test data, rather than offered as a constant on
+    /// `IRCalibrationColorPlaneSignature`. A named `.bayerRGGB` in the domain
+    /// model would read as an assumption the project makes about sensors; the
+    /// only authority for a real signature is the decoder's own layout, and
+    /// the only authority for a synthetic one is the synthetic mosaic it goes
+    /// with.
+    static let bayerSignature = try! IRCalibrationColorPlaneSignature([
+        .init(colorPlane: 0, channel: .red),
+        .init(colorPlane: 1, channel: .green),
+        .init(colorPlane: 2, channel: .blue),
+        .init(colorPlane: 3, channel: .green),
+    ])
+
     // MARK: - Patches
 
     /// A patch measured on a four-plane RGGB layout: planes 0=R, 1=G, 2=B,
@@ -138,6 +156,33 @@ enum CalibrationTestData {
         )
     }
 
+    /// A patch the sensor layout produced fewer planes for than
+    /// ``bayerSignature`` expects.
+    ///
+    /// By default it carries the exclusion that describes exactly that, which
+    /// is the only shape of incomplete evidence a measurement set accepts.
+    /// `exclusion` is overridable so a test can build the *contradictory*
+    /// evidence and watch it be refused.
+    static func incompletePatchMeasurement(
+        _ patch: IRCalibrationTargetPatchID,
+        missing: [Int],
+        red: Double = 0.3,
+        green: Double = 0.4,
+        blue: Double = 0.2,
+        exclusion: IRCalibrationPatchExclusion?? = nil,
+        region: RAWActiveAreaRegion = RAWActiveAreaRegion(
+            originRow: 0, originColumn: 0, width: 20, height: 20
+        )
+    ) -> IRCalibrationPatchMeasurement {
+        let complete = patchMeasurement(patch, red: red, green: green, blue: blue)
+        return try! IRCalibrationPatchMeasurement(
+            patch: patch,
+            region: region,
+            planes: complete.planes.filter { !missing.contains($0.colorPlane) },
+            exclusion: exclusion ?? .incompleteColorPlanes(missing: missing)
+        )
+    }
+
     // MARK: - A whole synthetic session
 
     /// Camera responses for `count` patches, spread so that the three channels
@@ -163,12 +208,23 @@ enum CalibrationTestData {
         context: IRCalibrationCaptureContext? = nil,
         exclusions: [Int: IRCalibrationPatchExclusion] = [:],
         clipped: [Int: Int] = [:],
+        incomplete: [Int: [Int]] = [:],
+        colorPlaneSignature: IRCalibrationColorPlaneSignature? = nil,
         clippingPolicy: IRCalibrationClippingPolicy = .default,
         id: IRCalibrationMeasurementSetID? = nil
     ) -> IRCalibrationMeasurementSet {
         let responses = responses ?? syntheticCameraResponses()
         let patches = responses.enumerated().map { index, response in
-            patchMeasurement(
+            if let missing = incomplete[index + 1] {
+                return incompletePatchMeasurement(
+                    patch(index + 1),
+                    missing: missing,
+                    red: response.0,
+                    green: response.1,
+                    blue: response.2
+                )
+            }
+            return patchMeasurement(
                 patch(index + 1),
                 red: response.0,
                 green: response.1,
@@ -183,6 +239,7 @@ enum CalibrationTestData {
             target: .colorCheckerClassic24,
             illuminant: illuminant,
             captureContext: context ?? Self.context(),
+            colorPlaneSignature: colorPlaneSignature ?? bayerSignature,
             normalization: normalization(),
             clippingPolicy: clippingPolicy,
             whiteBalancePolicy: whiteBalancePolicy,
@@ -209,11 +266,17 @@ enum CalibrationTestData {
         let gains = try! IRCalibrationFitter.sessionGains(for: measurements)
         var values: [IRCalibrationTargetPatchID: IRCalibrationReferenceRGB] = [:]
         for measurement in measurements.patches {
-            let camera = try! IRCalibrationFitter.cameraRGB(
-                for: measurement,
-                gains: gains,
-                policy: measurements.domain.greenPolicy
-            )
+            // A patch short of a colour plane produces no camera RGB and is
+            // never fitted, so it gets no reference value either. Skipped
+            // rather than forced: inventing one would be exactly the
+            // fabrication the reference dataset exists to prevent.
+            guard
+                let camera = try? IRCalibrationFitter.cameraRGB(
+                    for: measurement,
+                    gains: gains,
+                    policy: measurements.domain.greenPolicy
+                )
+            else { continue }
             let fitted = IRCalibrationFitter.apply(matrix, to: camera)
             let offset = noise[measurement.patch] ?? (0, 0, 0)
             values[measurement.patch] = try! IRCalibrationReferenceRGB(
