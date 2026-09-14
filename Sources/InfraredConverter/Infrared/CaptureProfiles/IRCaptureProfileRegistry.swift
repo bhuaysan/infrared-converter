@@ -14,23 +14,32 @@ import Foundation
 /// be duplicated once per frame with no way to tell the copies apart. See
 /// `docs/decisions/0020-ir-capture-profile-foundation.md`, Decision 6.
 ///
-/// ## Built-in only, in this milestone
+/// ## Built-in profiles, plus whatever the user has defined
 ///
-/// This is an immutable value built once from a fixed list. There is no
-/// user-profile directory, no profile JSON schema and no profile editor, which
-/// is a deliberate scope choice rather than an oversight: the milestone's
-/// purpose is the architecture and the photograph-level selection, and a
-/// profile manager would have dwarfed both. The domain model is shaped for
-/// user profiles — a namespaced identity, a definition that is pure data, a
-/// lookup that already refuses unknown identifiers — and none of it assumes
-/// the set is fixed.
+/// This is an immutable **value**, composed from two sources:
 ///
-/// One consequence is worth stating because a later milestone must not lose it:
-/// **the set of profiles cannot change while an export runs**, so an export
-/// does not have to defend against a definition being edited underneath it. It
-/// defends anyway, by carrying the resolved `IRCaptureProfile` rather than an
-/// identifier to look up later, which is the behaviour a mutable registry would
-/// require.
+/// ```text
+/// builtins       the profiles this build ships — today, builtin.uncalibrated
+/// userProfiles   definitions loaded from the profile library
+/// ```
+///
+/// Composition, not merging: an identity claimed by both sources, or by two
+/// user profiles, is refused at construction rather than resolved by "last one
+/// wins". Which of two definitions a photograph meant would otherwise depend on
+/// an ordering nobody chose. See
+/// `docs/decisions/0021-user-capture-profile-library.md`.
+///
+/// The value itself never changes. A profile created, edited or deleted
+/// produces a **new registry**, installed through one controlled path
+/// (`IRCaptureProfileLibrary`), which is what lets a document decide what the
+/// change costs it instead of discovering a definition had been mutated
+/// underneath it.
+///
+/// One consequence is worth stating because it is now load-bearing rather than
+/// incidental: **the registry an export was started with cannot change while it
+/// runs**, because an export carries the resolved `IRCaptureProfile` rather
+/// than an identifier to look up later. Editing a profile mid-export therefore
+/// affects the *next* export and not the running one.
 public struct IRCaptureProfileRegistry: Sendable {
 
     /// Every profile this registry knows, keyed by identity.
@@ -60,11 +69,36 @@ public struct IRCaptureProfileRegistry: Sendable {
         )
     }
 
-    /// The registry this application runs with: the built-in profiles, and
-    /// nothing else.
+    /// The built-in profiles, and nothing else.
+    ///
+    /// What the application runs with before a profile library is loaded, what
+    /// a library that is entirely unreadable falls back to, and what every test
+    /// that does not care about user profiles gets.
     public static let builtin = IRCaptureProfileRegistry(
         uncheckedProfiles: [.builtinUncalibrated]
     )
+
+    /// The profiles this build ships. Guaranteed present in every composed
+    /// registry.
+    public static let builtinProfiles: [IRCaptureProfile] = [.builtinUncalibrated]
+
+    /// Composes the built-in profiles with definitions loaded from the profile
+    /// library.
+    ///
+    /// The built-ins go in first and are not optional: a library that fails to
+    /// load entirely still leaves an application that can render photographs,
+    /// because `builtin.uncalibrated` is a value this build holds rather than a
+    /// file it reads.
+    ///
+    /// - Throws: `IRCaptureProfileError.duplicateProfileID` when one identity
+    ///   is claimed twice — across the two sources or within either of them.
+    ///   Nothing is dropped to make a duplicate go away.
+    public init(
+        builtins: [IRCaptureProfile] = IRCaptureProfileRegistry.builtinProfiles,
+        userProfiles: [IRCaptureProfile]
+    ) throws {
+        try self.init(profiles: builtins + userProfiles)
+    }
 
     /// The profile that a photograph with no saved selection gets, and that
     /// every historical sidecar migrates to.
@@ -103,4 +137,34 @@ public struct IRCaptureProfileRegistry: Sendable {
 
     /// How many profiles this registry holds.
     public var count: Int { profilesByID.count }
+
+    /// Every profile, ordered the way a person reading a list expects rather
+    /// than the way a machine stores them.
+    ///
+    /// ```text
+    /// built-in profiles first, by identity
+    /// then user profiles, by display name
+    /// ```
+    ///
+    /// Deliberately separate from `allProfiles`, which is sorted by identity
+    /// and is the deterministic listing anything mechanical should use. This
+    /// one is sorted by a **mutable** field, so it changes when somebody
+    /// renames a profile — which is exactly right for a menu and exactly wrong
+    /// for anything that has to be reproducible. Ties are broken by identity so
+    /// two profiles sharing a name still have a stable order.
+    public var profilesForDisplay: [IRCaptureProfile] {
+        allProfiles.sorted { first, second in
+            if first.id.isReserved != second.id.isReserved {
+                return first.id.isReserved
+            }
+            let byName = first.name.localizedStandardCompare(second.name)
+            if byName != .orderedSame { return byName == .orderedAscending }
+            return first.id.rawValue < second.id.rawValue
+        }
+    }
+
+    /// Every profile that is not built in, in display order.
+    public var userProfiles: [IRCaptureProfile] {
+        profilesForDisplay.filter { !$0.id.isReserved }
+    }
 }
