@@ -304,3 +304,58 @@ Nothing about the schema changed here. It is still `schemaVersion` and
 - **Migration.** There is one schema version, so there is nothing to migrate
   yet; `ImageAdjustments.init(from:)` is where a migration becomes visible when
   there is.
+
+---
+
+## Amendment (ADR 0020) — the payload widened, and the filename did not
+
+[ADR 0020](0020-ir-capture-profile-foundation.md) added the other kind of
+state this project has always described: a reusable capture configuration —
+camera, sensor conversion, filter — that is shared by many photographs rather
+than belonging to one.
+
+This document was written when the sidecar's payload was `ImageAdjustments`
+alone, and everything it says about **policy** is unchanged. What changed is
+what the payload *is*:
+
+```text
+before   ImageAdjustments
+after    PhotographProcessingState = capture-profile reference + ImageAdjustments
+```
+
+The sidecar is still **one** application-owned JSON file per photograph, and it
+is still called `<RAW name>.iradjustments.json`. The name was kept deliberately:
+it is what every sidecar already written is called, a filename is an address
+rather than a schema, and renaming it would have orphaned them all to no
+benefit. The payload's shape is versioned inside the file, which is where a
+reader looks.
+
+Three consequences for this document's claims:
+
+- **`ImageAdjustmentStore` became `PhotographProcessingStore`.** The unit is
+  the whole record, because it is one record: a capture profile that reached
+  disk without the adjustments it was rendered with would reopen showing
+  something nobody ever saw. The three reasons the abstraction exists are
+  unchanged, and so is the refusal to grow it into a persistence framework.
+  Reusable **profile definitions** are a different artefact with a different
+  lifetime and location, and are not stored here.
+- **The schema version moved.** `PersistedSchemaVersion`,
+  `currentSchemaVersion` and the version-aware `Codable` conformance belong to
+  `PhotographProcessingState`; `ImageAdjustments` is no longer `Codable` and
+  carries no persistence metadata at all. A version number belongs to the
+  record it describes. See ADR 0020, Decision 8.
+- **"Migration" is no longer a thing this document defers.** The last line of
+  *What this does not decide* said there was one schema version and nothing to
+  migrate. There are now five, and versions 1 to 4 migrate — in
+  `PhotographProcessingState.init(from:)` rather than in
+  `ImageAdjustments.init(from:)`. See
+  [ADR 0016](0016-interactive-channel-mixer.md),
+  [ADR 0017](0017-interactive-exposure.md),
+  [ADR 0019](0019-interactive-white-balance.md) and ADR 0020 for the four bumps.
+
+Unchanged, and worth restating because the widening is exactly when it would be
+tempting to relax: a record that exists and cannot be read is an **error**,
+never an empty state; the RAW file is never opened for writing; and nothing is
+repaired, deleted or defaulted. ADR 0020 adds one refusal in the same spirit —
+a photograph whose capture profile cannot be resolved stops the open rather
+than being rendered under a profile the user did not choose.

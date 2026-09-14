@@ -470,3 +470,48 @@ JPEG, PNG, DNG, OpenEXR, floating-point TIFF, batch export, export presets,
 resizing, output sharpening, print profiles, an ICC profile chooser,
 watermarks, a metadata editor, an EXIF round-trip engine, recipes, undo/redo, a
 histogram, white-balance controls, and any GPU path.
+
+---
+
+## Amendment (ADR 0020) — the export snapshot carries the capture profile
+
+[ADR 0020](0020-ir-capture-profile-foundation.md) made the camera-to-working
+transform a property of a selectable capture profile rather than a constant in
+`RAWWorkingImagePipeline`. An export is that transform's second consumer, so
+the snapshot this document defined had to widen with it:
+
+```text
+before   ExportRequest = RAW URL + ImageAdjustments
+after    ExportRequest = RAW URL + resolved IRCaptureProfile + ImageAdjustments
+```
+
+which is the canonical photograph processing state,
+`PhotographProcessingState`, with its profile half already resolved.
+`ExportRequest.state` derives the persisted pair from it.
+
+Everything this document claims about the boundary is unchanged, and one claim
+is strengthened:
+
+- **Never from preview pixels.** There is still no field on `ExportRequest`
+  through which a preview, a `WorkspacePreviewPipeline.Source`, a `CGImage` or a
+  `PreviewResolutionPolicy` could arrive. The profile is the fourth thing the
+  request may carry and it is a description, not pixels.
+- **Still a snapshot.** The profile is captured resolved, when the export
+  starts, and is never consulted again — deliberately **not** as an identifier
+  the export would look up in a registry while running, which would be exactly
+  the "look up mutable UI state after it starts" this document forbids.
+- **Preview and export share one more decision.** They already shared the RAW
+  front half, the three adjustment stages, `SceneLinearExposure` and
+  `SRGBTransferFunction`. They now also share the camera-to-working transform,
+  because both are handed the same resolved profile value and
+  `RAWWorkingImagePipeline.prepare` takes it as a parameter. A preview and its
+  export cannot be processed under different capture profiles.
+- **The receipt says what it was rendered with.** `TIFFExportResult.adjustments`
+  became `TIFFExportResult.state`, with `adjustments` kept as a projection of
+  it, so a receipt names the profile as well as the edits.
+- **An export still writes no sidecar**, and a failed save still does not block
+  one. Selecting a profile is persisted like any other decision — by the
+  document, after its render succeeds — and never by an export.
+
+The list of ways preview and export differ is unchanged: resolution, range
+policy, bit depth, destination. The capture profile is not among them.

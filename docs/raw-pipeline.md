@@ -706,6 +706,45 @@ There is **no default transform** on any entry point, no API that discovers a
 matrix for itself, and no fallback that reaches for metadata when something
 else is missing. That policy does not exist.
 
+#### Who chooses it
+
+The photograph's resolved **capture profile**, through its
+`IRCaptureProcessingBasis` — the only part of a profile that reaches a pixel.
+
+```text
+PhotographProcessingState.captureProfile   a stable IRCaptureProfileID
+        ↓  IRCaptureProfileRegistry
+IRCaptureProfile.processingBasis
+        ↓
+RAWCameraToWorkingColorTransform           a parameter of RAWWorkingImagePipeline.prepare
+```
+
+It was a static constant on `RAWWorkingImagePipeline` until the capture-profile
+milestone, which made the application's one capture-processing assumption
+invisible and unselectable. Both end paths — the interactive preview and the
+full-resolution export — are handed the **same resolved profile value**, so
+they cannot process one photograph under different transforms.
+
+The two bases that exist:
+
+| Basis | Transform | What it is |
+| --- | --- | --- |
+| `.uncalibratedSensorRGB` | `.sensorRGBIdentityFalseColor` | What `builtin.uncalibrated` uses, and what every build before capture profiles applied. |
+| `.explicitMatrix(_:)` | `.explicit(matrix:)` | A matrix a profile's author supplied. No calibration claim, no UI, no persisted profile format that could carry it. |
+
+Neither is a validated infrared calibration, and
+`isValidatedInfraredCalibration` is derived from the transform's own provenance
+rather than asserted by the profile. A profile's camera name, conversion vendor
+and nominal filter wavelength are metadata and change none of that. See
+`docs/decisions/0020-ir-capture-profile-foundation.md`.
+
+Because the basis is the only route from a profile to a pixel, the workspace
+can answer "does selecting this profile need the photograph re-prepared?" from
+data: two profiles that share a basis produce identical pixels, so switching
+between them costs a re-render for provenance and nothing more; a different
+basis re-runs the white balance, the demosaic, the conversion and the reduction
+from the retained normalised mosaic.
+
 #### Identity false colour
 
 The matrix is exactly the identity, and the stage takes a dedicated path that

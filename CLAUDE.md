@@ -240,7 +240,17 @@ source + adjustments
 
 This architecture must make undo/redo, presets, recipes, batch processing, parameter comparison, and sidecars possible without modifying source data.
 
-The adjustment sidecar is the first of those to exist. It holds the complete adjustment record — today the white-balance choice, the orientation correction, the creative channel mix and the exposure — and it is written and read as a whole, never field by field. A RAW file is an immutable input — never rewritten, appended to, re-tagged or replaced — and a user's decisions live in one application-owned JSON file beside it, named by one rule in one place. It is read **before** the file is decoded, so the first render is already the saved state; it is written only after a state has rendered successfully and is still the current one; and a record it cannot understand stops the open rather than becoming `ImageAdjustments.none`. See `docs/decisions/0013-adjustment-sidecar.md`.
+The sidecar is the first of those to exist. It holds the photograph's complete application-owned processing state — the **capture-profile reference** and the adjustments together, today the white-balance choice, the orientation correction, the creative channel mix and the exposure — and it is written and read as a whole, never field by field. A RAW file is an immutable input — never rewritten, appended to, re-tagged or replaced — and a user's decisions live in one application-owned JSON file beside it, named by one rule in one place. It is read **before** the file is decoded, so the first render is already the saved state; it is written only after a state has rendered successfully and is still the current one; and a record it cannot understand stops the open rather than becoming a default state. See `docs/decisions/0013-adjustment-sidecar.md` and `docs/decisions/0020-ir-capture-profile-foundation.md`.
+
+Two kinds of state live there, and keeping them apart is the point:
+
+```text
+PhotographProcessingState
+ ├── captureProfile   a reference to a reusable capture configuration
+ └── adjustments      this photograph's own editing decisions
+```
+
+A capture profile describes how the photograph was **captured** — camera, sensor conversion, filter — and is shared by every frame shot that way. An adjustment describes what the user decided about **this one frame**. A neutral patch at `(0.42, 0.31)` is a place in one picture, so it can never belong to a profile; a filter's nominal wavelength is true of a configuration, so it can never be an adjustment.
 
 ## Processing stages have explicit boundaries
 
@@ -344,6 +354,8 @@ Individual stages must remain independently testable and movable where technical
 
 Infrared white balance is a **user adjustment**, not a fixed application choice — but it stays where it is, in the mosaic domain, before demosaicing. It is the one adjustment upstream of the preview reduction, so changing it re-prepares that preview from a retained normalised mosaic rather than being applied to it. The user's decision is persisted as the **neutral region they chose**, in normalised active-area coordinates, and the gains are re-derived from the RAW file every time, by one resolver and one estimator, for the preview and the export alike. See `docs/decisions/0019-interactive-white-balance.md`.
 
+The camera/sensor interpretation stage — the camera-to-working transform — is no longer a fixed application constant. It is chosen by the photograph's resolved **capture profile**, through its `IRCaptureProcessingBasis`, and handed to the shared RAW front half as a parameter. For the built-in `builtin.uncalibrated` profile that is exactly `.sensorRGBIdentityFalseColor`, which is what every earlier build applied, so migrated photographs render identically. Preview and export are handed the same resolved profile value. See `docs/decisions/0020-ir-capture-profile-foundation.md`.
+
 The working representation is established **before** the infrared channel/color transform, not after it. That ordering was originally hypothesised the other way round; implementation showed that a creative channel mix is only meaningful once the RGB axes it remixes are defined, so the stage operates inside the working representation and leaves it unchanged. See `docs/decisions/0006-working-color-space.md` and `docs/decisions/0007-infrared-channel-mixing.md`.
 
 The pipeline's "Display or Export Transform" step is implemented as **two separate boundaries**, and no tone stage exists at either. The display boundary — exposure, hard display-range clipping, the sRGB transfer function, 8-bit quantisation — is `docs/decisions/0008-display-preview-rendering.md`. The export boundary — hard export-range clipping, the same transfer function, 16-bit quantisation — is `docs/decisions/0018-full-resolution-tiff-export.md`. They share the arithmetic that is genuinely one rule (`SceneLinearExposure`, `SRGBTransferFunction`) and each owns its own range policy, bit depth and destination. Neither may reuse the other's buffer, and an export must never start from the 8-bit preview.
@@ -379,6 +391,8 @@ Do not assume that standard camera or DNG color matrices calibrated for visible-
 Visible-light camera transforms and IR-specific calibration transforms are separate concepts.
 
 Do not use a standard camera matrix merely because LibRaw or metadata exposes one. Its calibration domain must be understood before applying it to IR data.
+
+A capture profile naming a camera, a conversion vendor and a nominal filter wavelength is **not** a calibration either. Those fields are context that lets a person tell two configurations apart and lets the application refuse a profile applied to the wrong body. Only measured, documented data makes a transform calibrated, and none exists in this project.
 
 When adding any color matrix or transform, document:
 
@@ -450,6 +464,10 @@ A camera model profile may contain:
 - sensor quirks
 - validated IR-specific calibration data where available
 - model aliases
+
+The first of these now exists, as `IRCaptureProfile`: a reusable, stably identified description of the camera, the sensor conversion and the filter, plus the one field that reaches a pixel — its `IRCaptureProcessingBasis`. A photograph references it by `IRCaptureProfileID`; the definition lives in a registry, never copied into a sidecar. Camera matching is exact, validates a selection a person already made, and never makes one. An unresolvable or mismatched profile refuses the photograph rather than being replaced by another. See `docs/decisions/0020-ir-capture-profile-foundation.md`.
+
+Nothing in it is a calibration. `isValidatedInfraredCalibration` is derived from the transform's own provenance rather than asserted by the profile, and it is `false` for every profile this project ships.
 
 A `CaptureConfiguration` describes the physical camera state relevant to the photograph, for example:
 
@@ -1108,7 +1126,7 @@ Examples:
 ```text
 docs/decisions/0001-use-libraw.md
 docs/decisions/0006-working-color-space.md
-docs/decisions/0020-metal-render-pipeline.md
+docs/decisions/0021-metal-render-pipeline.md
 ```
 
 The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`. The creative channel-mix stage that depends on it is `docs/decisions/0007-infrared-channel-mixing.md`, the display boundary that turns its result into pixels is `docs/decisions/0008-display-preview-rendering.md`, the geometry stage between them is `docs/decisions/0009-application-owned-orientation.md`, and the user-owned orientation adjustment composed onto that is `docs/decisions/0010-user-owned-orientation-adjustment.md`.
@@ -1124,6 +1142,8 @@ That the creative channel mix is a canonical **user adjustment**, that the retai
 That exposure is the third canonical user adjustment and the first continuous one, that it is applied by the existing display-stage primitive as `× 2^EV` before the range policy, that its persisted range is `−10…+10 EV` while the slider offers `−4…+4`, that a slider drag is handled by the existing coalescing renderer with no debounce, and that the sidecar schema is at version 3 with tested version 1 and 2 migrations, is `docs/decisions/0017-interactive-exposure.md`.
 
 That the full-resolution export restarts from the RAW file with the same canonical adjustments, that preview and export share the RAW front half and every adjustment stage and diverge only at resolution, range policy, bit depth and destination, why the exposure arithmetic and the sRGB transfer function each became one shared primitive, why a 16-bit integer TIFF still needs an explicit counted clip, why the pixels are oriented and the orientation tag is `1`, and why an export is a snapshot that neither waits for a preview nor writes a sidecar, is `docs/decisions/0018-full-resolution-tiff-export.md`.
+
+That a reusable capture profile is a different kind of state from a photograph-local adjustment, that a photograph's canonical state became the pair `capture-profile reference + ImageAdjustments`, that identity is a validated namespaced string rather than a display name or a path, that a profile's camera, conversion and filter are metadata while only its processing basis reaches a pixel, that an unresolvable or mismatched profile refuses the open rather than being substituted, that the registry holds definitions while the sidecar holds a reference, that the sidecar schema is at version 5 with a nested payload and tested version 1 to 4 migrations to `builtin.uncalibrated` proven pixel-neutral, that schema ownership moved off `ImageAdjustments`, that preview and export are handed the same resolved profile, and that a profile change costs a re-preparation only when its processing basis differs, is `docs/decisions/0020-ir-capture-profile-foundation.md`.
 
 That the infrared white balance is a canonical **user adjustment** recorded as the neutral region a person picked rather than as the gains it produced, that the workspace retains the normalised mosaic so a new patch costs no decode, that the heavy re-preparation and the fast render are separate coalescing slots whose landing order is resolved in favour of the newest complete state, that the export resolves the same intent from the file rather than from any workspace cache, that the coordinate road from a click to a sensor coordinate depends on the layout and the orientation and on nothing else, that `isIdentity` is retired in favour of `isDefault`, and that the sidecar schema is at version 4 with tested version 1, 2 and 3 migrations to the historical centred patch, is `docs/decisions/0019-interactive-white-balance.md`.
 
@@ -1542,6 +1562,20 @@ Pause and reconsider when code begins to show any of these patterns:
 - clamping a click outside the displayed image to the nearest edge instead of ignoring it
 - a picker mapping that consults the channel mix, the exposure or the preview resolution
 - a whole-record `isIdentity` that claims "no net effect on the image" once a default stage has a visible effect
+- putting `captureProfile` inside `ImageAdjustments`, or a neutral patch, a rotation or an exposure inside a capture profile
+- calling a camera/filter profile calibrated merely because it has a nominal wavelength, a camera name or a conversion vendor
+- treating a nominal 720 nm filter label as a measured spectral response, or matching profiles by wavelength
+- inventing an IR camera-to-working matrix without measured evidence, or labelling any matrix calibrated without it
+- persisting an entire reusable profile definition in every photograph's sidecar instead of a stable reference
+- silently falling back to another profile when a referenced profile is missing, or opening a photograph under a profile the user did not choose
+- auto-selecting a profile from a filename, a camera model or EXIF metadata without user intent
+- letting preview and export resolve different capture profiles, or an export resolving one from a registry after it has started
+- applying profile recommendations continuously, so a later user edit is overwritten by a profile selection
+- allowing a preview prepared under profile A to install after the document switched to profile B
+- deciding what a profile change costs from a UI assumption rather than from its processing basis
+- a capture-processing decision that is a static constant inside a processing type rather than a resolved profile's choice
+- a schema version, or any persistence metadata, living on `ImageAdjustments` rather than on the record the sidecar holds
+- a sidecar record with two authorities for one field — adjustments both nested and at the top level
 - every feature depending directly on LibRaw
 - direct Metal shader calls from UI views
 - tests requiring the entire app to run

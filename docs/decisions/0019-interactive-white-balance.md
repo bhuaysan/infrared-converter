@@ -561,3 +561,59 @@ go.
 milestone brief and deferred: it is a change to what a refused adjustment does,
 and doing it for one of four would be worse than doing it for none. See
 Consequences.
+
+---
+
+## Amendment (ADR 0020) — the patch stays photograph-local
+
+[ADR 0020](0020-ir-capture-profile-foundation.md) introduced reusable capture
+profiles: camera, sensor conversion and filter, identified by a stable id and
+shared across photographs. The obvious question it raises about this document is
+whether a white balance belongs in one.
+
+It does not, and the reason is the shape of the decision rather than a
+preference:
+
+```text
+capture profile   "an E-PL3, full-spectrum, through a 720 nm filter"
+                  true of every frame shot that way
+
+neutral patch     "the neutral thing in THIS picture is at (0.42, 0.31)"
+                  true of one photograph and no other
+```
+
+A reusable profile that carried a patch would be asserting that the same
+rectangle is neutral in every photograph ever taken with that camera. So:
+
+- **the selected neutral region remains an `ImageAdjustments` field**, persisted
+  with the photograph, exactly as Decisions 2 and 4 describe;
+- **a capture profile may describe the capture context** — which filter family,
+  which conversion — and that context is metadata: it does not resolve to gains,
+  it is not consulted by the estimator, and it takes no part in choosing a
+  patch;
+- **profile-level white balance is refused rather than deferred.** Not "no
+  recommendation yet": a patch is not the kind of thing a reusable profile can
+  hold.
+
+Two mechanical changes to what this document describes, neither of which
+touches the white-balance model:
+
+- **The heavy slot's request grew a second field.** It was a
+  `UserWhiteBalanceAdjustment`; it is now `SourcePreparationRequest
+  { whiteBalance, captureProfile }`. Both are upstream of the reduction and
+  neither can be applied to an already-reduced buffer, so they share one pass
+  and one slot — still two slots per document, not three. Every guard in
+  Decisions 7 and 8 now compares the whole request, so a source prepared under
+  one profile cannot install into a document that has moved to another, and a
+  profile changed during a preparation restarts it exactly when the resulting
+  pixels would differ.
+- **The camera-to-working transform became a parameter**, supplied by the
+  resolved profile's processing basis, where it was a constant this document's
+  Decision 12 described as shared by preview and export. It still is shared —
+  both paths are handed the same resolved profile — and there is still one
+  resolver and one estimator for the patch.
+
+The export's behaviour under a pending decision is unchanged and now covers
+both halves: an export started after a new patch or a new profile has been
+chosen, but before its preview has rendered, renders the **new** one. The
+canonical state is what is exported.

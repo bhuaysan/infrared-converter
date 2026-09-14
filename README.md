@@ -65,7 +65,8 @@ infrared white balance           WhiteBalancedRAWMosaic
    ↓                             RAWDemosaicer
 bilinear Bayer demosaic          DemosaicedRAWRGBImage (camera-native RGB)
    ↓                             RAWWorkingColorConverter
-explicit camera → working 3×3    WorkingColorRGBImage (extended linear sRGB)
+camera → working 3×3             WorkingColorRGBImage (extended linear sRGB)
+(from the capture profile)
    ↓                             SceneLinearPreviewReducer
 reduce to preview resolution     SceneLinearPreviewImage (same space, fewer pixels)
                                    ← RETAINED; pre-creative
@@ -203,22 +204,61 @@ that restores the rotation rather than making the image upright, and it resets
 the orientation only. See
 [ADR 0010](docs/decisions/0010-user-owned-orientation-adjustment.md).
 
-### One record, four adjustments
+### Two kinds of state: a capture profile, and your adjustments
+
+Infrared Converter keeps apart two things that both affect a rendering and are
+not the same kind of thing:
 
 ```text
-ImageAdjustments
- ├── whiteBalance   the default centred patch | a neutral region you picked
- ├── orientation    one of eight states, composed onto the file's own
- ├── channelMix     identity | red/blue swap | an explicit 3×3 matrix
- └── exposure       a finite EV from −10 to +10, applied as × 2^EV
+PhotographProcessingState
+ ├── captureProfile   how the photograph was CAPTURED — reusable, shared by
+ │                    every frame shot that way
+ └── adjustments      what YOU decided about THIS frame
+      ├── whiteBalance   the default centred patch | a neutral region you picked
+      ├── orientation    one of eight states, composed onto the file's own
+      ├── channelMix     identity | red/blue swap | an explicit 3×3 matrix
+      └── exposure       a finite EV from −10 to +10, applied as × 2^EV
 ```
+
+A **capture profile** describes the camera, the sensor conversion and the
+filter — "an E-PL3, full-spectrum, through a 720 nm filter" — and it is the one
+thing that decides how camera-native sensor RGB is placed into the working
+colour space. It is identified by a stable id such as `builtin.uncalibrated`,
+and a photograph's sidecar stores that **reference**, never a copy of the
+definition, so renaming or editing a profile does not silently change any
+photograph.
+
+An **adjustment** belongs to one frame and to no other. The clearest case is
+the neutral patch: `(0.42, 0.31)` is a place in *this* picture, and a reusable
+profile that carried it would be claiming the same rectangle is neutral in
+every photograph that camera ever took.
+
+> **The current built-in profile remains uncalibrated false-colour processing.**
+> `builtin.uncalibrated` places the sensor's own R, G and B responses onto the
+> working space's axes unchanged. That is a deliberate, assumption-minimal
+> choice, not a colour calibration: no camera, conversion or filter in this
+> project has been characterised, and no profile claims otherwise. The
+> inspector says `Calibration — No`, in words.
+
+A profile's camera name, conversion vendor and nominal filter wavelength are
+**context**, not evidence. A marketed "720 nm" filter is not a step function at
+720 nm, two manufacturers' 720 nm filters are not interchangeable, and nothing
+here matches profiles by wavelength or picks one from a filename or from EXIF.
+Selecting a profile is always a person's decision. See
+[ADR 0020](docs/decisions/0020-ir-capture-profile-foundation.md).
+
+If a sidecar names a profile this machine does not have, or one made for a
+different camera, the photograph does not open and says why. It is never
+rendered under some other profile that happens to be installed.
+
+### One record, four adjustments
 
 All four are fields of one record, and every request is that whole record —
 never one field. A burst across the controls therefore collapses to one newest
 complete state: nothing in between is rendered, put on screen or written. The
-record is serialisable and versioned, and it is saved: one JSON sidecar beside
-the RAW file, written after exactly that state has rendered and read back
-before the first render on the next open. See
+record is saved together with the capture-profile reference, as one document
+record: one JSON sidecar beside the RAW file, written after exactly that state
+has rendered and read back before the first render on the next open. See
 [ADR 0013](docs/decisions/0013-adjustment-sidecar.md),
 [ADR 0016](docs/decisions/0016-interactive-channel-mixer.md) and
 [ADR 0019](docs/decisions/0019-interactive-white-balance.md).
@@ -236,17 +276,20 @@ OLYMPUS.ORF.iradjustments.json     the user's decisions, and the only place they
 
 ```json
 {
-  "schemaVersion" : 4,
-  "orientation" : "rotate90Clockwise",
-  "channelMix" : { "kind" : "redBlueSwap" },
-  "exposureEV" : 1.25,
-  "whiteBalance" : {
-    "kind" : "neutralPatch",
-    "region" : {
-      "originX" : 0.4766,
-      "originY" : 0.4688,
-      "width" : 0.0468,
-      "height" : 0.0625
+  "schemaVersion" : 5,
+  "captureProfileID" : "builtin.uncalibrated",
+  "adjustments" : {
+    "orientation" : "rotate90Clockwise",
+    "channelMix" : { "kind" : "redBlueSwap" },
+    "exposureEV" : 1.25,
+    "whiteBalance" : {
+      "kind" : "neutralPatch",
+      "region" : {
+        "originX" : 0.4766,
+        "originY" : 0.4688,
+        "width" : 0.0468,
+        "height" : 0.0625
+      }
     }
   }
 }
@@ -259,11 +302,15 @@ every time, by the same estimator the export uses, so improving the estimator
 does not leave every saved photograph rendering by arithmetic that no longer
 exists. A file with no picked patch records `{ "kind" : "defaultNeutralPatch" }`.
 
-Schema version 2 added `channelMix`, version 3 added `exposureEV` and version 4
-added `whiteBalance`. Older records still read and migrate to the identity mix,
-`0 EV` and the **default centred patch** — the state they were actually saved
-in, rather than a guess about a missing field — and are written back at the
-current version the next time they are saved. Reading rewrites nothing. A
+Schema version 2 added `channelMix`, version 3 added `exposureEV`, version 4
+added `whiteBalance`, and version 5 added `captureProfileID` and moved the
+adjustments into their own object. The filename did not change. Older records
+still read and migrate to the identity mix, `0 EV`, the **default centred
+patch** and the **built-in uncalibrated profile** — the state they were
+actually saved in, rather than a guess about a missing field — and are written
+back at the current version the next time they are saved. That migration is
+proven pixel-neutral by tests that render a version 4 state and its migrated
+version 5 form and compare the buffers bit for bit. Reading rewrites nothing. A
 version this build does not know is refused outright rather than read around,
 because a setting whose omission would change the photograph must never be
 silently ignored.
@@ -275,8 +322,9 @@ is not an edit.
 
 The workspace shows a reduced, 8-bit preview. That preview is never the
 photograph, and it is never what gets exported. **Export TIFF…** takes the RAW
-file's URL and the current canonical `ImageAdjustments`, and renders the
-photograph again from the file, at the sensor's own resolution:
+file's URL, the resolved capture profile and the current canonical
+`ImageAdjustments`, and renders the photograph again from the file, at the
+sensor's own resolution:
 
 ```text
 ExportRequest = RAW URL + ImageAdjustments
@@ -666,9 +714,28 @@ See [RAW/README.md](RAW/README.md).
   table, no filename heuristic and no automatic straightening — the E-PL3
   fixture records EXIF 1 and is shown sideways until someone rotates it.
 - **Four things are adjustable: the white balance, the orientation, the channel
-  mix and the exposure.** The camera-to-working transform, the demosaic
-  algorithm and the preview resolution are still fixed application-layer
-  choices with no controls.
+  mix and the exposure**, plus the capture profile, which is a selection rather
+  than an adjustment. The demosaic algorithm and the preview resolution are
+  still fixed application-layer choices with no controls.
+- **No capture profile in this build is calibrated.** `builtin.uncalibrated`
+  applies the identity false-colour axis assignment, which is what every
+  earlier build did. There are no measured camera matrices, no spectral
+  response data and no validated infrared colour anywhere in this project.
+- **There is exactly one capture profile, and no way to create another.**
+  User-defined profile definitions are not persisted, so the registry is
+  built-in only and the control shows the current profile rather than offering
+  a menu of one. A photograph may still name any profile in its sidecar, and an
+  unknown one is refused rather than substituted.
+- **A capture profile made for another camera is a dead end in the UI.** The
+  photograph refuses to open, and the only way to change the profile is to edit
+  the sidecar. It is unreachable in this build, where the one profile matches
+  every camera, and a deliberate override is left to the milestone that ships
+  user-defined profiles.
+- **No profile recommendations.** A profile carries no suggested channel mix or
+  white-balance strategy, and nothing is ever copied into your adjustments by
+  selecting one.
+- **Nothing suggests or detects a profile.** Not from a filename, not from a
+  camera model, not from EXIF.
 - **The white balance is patch-driven only.** There is no temperature, no tint,
   no manual per-plane gain entry, and no automatic estimate of any kind — no
   grey-world, no white-patch, no scene analysis. A file with no saved decision
