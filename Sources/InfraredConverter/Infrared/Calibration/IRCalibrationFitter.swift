@@ -215,6 +215,28 @@ public struct IRCalibrationFitter: Sendable {
             throw .excludedNeutralReference(patch: neutral.rawValue, exclusion: exclusion)
         }
 
+        // Zero clipped samples, whatever the general tolerance says.
+        //
+        // `IRCalibrationClippingPolicy.maximumClippedSampleFraction` decides
+        // whether an *ordinary* patch is included, and that is a bounded
+        // judgement: one tolerated patch contributes one row to a
+        // least-squares problem with many rows. The neutral reference is not
+        // one row. Its gains multiply every channel of every fitted patch, so
+        // a single censored sample inside it would set the white balance of
+        // the whole transform from a number the sensor did not record. A patch
+        // may therefore be included by the policy and still be refused here,
+        // and that is not an inconsistency between the two rules — it is the
+        // difference between what a patch contributes and what a reference
+        // decides.
+        let clipped = patch.clippedSampleCount
+        if clipped > 0 {
+            throw .clippedNeutralReference(
+                patch: neutral.rawValue,
+                clippedSamples: clipped,
+                totalSamples: patch.totalSampleCount
+            )
+        }
+
         // Every RGB channel has to be represented, because every RGB channel
         // of every fitted patch is about to be scaled by a gain derived from
         // this one. A neutral patch missing blue defines no blue gain, and the

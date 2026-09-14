@@ -188,6 +188,105 @@ struct IRCalibrationFitterTests {
         }
     }
 
+    /// The general clipping tolerance decides whether an *ordinary* patch is
+    /// included. It does not decide whether a patch may define the session's
+    /// white balance: one tolerated clipped sample contributes a bounded
+    /// amount to one row of a least-squares problem, and the same sample
+    /// inside the neutral reference sets the gains that scale every channel of
+    /// every fitted patch.
+    @Test("A neutral reference with one clipped sample is refused even though the policy includes it")
+    func clippedNeutralReferenceIsRefusedDespiteTolerance() throws {
+        let neutral = CalibrationTestData.patch(20)
+        let tolerant = try IRCalibrationClippingPolicy(
+            normalizedClippingThreshold: 1.0, maximumClippedSampleFraction: 0.01
+        )
+        let measurements = CalibrationTestData.measurementSet(
+            whiteBalancePolicy: .neutralPatch(neutral),
+            clipped: [20: 1],
+            clippingPolicy: tolerant
+        )
+
+        // 1 clipped sample of 400 is 0.0025, below the 0.01 the policy
+        // tolerates, so the patch is included by the general rule...
+        let recorded = try #require(measurements.measurement(for: neutral))
+        #expect(recorded.isIncluded)
+        #expect(recorded.clippedSampleCount == 1)
+        #expect(recorded.totalSampleCount == 400)
+        #expect(
+            !tolerant.excludes(
+                clippedSamples: recorded.clippedSampleCount, of: recorded.totalSampleCount
+            )
+        )
+
+        // ...and is still refused as the session's neutral reference.
+        #expect(
+            throws: IRCalibrationFitError.clippedNeutralReference(
+                patch: neutral.rawValue, clippedSamples: 1, totalSamples: 400
+            )
+        ) {
+            _ = try IRCalibrationFitter.sessionGains(for: measurements)
+        }
+
+        let reference = CalibrationTestData.referenceDataset(
+            for: CalibrationTestData.measurementSet(), matrix: CalibrationTestData.syntheticMatrix
+        )
+        #expect(throws: IRCalibrationFitError.self) {
+            _ = try IRCalibrationFitter().fit(
+                measurements: measurements, reference: reference,
+                now: CalibrationTestData.fittedAt
+            )
+        }
+    }
+
+    @Test("A neutral reference with no clipped sample at all still defines the gains")
+    func unclippedNeutralReferenceIsAccepted() throws {
+        let neutral = CalibrationTestData.patch(20)
+        let measurements = CalibrationTestData.measurementSet(
+            whiteBalancePolicy: .neutralPatch(neutral), clipped: [20: 0]
+        )
+        let recorded = try #require(measurements.measurement(for: neutral))
+        #expect(recorded.clippedSampleCount == 0)
+
+        let gains = try IRCalibrationFitter.sessionGains(for: measurements)
+        #expect(gains.neutralPatch == neutral)
+        #expect(gains.byColorPlane.values.allSatisfy { $0 >= 1 - 1e-12 })
+    }
+
+    /// A clipped sample anywhere in the neutral patch is fatal, not only one
+    /// in the plane that happens to be strongest: every plane's mean feeds a
+    /// gain, and the strongest of them is the one the others are scaled
+    /// towards.
+    @Test(
+        "Clipping in any plane of the neutral reference refuses the fit",
+        arguments: [0, 1, 2, 3]
+    )
+    func clippedNeutralReferenceInAnyPlane(plane: Int) throws {
+        let neutral = CalibrationTestData.patch(1)
+        var planes: [IRCalibrationPlaneMeasurement] = []
+        for (index, channel) in [
+            (0, RAWLinearRGBChannel.red), (1, .green), (2, .blue), (3, .green),
+        ] {
+            planes.append(
+                try IRCalibrationPlaneMeasurement(
+                    colorPlane: index,
+                    channel: channel,
+                    sampleCount: 100,
+                    mean: 0.5,
+                    clippedSampleCount: index == plane ? 1 : 0
+                )
+            )
+        }
+        let measurements = try Self.measurementSet(neutral: neutral, neutralPlanes: planes)
+
+        #expect(
+            throws: IRCalibrationFitError.clippedNeutralReference(
+                patch: neutral.rawValue, clippedSamples: 1, totalSamples: 400
+            )
+        ) {
+            _ = try IRCalibrationFitter.sessionGains(for: measurements)
+        }
+    }
+
     @Test("A neutral reference with no response in one channel defines no gains")
     func neutralReferenceMissingAChannel() throws {
         let neutral = CalibrationTestData.patch(1)

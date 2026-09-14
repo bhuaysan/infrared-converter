@@ -41,6 +41,24 @@ public enum IRCalibrationFitError: Error, Equatable {
     /// whole transform.
     case excludedNeutralReference(patch: String, exclusion: IRCalibrationPatchExclusion)
 
+    /// The session's neutral reference contains at least one clipped sample.
+    ///
+    /// Deliberately independent of
+    /// ``IRCalibrationClippingPolicy/maximumClippedSampleFraction``. That
+    /// tolerance is a statement about an *ordinary* patch, one of many, whose
+    /// influence on the fit is bounded by the other patches around it. The
+    /// neutral reference is not one of many: the gains it defines multiply
+    /// every channel of every patch admitted to the fit, so a censored sample
+    /// inside it does not perturb one row of the least-squares problem, it
+    /// displaces the white balance of the whole transform.
+    ///
+    /// So a tolerance that leaves a patch *included* — one clipped sample in
+    /// four hundred, under a fraction of `0.01` — is still not a tolerance for
+    /// a patch that is about to set the session's white balance. Zero is the
+    /// only defensible threshold here, and it is a definition rather than a
+    /// tuned constant.
+    case clippedNeutralReference(patch: String, clippedSamples: Int, totalSamples: Int)
+
     /// A colour plane the session's white balance defines no gain for.
     ///
     /// Under a neutral-patch policy this is a refusal rather than a gain of
@@ -87,6 +105,8 @@ extension IRCalibrationFitError: LocalizedError {
             return "The calibration session's neutral reference was never measured."
         case .excludedNeutralReference:
             return "The calibration session's neutral reference is not usable."
+        case .clippedNeutralReference:
+            return "The calibration session's neutral reference contains clipped samples."
         case .missingWhiteBalanceGain:
             return "The calibration session's white balance does not cover one colour plane."
         case .nonFiniteSample:
@@ -149,6 +169,20 @@ extension IRCalibrationFitError: LocalizedError {
                 unusable set the white balance of the whole transform. The evidence keeps \
                 the measurement; what it cannot do is fit from it. Re-photograph the chart, \
                 or fit the session unbalanced.
+                """
+
+        case .clippedNeutralReference(let patch, let clipped, let total):
+            return """
+                The session's neutral reference is patch "\(patch)", and \(clipped) of its \
+                \(total) samples were recorded at or above saturation. The general clipping \
+                tolerance does not apply to it: an ordinary patch that survives that \
+                tolerance contributes one row to the fit, while the neutral reference defines \
+                the gains that scale every channel of every fitted patch — so a censored \
+                sample in it would set the white balance of the whole transform from a value \
+                the sensor did not actually record. The evidence keeps the measurement; what \
+                it cannot do is fit from it. Re-expose the capture so the neutral patch sits \
+                clear of saturation and photograph the chart again, or fit the session \
+                unbalanced.
                 """
 
         case .missingWhiteBalanceGain(let patch, let plane, let neutral):

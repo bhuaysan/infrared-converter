@@ -162,6 +162,8 @@ enum CalibrationTestData {
         illuminant: IRCalibrationIlluminant = .measuredSPD(reference: "synthetic-spd-1"),
         context: IRCalibrationCaptureContext? = nil,
         exclusions: [Int: IRCalibrationPatchExclusion] = [:],
+        clipped: [Int: Int] = [:],
+        clippingPolicy: IRCalibrationClippingPolicy = .default,
         id: IRCalibrationMeasurementSetID? = nil
     ) -> IRCalibrationMeasurementSet {
         let responses = responses ?? syntheticCameraResponses()
@@ -171,6 +173,7 @@ enum CalibrationTestData {
                 red: response.0,
                 green: response.1,
                 blue: response.2,
+                clipped: clipped[index + 1] ?? 0,
                 exclusion: exclusions[index + 1]
             )
         }
@@ -181,6 +184,7 @@ enum CalibrationTestData {
             illuminant: illuminant,
             captureContext: context ?? Self.context(),
             normalization: normalization(),
+            clippingPolicy: clippingPolicy,
             whiteBalancePolicy: whiteBalancePolicy,
             patches: patches,
             provenance: provenance(),
