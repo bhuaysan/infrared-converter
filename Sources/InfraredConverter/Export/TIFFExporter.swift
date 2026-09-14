@@ -67,9 +67,10 @@ public struct TIFFExportResult: Equatable, Sendable {
     public let destination: URL
     /// Which RAW file it was rendered from.
     public let sourceURL: URL
-    /// The canonical adjustments it was rendered with — the export snapshot's
-    /// own copy, not whatever the document holds now.
-    public let adjustments: ImageAdjustments
+    /// The canonical processing state it was rendered with — the capture
+    /// profile's identity and the adjustments, as the export snapshot held
+    /// them, not whatever the document holds now.
+    public let state: PhotographProcessingState
     public let pixelWidth: Int
     public let pixelHeight: Int
     public let bitsPerComponent: Int
@@ -84,7 +85,7 @@ public struct TIFFExportResult: Equatable, Sendable {
     public init(
         destination: URL,
         sourceURL: URL,
-        adjustments: ImageAdjustments,
+        state: PhotographProcessingState,
         pixelWidth: Int,
         pixelHeight: Int,
         bitsPerComponent: Int,
@@ -95,7 +96,7 @@ public struct TIFFExportResult: Equatable, Sendable {
     ) {
         self.destination = destination
         self.sourceURL = sourceURL
-        self.adjustments = adjustments
+        self.state = state
         self.pixelWidth = pixelWidth
         self.pixelHeight = pixelHeight
         self.bitsPerComponent = bitsPerComponent
@@ -104,6 +105,11 @@ public struct TIFFExportResult: Equatable, Sendable {
         self.clippedHighSampleCount = clippedHighSampleCount
         self.fileSizeBytes = fileSizeBytes
     }
+
+    /// The adjustments half of the state, for callers that only want that.
+    public var adjustments: ImageAdjustments { state.adjustments }
+    /// The capture profile the export was processed under.
+    public var captureProfile: IRCaptureProfileID { state.captureProfile }
 
     public var clippedSampleCount: Int { clippedLowSampleCount + clippedHighSampleCount }
 
@@ -185,7 +191,8 @@ public struct TIFFExporter: Sendable {
     ///     exist; the file itself need not.
     ///   - metadata: the RAW file's metadata, for the camera identity fields.
     ///   - sourceURL: the RAW file this was rendered from, for the receipt.
-    ///   - adjustments: the snapshot this was rendered with, for the receipt.
+    ///   - state: the snapshot this was rendered with — profile reference and
+    ///     adjustments together — for the receipt.
     /// - Throws: `TIFFExportError`.
     @discardableResult
     public func write(
@@ -193,7 +200,7 @@ public struct TIFFExporter: Sendable {
         to destination: URL,
         metadata: RAWMetadata,
         sourceURL: URL,
-        adjustments: ImageAdjustments
+        state: PhotographProcessingState
     ) throws -> TIFFExportResult {
         let cgImage = try ExportCGImageAdapter.makeCGImage(from: image)
 
@@ -239,7 +246,7 @@ public struct TIFFExporter: Sendable {
         return TIFFExportResult(
             destination: destination,
             sourceURL: sourceURL,
-            adjustments: adjustments,
+            state: state,
             pixelWidth: image.width,
             pixelHeight: image.height,
             bitsPerComponent: ExportEncodedImage.bitsPerComponent,

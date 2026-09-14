@@ -203,6 +203,7 @@ struct RAWWhiteBalancePathCancellationTests {
             try WorkspacePreviewPipeline().prepareSource(
                 base,
                 whiteBalance: .defaultNeutralPatch,
+                captureProfile: .builtinUncalibrated,
                 policy: WorkspacePreviewPipeline.previewPolicy,
                 cancellation: probe.cancellation
             )

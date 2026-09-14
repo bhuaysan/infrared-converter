@@ -253,3 +253,25 @@ struct TIFFPixelReader {
             ?? (tiffProperties[kCGImagePropertyTIFFOrientation] as? NSNumber)?.intValue
     }
 }
+
+// MARK: - Building export requests in tests
+
+extension ExportRequest {
+    /// An export snapshot under the built-in uncalibrated profile.
+    ///
+    /// What a photograph with no saved profile selection gets, and what every
+    /// migrated historical sidecar resolves to — so it is the right default for
+    /// a test that is about something other than profiles.
+    ///
+    /// It exists here rather than as a default argument on the production
+    /// initialiser deliberately. Making the capture profile optional there
+    /// would put the application's capture-processing assumption back where
+    /// this milestone found it: invisible at the call site.
+    init(rawURL: URL, adjustments: ImageAdjustments) {
+        self.init(
+            rawURL: rawURL,
+            captureProfile: .builtinUncalibrated,
+            adjustments: adjustments
+        )
+    }
+}

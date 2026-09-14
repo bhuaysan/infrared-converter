@@ -341,8 +341,13 @@ struct FullResolutionExportPipelineTests {
         let request = ExportRequest(
             rawURL: Self.url, adjustments: ImageAdjustments(whiteBalance: patch)
         )
+        // `captureProfile` joined the snapshot in the capture-profile
+        // milestone, and it is a resolved description rather than an
+        // identifier to look up while the export runs. Still no preview, no
+        // `Source`, no `CGImage` and no `PreviewResolutionPolicy`. See
+        // `docs/decisions/0020-ir-capture-profile-foundation.md`, Decision 9.
         let labels = Mirror(reflecting: request).children.compactMap(\.label)
-        #expect(labels == ["rawURL", "adjustments"])
+        #expect(labels == ["rawURL", "captureProfile", "adjustments"])
 
         let whiteBalanceLabels = Mirror(reflecting: request.adjustments.whiteBalance)
             .children.compactMap(\.label)

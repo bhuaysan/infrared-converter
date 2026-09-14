@@ -8,31 +8,39 @@ import Observation
 /// the decode task and the resulting state, and it is the only place that knows
 /// a `RAWDecoder` exists. Views read `status` and never touch a decoder.
 ///
-/// It is not `ImageDocument` yet, but it is closer: it owns an
-/// `ImageAdjustments` record alongside the decoded state, the preview is
-/// derived from `source + adjustments` rather than from the source alone, and
-/// that record now outlives the session.
+/// It is not `ImageDocument` yet, but it is closer: it owns a
+/// `PhotographProcessingState` alongside the decoded state, the preview is
+/// derived from `source + state` rather than from the source alone, and that
+/// record now outlives the session.
 ///
-/// ## Where the adjustment lives, and for how long
+/// ## Where the photograph's state lives, and for how long
 ///
 /// **In memory here while the file is open, and in a sidecar beside the RAW
 /// file between sessions.** All three layers now exist:
 ///
 /// ```text
-/// 1. a serialisable adjustment model     ImageAdjustments
-/// 2. in-memory ownership                 here, per open file
-/// 3. durable on-disk persistence         ImageAdjustmentStore — one sidecar per photograph
+/// 1. a serialisable model    PhotographProcessingState
+///                              ├── captureProfile   a reusable configuration, by identity
+///                              └── adjustments      this photograph's own decisions
+/// 2. in-memory ownership     here, per open file
+/// 3. durable persistence     PhotographProcessingStore — one sidecar per photograph
 /// ```
+///
+/// The two halves are kept apart deliberately: a capture profile describes how
+/// the photograph was **captured** and is shared by every frame shot that way;
+/// an adjustment is a decision about **this** frame. See
+/// `docs/decisions/0020-ir-capture-profile-foundation.md`.
 ///
 /// The RAW file is not one of them. It is an immutable input: nothing here
 /// writes to it, appends to it, re-tags it or replaces it, and the sidecar is
 /// the only place a user's decisions are ever recorded. See
 /// `docs/decisions/0013-adjustment-sidecar.md`.
 ///
-/// ## Opening reads the saved adjustments before it renders anything
+/// ## Opening reads the saved state before it renders anything
 ///
 /// ```text
-/// load sidecar → prepare RAW → initial render WITH the loaded adjustments → .decoded
+/// load sidecar → resolve the capture profile → prepare RAW → check the profile
+///   applies to this camera → initial render WITH the loaded state → .decoded
 /// ```
 ///
 /// Not prepare, render the identity, show it, then load. A saved rotation is
@@ -72,14 +80,20 @@ import Observation
 /// made for is still the one the user wants — so a superseded render can no
 /// more write the sidecar than it can reach the screen.
 ///
-/// ## Four adjustments, one state
+/// ## Four adjustments and a profile, one state
 ///
 /// ```text
+/// captureProfile which camera-to-working processing the photograph gets
 /// whiteBalance   which samples the infrared white balance is measured from
 /// orientation    the eight discrete arrangements, composed onto the file's own
 /// channelMix     the creative infrared remix: identity, red/blue swap, matrix
 /// exposure       compensation in EV, applied as × 2^EV by the display stage
 /// ```
+///
+/// The profile is a **selection**, not an adjustment, and it is the other half
+/// of `PhotographProcessingState` rather than a fifth field of
+/// `ImageAdjustments`. It travels the same road: one complete state per
+/// request, persisted only after that state has rendered.
 ///
 /// They are fields of one `ImageAdjustments` record, and every request is that
 /// whole record. Nothing here renders "the new mix", "the new rotation" or
@@ -166,6 +180,18 @@ final class DocumentState {
         /// it is a separate problem with a separate remedy — one small file
         /// the user owns, rather than the RAW file or its support.
         case adjustmentsUnreadable(URL, DocumentAdjustmentError)
+        /// The photograph was never decoded, or was decoded and then refused,
+        /// because the capture profile its saved state names could not be
+        /// used: no profile has that identity, or the profile describes a
+        /// different camera.
+        ///
+        /// A third refusal rather than a branch of the second, for the same
+        /// reason the second exists: a different problem with a different
+        /// remedy. Nothing was substituted, repaired or rewritten — the
+        /// alternative, rendering under some other profile that happens to be
+        /// installed, would change the photograph and report success. See
+        /// `docs/decisions/0020-ir-capture-profile-foundation.md`, Decision 5.
+        case captureProfileUnusable(URL, DocumentCaptureProfileError)
     }
 
     /// Where the **currently requested** adjustment stands with respect to the
@@ -214,7 +240,7 @@ final class DocumentState {
         /// is correct and the sidecar is not. Kept as a value so a reader can
         /// be told which file and why — and so the preview is not rolled back
         /// to pretend the edit never happened.
-        case saveFailed(ImageAdjustmentPersistenceError)
+        case saveFailed(PhotographProcessingPersistenceError)
 
         /// Whether what is on screen is what a reopen would restore.
         ///
@@ -241,29 +267,29 @@ final class DocumentState {
             /// The state never rendered, so it was never eligible to be saved.
             case renderRefused
             /// It rendered, and the write refused.
-            case saveRefused(ImageAdjustmentPersistenceError)
+            case saveRefused(PhotographProcessingPersistenceError)
         }
 
         /// The RAW file the decision belongs to. Its sidecar still holds the
         /// last state that rendered and saved.
         let url: URL
         /// The decision itself, so it is described rather than merely counted.
-        let adjustments: ImageAdjustments
+        ///
+        /// The complete record: the capture profile the user had selected as
+        /// well as every adjustment, because the sidecar is written as one
+        /// record and half a decision is not one.
+        let state: PhotographProcessingState
         let reason: Reason
+
+        /// The adjustments half, for callers that only want that.
+        var adjustments: ImageAdjustments { state.adjustments }
 
         /// The decision itself in one line, every adjustment named.
         ///
         /// All of them, because the record that was not written is the
         /// complete state and reporting only the rotation would describe the
         /// wrong loss.
-        var adjustmentDescription: String {
-            """
-            orientation \(adjustments.orientation.persistedToken), \
-            mix \(adjustments.channelMix.kind.rawValue), \
-            exposure \(adjustments.exposure.signedDescription), \
-            white balance \(adjustments.whiteBalance.kind.rawValue)
-            """
-        }
+        var adjustmentDescription: String { state.diagnosticDescription }
 
         /// One line for a log or a tooltip.
         var reasonDescription: String {
@@ -373,21 +399,45 @@ final class DocumentState {
         /// controls, or the user could not undo the adjustment that caused it.
         let isAdjustable: Bool
 
-        /// The user's editing decisions — orientation, channel mix and exposure
-        /// together: what the sidecar held when the file was opened, plus
-        /// whatever has been asked for since.
+        /// Everything this application owns about the photograph: the capture
+        /// profile it is processed under, and the user's editing decisions —
+        /// white balance, orientation, channel mix and exposure. What the
+        /// sidecar held when the file was opened, plus whatever has been asked
+        /// for since.
         ///
         /// This is the **requested** state, and it is what the controls show.
         /// While a render is pending it is ahead of `owned`, whose preview —
         /// and whose provenance, which the inspector reads — describes the
         /// state that was actually rendered. The two are not reconciled by
         /// moving a control back.
-        var adjustments: ImageAdjustments
+        var state: PhotographProcessingState
+
+        /// The capture profile `state.captureProfile` names, resolved once when
+        /// the file was opened or when the user selected another one.
+        ///
+        /// Held beside the identity rather than looked up on demand, so that
+        /// nothing deep in the rendering path performs a registry lookup — and
+        /// so that an export snapshot can carry a resolved value rather than a
+        /// reference it would have to resolve while running. The invariant is
+        /// `captureProfile.id == state.captureProfile`, and the two are only
+        /// ever assigned together.
+        var captureProfile: IRCaptureProfile
+
+        /// The user's editing decisions alone.
+        ///
+        /// A projection of `state`, not a second authority: reading and writing
+        /// it goes straight through. It exists because most of this type's
+        /// callers care about one half of the record and nothing is gained by
+        /// making them say so twice.
+        var adjustments: ImageAdjustments {
+            get { state.adjustments }
+            set { state.adjustments = newValue }
+        }
 
         /// The application-owned pipeline's result, or the reason it failed.
         var owned: OwnedPreview
 
-        /// Where `adjustments` stands with respect to the sidecar.
+        /// Where `state` stands with respect to the sidecar.
         ///
         /// It tracks the field above, not the last write: asking for a new
         /// adjustment makes this `.pending` in the same assignment, so there is
@@ -533,6 +583,10 @@ final class DocumentState {
         case unrenderable(WorkspacePreviewPipeline.Source, RAWPathFailure)
         /// Never reached a scene-linear state at all.
         case unprepared(RAWPathFailure)
+        /// The file decoded, and the capture profile its saved state names does
+        /// not describe the camera that took it. Nothing was processed under
+        /// it, and nothing was substituted for it.
+        case profileRefused(IRCaptureProfileError)
     }
 
     /// Why an open ended without a document. Two unrelated problems, kept
@@ -542,6 +596,10 @@ final class DocumentState {
         case raw(DocumentOpenError)
         /// The saved adjustments could not be read, so nothing was decoded.
         case adjustments(DocumentAdjustmentError)
+        /// The capture profile the saved state names could not be resolved, or
+        /// could not be applied to this camera. The photograph is fine and
+        /// nothing was rewritten.
+        case captureProfile(DocumentCaptureProfileError)
     }
 
     /// Orients a prepared source and encodes it for display.
@@ -549,14 +607,25 @@ final class DocumentState {
     /// Injected so a test can count the renders an open performs and can make
     /// one refuse; production passes `pipelineRender` and nothing else ever
     /// does.
+    /// It takes the resolved capture profile beside the adjustments, because a
+    /// rendering is provenance as well as pixels: the preview has to be able to
+    /// say which profile produced it. The pipeline refuses a profile whose
+    /// processing basis is not the one the source was prepared under, so a
+    /// profile change that *does* affect pixels cannot be smuggled through the
+    /// cheap path.
     typealias PreviewRender = @Sendable (
-        WorkspacePreviewPipeline.Source, ImageAdjustments, ProcessingCancellation
+        WorkspacePreviewPipeline.Source, IRCaptureProfile, ImageAdjustments,
+        ProcessingCancellation
     ) throws -> WorkspacePreview
 
     /// The real thing: the last phase of `WorkspacePreviewPipeline`.
-    nonisolated static let pipelineRender: PreviewRender = { source, adjustments, cancellation in
+    nonisolated static let pipelineRender: PreviewRender = {
+        source, captureProfile, adjustments, cancellation in
         try WorkspacePreviewPipeline().render(
-            source, adjustments: adjustments, cancellation: cancellation
+            source,
+            captureProfile: captureProfile,
+            adjustments: adjustments,
+            cancellation: cancellation
         )
     }
 
@@ -572,17 +641,26 @@ final class DocumentState {
     /// and never a decoder. There is no parameter through which this could
     /// read the file again, which is the performance claim of this milestone
     /// expressed as a signature rather than as a promise.
+    /// It also takes the resolved capture profile, because the
+    /// camera-to-working transform this phase runs is the profile's one
+    /// contribution to a pixel — and because that makes the two inputs a
+    /// preparation depends on visible in its signature. Still no `URL` and
+    /// still no decoder.
     typealias SourcePreparation = @Sendable (
-        NormalizedRAWSource, UserWhiteBalanceAdjustment, PreviewResolutionPolicy,
-        ProcessingCancellation
+        NormalizedRAWSource, UserWhiteBalanceAdjustment, IRCaptureProfile,
+        PreviewResolutionPolicy, ProcessingCancellation
     ) throws -> WorkspacePreviewPipeline.Source
 
     /// The real thing: the white-balance-dependent phase of
     /// `WorkspacePreviewPipeline`.
     nonisolated static let pipelineSourcePreparation: SourcePreparation = {
-        base, whiteBalance, policy, cancellation in
+        base, whiteBalance, captureProfile, policy, cancellation in
         try WorkspacePreviewPipeline().prepareSource(
-            base, whiteBalance: whiteBalance, policy: policy, cancellation: cancellation
+            base,
+            whiteBalance: whiteBalance,
+            captureProfile: captureProfile,
+            policy: policy,
+            cancellation: cancellation
         )
     }
 
@@ -618,7 +696,21 @@ final class DocumentState {
     private(set) var exportStatus: ExportStatus = .idle
 
     private let decoder: RAWDecoder
-    private let store: any ImageAdjustmentStore
+    private let store: any PhotographProcessingStore
+
+    /// Where capture profile **definitions** come from.
+    ///
+    /// Injected, so a test can install profiles this build does not ship —
+    /// a camera-specific one, or one with a different processing basis — and
+    /// exercise resolution, mismatch and invalidation without production
+    /// growing fake profiles to make the tests possible. Production passes
+    /// `IRCaptureProfileRegistry.builtin`, which holds exactly one.
+    ///
+    /// It is consulted in two places and nowhere else: when a file is opened,
+    /// and when a user picks a profile. No processing stage sees it, and an
+    /// export never does — an export carries an already-resolved profile. See
+    /// `docs/decisions/0020-ir-capture-profile-foundation.md`, Decision 10.
+    private let registry: IRCaptureProfileRegistry
     private let render: PreviewRender
     private let prepareSource: SourcePreparation
 
@@ -668,7 +760,7 @@ final class DocumentState {
     /// than two buffers. Releasing the slot and the document releases the
     /// mosaic. Roughly 49 MB on the reference camera, retained from a
     /// successful open until the document is left and has settled.
-    private var preparer: WhiteBalancePreparationSlot?
+    private var preparer: SourcePreparationSlot?
 
     /// A document the workspace has left while one of its adjustments was
     /// still being rendered.
@@ -682,7 +774,7 @@ final class DocumentState {
         /// The newest state this document was asked for, frozen at the moment
         /// the workspace left it. Nothing can change it afterwards: there is no
         /// UI attached to a settling document.
-        let requested: ImageAdjustments
+        let requested: PhotographProcessingState
         /// The reduced pre-mix preview this document's render starts from.
         ///
         /// A `var` for exactly one reason, and it is the reason settling had
@@ -691,10 +783,16 @@ final class DocumentState {
         /// then has to run against. A document left mid-preparation therefore
         /// still has two steps to take, and both happen here, with no screen.
         var source: WorkspacePreviewPipeline.Source
+        /// The resolved profile the requested state names, so the render that
+        /// settles this document carries the same provenance it would have had
+        /// on screen. It is not resolved again here: a registry lookup after
+        /// the document has left the workspace would be a second chance for the
+        /// answer to differ.
+        let captureProfile: IRCaptureProfile
         /// Kept so the heavy pass is not deallocated mid-flight — and released
         /// as soon as the document settles, because it holds that file's
         /// normalised mosaic.
-        let preparer: WhiteBalancePreparationSlot
+        let preparer: SourcePreparationSlot
         /// Kept so the render is not deallocated mid-flight.
         let renderer: PreviewRenderSlot
     }
@@ -729,7 +827,8 @@ final class DocumentState {
 
     init(
         decoder: RAWDecoder = LibRawDecoder(),
-        store: any ImageAdjustmentStore = JSONSidecarImageAdjustmentStore(),
+        store: any PhotographProcessingStore = JSONSidecarPhotographProcessingStore(),
+        registry: IRCaptureProfileRegistry = .builtin,
         render: @escaping PreviewRender = DocumentState.pipelineRender,
         prepareSource: @escaping SourcePreparation = DocumentState.pipelineSourcePreparation,
         previewPolicy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy,
@@ -737,6 +836,7 @@ final class DocumentState {
     ) {
         self.decoder = decoder
         self.store = store
+        self.registry = registry
         self.render = render
         self.prepareSource = prepareSource
         self.previewPolicy = previewPolicy
@@ -750,8 +850,28 @@ final class DocumentState {
         case .decoded(let loaded): return loaded.url
         case .failed(let url, _): return url
         case .adjustmentsUnreadable(let url, _): return url
+        case .captureProfileUnusable(let url, _): return url
         }
     }
+
+    /// The capture profile the open photograph is processed under, resolved, or
+    /// the built-in uncalibrated profile when nothing is open.
+    ///
+    /// The **requested** selection, like every other control's accessor: while
+    /// a profile change is being prepared this is already the new one, and the
+    /// preview's own `captureProfile` still describes the pixels on screen.
+    var captureProfile: IRCaptureProfile {
+        guard case .decoded(let loaded) = status else { return .builtinUncalibrated }
+        return loaded.captureProfile
+    }
+
+    /// Every profile a photograph may be switched to, in a deterministic order.
+    ///
+    /// The registry's list and nothing else. There is deliberately no free-text
+    /// entry: a profile identifier a user typed would name nothing, and a
+    /// photograph pointing at nothing is exactly the unresolvable state this
+    /// milestone refuses to create on purpose.
+    var availableCaptureProfiles: [IRCaptureProfile] { registry.allProfiles }
 
     /// The user's orientation correction for the open file, or `.identity`
     /// when nothing is open.
@@ -818,7 +938,7 @@ final class DocumentState {
     ///
     /// The image is correct either way; this says only whether it will still
     /// be there next time.
-    var adjustmentSaveFailure: ImageAdjustmentPersistenceError? {
+    var adjustmentSaveFailure: PhotographProcessingPersistenceError? {
         guard case .saveFailed(let error) = adjustmentPersistence else { return nil }
         return error
     }
@@ -894,6 +1014,7 @@ final class DocumentState {
     private func startDecoding(_ url: URL, generation: Int) {
         let decoder = self.decoder
         let store = self.store
+        let registry = self.registry
         let render = self.render
         let prepareSource = self.prepareSource
         let previewPolicy = self.previewPolicy
@@ -907,6 +1028,7 @@ final class DocumentState {
                 url,
                 using: decoder,
                 store: store,
+                registry: registry,
                 render: render,
                 prepareSource: prepareSource,
                 previewPolicy: previewPolicy
@@ -983,8 +1105,9 @@ final class DocumentState {
             // preparation *and* the render after it.
             settling[generation] = SettlingDocument(
                 url: loaded.url,
-                requested: loaded.adjustments,
+                requested: loaded.state,
                 source: source,
+                captureProfile: loaded.captureProfile,
                 preparer: preparer,
                 renderer: renderer
             )
@@ -993,7 +1116,7 @@ final class DocumentState {
             cancelAllWork()
             record(
                 UnsavedAdjustment(
-                    url: loaded.url, adjustments: loaded.adjustments, reason: .renderRefused
+                    url: loaded.url, state: loaded.state, reason: .renderRefused
                 )
             )
 
@@ -1002,7 +1125,7 @@ final class DocumentState {
             record(
                 UnsavedAdjustment(
                     url: loaded.url,
-                    adjustments: loaded.adjustments,
+                    state: loaded.state,
                     reason: .saveRefused(error)
                 )
             )
@@ -1025,8 +1148,8 @@ final class DocumentState {
         unsavedAdjustments.append(unsaved)
         Log.ui.error(
             """
-            Left \(unsaved.url.lastPathComponent, privacy: .public) with an unsaved \
-            adjustment \(unsaved.adjustmentDescription, privacy: .public): \
+            Left \(unsaved.url.lastPathComponent, privacy: .public) with unsaved \
+            settings \(unsaved.adjustmentDescription, privacy: .public): \
             \(unsaved.reasonDescription, privacy: .public)
             """
         )
@@ -1057,31 +1180,76 @@ final class DocumentState {
     private nonisolated static func decode(
         _ url: URL,
         using decoder: RAWDecoder,
-        store: any ImageAdjustmentStore,
+        store: any PhotographProcessingStore,
+        registry: IRCaptureProfileRegistry,
         render: PreviewRender,
         prepareSource: SourcePreparation,
         previewPolicy: PreviewResolutionPolicy
     ) -> Result<Loaded, OpenFailure>? {
-        let adjustments: ImageAdjustments
+        let state: PhotographProcessingState
         do {
-            // `nil` is the ordinary case: no sidecar, so no saved decisions,
-            // so the identity record. It is the only thing that becomes
-            // `.none` — a record that exists and cannot be read never does.
-            adjustments = try store.load(for: url) ?? .none
+            // `nil` is the ordinary case: no sidecar, so no saved decisions
+            // and no saved profile selection, so the default record — the
+            // built-in uncalibrated profile and no adjustments. It is the only
+            // thing that becomes `.none`; a record that exists and cannot be
+            // read never does.
+            state = try store.load(for: url) ?? .none
         } catch {
-            log(error, path: "Saved adjustments", url: url)
+            log(error, path: "Saved settings", url: url)
             return .failure(.adjustments(DocumentAdjustmentError(url: url, failure: error)))
+        }
+
+        // Resolved **before** the file is decoded, and for the same reason the
+        // sidecar is read before it: the profile chooses the camera-to-working
+        // transform, so it is part of the document's opening state rather than
+        // something applied afterwards. There is no first render under the
+        // built-in profile followed by a switch to the saved one.
+        //
+        // Resolving before the decode also means a photograph whose profile is
+        // missing costs no decode at all to find that out.
+        let captureProfile: IRCaptureProfile
+        do {
+            captureProfile = try registry.profile(for: state.captureProfile)
+        } catch let error as IRCaptureProfileError {
+            log(error, path: "Capture profile", url: url)
+            return .failure(
+                .captureProfile(DocumentCaptureProfileError(url: url, failure: error))
+            )
+        } catch {
+            // `profile(for:)` throws exactly one error type, so this is
+            // unreachable. It is written rather than forced, because a `try!`
+            // here would turn a future widening of that contract into a crash.
+            log(error, path: "Capture profile", url: url)
+            return .failure(
+                .captureProfile(
+                    DocumentCaptureProfileError(
+                        url: url, failure: .unknownProfile(id: state.captureProfile)
+                    )
+                )
+            )
         }
 
         guard let owned = ownedOutcome(
             for: url,
             using: decoder,
-            adjustments: adjustments,
+            adjustments: state.adjustments,
+            captureProfile: captureProfile,
             render: render,
             prepareSource: prepareSource,
             previewPolicy: previewPolicy,
             cancellation: .enclosingTask
         ) else { return nil }
+
+        // A profile that does not describe this camera refuses the whole
+        // document, whatever the diagnostic decode managed. The alternative —
+        // opening it and quietly processing under a profile made for another
+        // body — is the silent substitution this milestone exists to prevent.
+        if case .profileRefused(let error) = owned {
+            return .failure(
+                .captureProfile(DocumentCaptureProfileError(url: url, failure: error))
+            )
+        }
+
         let legacy = legacyReference(for: url, using: decoder)
 
         // The six cases, written out as the six cases. Metadata comes from
@@ -1098,7 +1266,8 @@ final class DocumentState {
                     base: base,
                     source: source,
                     isAdjustable: true,
-                    adjustments: adjustments,
+                    state: state,
+                    captureProfile: captureProfile,
                     owned: .rendered(preview)
                 )
             )
@@ -1115,7 +1284,8 @@ final class DocumentState {
                     base: nil,
                     source: source,
                     isAdjustable: false,
-                    adjustments: adjustments,
+                    state: state,
+                    captureProfile: captureProfile,
                     owned: .unavailable(failure)
                 )
             )
@@ -1129,7 +1299,8 @@ final class DocumentState {
                     base: nil,
                     source: nil,
                     isAdjustable: false,
-                    adjustments: adjustments,
+                    state: state,
+                    captureProfile: captureProfile,
                     owned: .unavailable(failure)
                 )
             )
@@ -1138,6 +1309,15 @@ final class DocumentState {
              (.unprepared(let ownedFailure), .unavailable(let legacyFailure)):
             return .failure(
                 .raw(DocumentOpenError(url: url, owned: ownedFailure, legacy: legacyFailure))
+            )
+
+        case (.profileRefused(let refusal), _):
+            // Handled above, before the diagnostic decode ran, so this is
+            // unreachable today. It is written out rather than defaulted — and
+            // as the same refusal rather than as a trap — so that a future
+            // outcome can neither fall through it silently nor crash here.
+            return .failure(
+                .captureProfile(DocumentCaptureProfileError(url: url, failure: refusal))
             )
         }
     }
@@ -1171,6 +1351,7 @@ final class DocumentState {
         for url: URL,
         using decoder: RAWDecoder,
         adjustments: ImageAdjustments,
+        captureProfile: IRCaptureProfile,
         render: PreviewRender,
         prepareSource: SourcePreparation,
         previewPolicy: PreviewResolutionPolicy,
@@ -1179,16 +1360,37 @@ final class DocumentState {
         let pipeline = WorkspacePreviewPipeline()
 
         let base: NormalizedRAWSource
-        let source: WorkspacePreviewPipeline.Source
         do {
             base = try pipeline.prepareBase(decoding: url, using: decoder)
+        } catch is CancellationError {
+            // `prepareBase` polls nothing, so this is unreachable today. It is
+            // written because the contract, not the current implementation, is
+            // what callers rely on — and a cancelled open is not a failed one.
+            return nil
+        } catch {
+            log(error, path: "Owned preparation", url: url)
+            return .unprepared(RAWPathFailure(stage: .ownedPreparation, error))
+        }
+
+        // Between the decode and the first processing stage, because that is
+        // the earliest point at which the question can be asked and the latest
+        // at which the answer still matters. The make and model only exist
+        // after the file has been read; nothing has yet been processed under a
+        // profile that may not describe this camera.
+        //
+        // The built-in uncalibrated profile matches everything, so this is a
+        // no-op for every photograph in the application as it ships.
+        if let refusal = captureProfile.applicability(to: base.metadata).error {
+            log(refusal, path: "Capture profile", url: url)
+            return .profileRefused(refusal)
+        }
+
+        let source: WorkspacePreviewPipeline.Source
+        do {
             source = try prepareSource(
-                base, adjustments.whiteBalance, previewPolicy, cancellation
+                base, adjustments.whiteBalance, captureProfile, previewPolicy, cancellation
             )
         } catch is CancellationError {
-            // `prepareBase` polls nothing, so this is reachable only through
-            // the white-balance phase, which does. A cancelled open is not a
-            // failed one either way.
             return nil
         } catch {
             log(error, path: "Owned preparation", url: url)
@@ -1196,7 +1398,7 @@ final class DocumentState {
         }
 
         do {
-            let preview = try render(source, adjustments, cancellation)
+            let preview = try render(source, captureProfile, adjustments, cancellation)
             return .rendered(base, source, preview)
         } catch is CancellationError {
             return nil
@@ -1395,6 +1597,60 @@ final class DocumentState {
         setWhiteBalance(.neutralPatch(region))
     }
 
+    // MARK: - Capture-profile selection
+
+    /// Selects the capture profile this photograph is processed under.
+    ///
+    /// A **decision about the photograph**, and it travels the same road every
+    /// adjustment does: the complete canonical record is updated, persistence
+    /// becomes `.pending`, and the profile reaches the sidecar only once the
+    /// state it belongs to has actually rendered. It is not an adjustment, and
+    /// it is deliberately not a field of `ImageAdjustments`; it is the other
+    /// half of `PhotographProcessingState`.
+    ///
+    /// ## What it costs, and why that is asked of the data
+    ///
+    /// ```text
+    /// basis unchanged   the pixels cannot differ — re-render for provenance
+    /// basis changed     the camera-to-working transform differs — re-prepare
+    /// ```
+    ///
+    /// The question is asked of `IRCaptureProcessingBasis`, which is the only
+    /// part of a profile that reaches a pixel, and it is asked of the **source**
+    /// rather than of the previous selection — the two disagree exactly when it
+    /// matters, which is while an earlier preparation is still running.
+    ///
+    /// A metadata-only change therefore costs one reduced-resolution render,
+    /// not a re-preparation, and the inspector still updates: a preview carries
+    /// the profile it was rendered under. A change of basis costs the heavy
+    /// path, the same one a new neutral patch takes, because the transform runs
+    /// upstream of the reduction. No third cache and no third slot. See
+    /// `docs/decisions/0020-ir-capture-profile-foundation.md`, Decision 8.
+    ///
+    /// ## Nothing is copied into the adjustments
+    ///
+    /// Selecting a profile changes no adjustment. There is no live coupling by
+    /// which a later profile change would overwrite an exposure the user set,
+    /// and no recommendation is applied on selection — this build's profiles
+    /// carry none at all. See Decision 11.
+    ///
+    /// - Parameter profile: a profile from `availableCaptureProfiles`. Asking
+    ///   for the one already selected does nothing at all.
+    func setCaptureProfile(_ profile: IRCaptureProfile) {
+        guard case .decoded(let loaded) = status,
+              loaded.isAdjustable,
+              loaded.captureProfile != profile
+        else { return }
+        // A profile that does not describe this camera is refused here rather
+        // than applied and refused later: the document keeps the profile it
+        // has, and nothing is rendered, requested or written.
+        if let refusal = profile.applicability(to: loaded.metadata).error {
+            Self.log(refusal, path: "Capture profile", url: loaded.url)
+            return
+        }
+        adjustState(profile: profile) { $0.captureProfile = profile.id }
+    }
+
     // MARK: - Exporting
 
     /// The snapshot an export started now would use, or `nil` when there is
@@ -1414,7 +1670,18 @@ final class DocumentState {
     /// flight, or while a save has failed, uses the state on the controls.
     var exportRequest: ExportRequest? {
         guard case .decoded(let loaded) = status, loaded.isAdjustable else { return nil }
-        return ExportRequest(rawURL: loaded.url, adjustments: loaded.adjustments)
+        return ExportRequest(
+            rawURL: loaded.url,
+            // Resolved, and resolved to the profile the document currently has
+            // — not looked up again inside the export, and not the one the
+            // preview on screen happens to have been rendered under. An export
+            // requested after a profile change but before its render lands
+            // therefore uses the new profile, for exactly the reason it uses a
+            // newly picked neutral patch: the canonical state is what is
+            // exported.
+            captureProfile: loaded.captureProfile,
+            adjustments: loaded.adjustments
+        )
     }
 
     /// Whether an export is running.
@@ -1515,57 +1782,103 @@ final class DocumentState {
     /// it would let a broken state be restored automatically on the next
     /// launch.
     private func adjust(_ change: (inout ImageAdjustments) -> Void) {
+        adjustState { change(&$0.adjustments) }
+    }
+
+    /// The same road, for a change that may touch either half of the canonical
+    /// record.
+    ///
+    /// `adjust` is this with the profile left alone. They are one method
+    /// because a photograph has one canonical state and one render request, and
+    /// the scheduling question — fast or heavy — is asked of that state rather
+    /// than of which control produced it.
+    ///
+    /// - Parameter profile: the resolved profile the updated state names, when
+    ///   the change selects one. `nil` keeps the document's current profile,
+    ///   which is what every adjustment does.
+    private func adjustState(
+        profile: IRCaptureProfile? = nil,
+        _ change: (inout PhotographProcessingState) -> Void
+    ) {
         guard case .decoded(var loaded) = status, loaded.isAdjustable,
               let renderer, let preparer, let source = loaded.source
         else { return }
 
-        var updated = loaded.adjustments
+        var updated = loaded.state
         change(&updated)
-        guard updated != loaded.adjustments else { return }
+        guard updated != loaded.state else { return }
+
+        let captureProfile = profile ?? loaded.captureProfile
+        // The invariant `Loaded` exists to keep: the resolved profile and the
+        // identity in the canonical state are assigned together and are never
+        // allowed to drift apart.
+        guard captureProfile.id == updated.captureProfile else { return }
 
         // Record the intent immediately, so the controls reflect what the
         // user asked for even while the work is still running — and say, in
         // the same breath, that this state is not on disk. The state that was
         // saved a moment ago is no longer the state on screen, and reporting
         // it as saved would be a claim about the wrong adjustment.
-        loaded.adjustments = updated
+        loaded.state = updated
+        loaded.captureProfile = captureProfile
         loaded.persistence = .pending
         status = .decoded(loaded)
 
         // Which of the two costs this state needs is one question with one
         // answer: does the retained preview already describe the white balance
-        // being asked for?
+        // **and** the camera-to-working processing being asked for?
         //
-        // It is asked of the **source**, not of the previous adjustments,
+        // Both are upstream of the reduction, and nothing downstream can
+        // reproduce either, so they are the same question asked about two
+        // stages. It is asked of the **source**, not of the previous state,
         // because those two disagree exactly when it matters. Picking patch B
         // while patch A is still being prepared leaves the source at the
         // original balance, and both patches need the heavy path.
-        if source.whiteBalance != updated.whiteBalance {
+        //
+        // Only the processing basis is compared, never the profile's identity:
+        // two profiles that share a basis produce identical pixels by
+        // construction, so re-preparing between them would be work whose result
+        // is already on screen. What such a change does need is a re-render,
+        // because the preview carries the profile it was rendered under and the
+        // inspector reads it from there.
+        let request = SourcePreparationRequest(
+            whiteBalance: updated.adjustments.whiteBalance, captureProfile: captureProfile
+        )
+        if source.whiteBalance != request.whiteBalance
+            || source.captureProfile.processingBasis != captureProfile.processingBasis {
             // Heavy. The render is deliberately *not* requested here: the
             // source it would use is the wrong one, and rendering it would put
-            // the old white balance on screen under the new state's name. The
-            // render happens when the preparation lands, for whatever the
-            // latest complete state is by then.
+            // the old white balance — or the old camera transform — on screen
+            // under the new state's name. The render happens when the
+            // preparation lands, for whatever the latest complete state is by
+            // then.
             //
-            // And only when it is not already on its way. Every adjustment
-            // reaches this method, so a change of exposure made while a patch
-            // is being prepared arrives here wanting that same patch — and
-            // `request` supersedes unconditionally, so asking again would
-            // cancel a pass that was about to produce the right answer and
-            // start it over. A user dragging the exposure slider during a
-            // preparation would restart it on every frame and never see a
-            // result.
-            if preparer.target != updated.whiteBalance {
-                preparer.request(updated.whiteBalance)
+            // And only when it is not already on its way. Every change reaches
+            // this method, so a change of exposure made while a patch is being
+            // prepared arrives here wanting that same patch — and `request`
+            // supersedes unconditionally, so asking again would cancel a pass
+            // that was about to produce the right answer and start it over. A
+            // user dragging the exposure slider during a preparation would
+            // restart it on every frame and never see a result.
+            //
+            // The comparison is on the whole request, so a profile change
+            // during a patch preparation does restart it: those two passes
+            // would produce different pixels.
+            if preparer.target != request {
+                preparer.request(request)
             }
         } else {
-            // Fast. Any preparation still outstanding is for a white balance
-            // the user has now moved away from — most often by returning to
-            // the one already prepared — so it is abandoned rather than left
-            // to finish and be discarded on delivery.
+            // Fast. Any preparation still outstanding is for a state the user
+            // has now moved away from — most often by returning to the one
+            // already prepared — so it is abandoned rather than left to finish
+            // and be discarded on delivery.
             preparer.cancelAll()
             renderer.request(
-                PreviewRenderRequest(source: source, adjustments: updated)
+                PreviewRenderRequest(
+                    source: source,
+                    captureProfile: captureProfile,
+                    adjustments: updated.adjustments
+                )
             )
         }
     }
@@ -1591,12 +1904,17 @@ final class DocumentState {
         let render = self.render
         return PreviewRenderSlot(
             work: { request, cancellation in
-                try render(request.source, request.adjustments, cancellation)
+                try render(
+                    request.source, request.captureProfile, request.adjustments, cancellation
+                )
             },
             deliver: { [weak self] outcome, request in
                 self?.deliver(
                     outcome,
-                    adjustments: request.adjustments,
+                    state: PhotographProcessingState(
+                        captureProfile: request.captureProfile.id,
+                        adjustments: request.adjustments
+                    ),
                     url: url,
                     generation: generation
                 )
@@ -1618,16 +1936,18 @@ final class DocumentState {
     /// been left — to the settling record that is still finishing its work.
     private func makePreparer(
         base: NormalizedRAWSource, url: URL, generation: Int
-    ) -> WhiteBalancePreparationSlot {
+    ) -> SourcePreparationSlot {
         let prepareSource = self.prepareSource
         let policy = self.previewPolicy
-        return WhiteBalancePreparationSlot(
-            work: { whiteBalance, cancellation in
-                try prepareSource(base, whiteBalance, policy, cancellation)
+        return SourcePreparationSlot(
+            work: { request, cancellation in
+                try prepareSource(
+                    base, request.whiteBalance, request.captureProfile, policy, cancellation
+                )
             },
-            deliver: { [weak self] outcome, whiteBalance in
+            deliver: { [weak self] outcome, request in
                 self?.deliverPreparedSource(
-                    outcome, whiteBalance: whiteBalance, url: url, generation: generation
+                    outcome, request: request, url: url, generation: generation
                 )
             }
         )
@@ -1646,14 +1966,14 @@ final class DocumentState {
     /// one's preview merely because the paths match.
     private func deliver(
         _ outcome: Result<WorkspacePreview, Error>,
-        adjustments: ImageAdjustments,
+        state: PhotographProcessingState,
         url: URL,
         generation: Int
     ) {
         if generation == self.generation {
-            applyReprocessed(outcome, adjustments: adjustments, for: url)
+            applyReprocessed(outcome, state: state, for: url)
         } else if let document = settling[generation] {
-            settle(document, generation: generation, outcome: outcome, adjustments: adjustments)
+            settle(document, generation: generation, outcome: outcome, state: state)
         }
     }
 
@@ -1671,15 +1991,15 @@ final class DocumentState {
     /// replace the second open's source merely because the paths match.
     private func deliverPreparedSource(
         _ outcome: Result<WorkspacePreviewPipeline.Source, Error>,
-        whiteBalance: UserWhiteBalanceAdjustment,
+        request: SourcePreparationRequest,
         url: URL,
         generation: Int
     ) {
         if generation == self.generation {
-            applyPreparedSource(outcome, whiteBalance: whiteBalance, for: url)
+            applyPreparedSource(outcome, request: request, for: url)
         } else if let document = settling[generation] {
             settlePreparedSource(
-                document, generation: generation, outcome: outcome, whiteBalance: whiteBalance
+                document, generation: generation, outcome: outcome, request: request
             )
         }
     }
@@ -1708,12 +2028,18 @@ final class DocumentState {
     /// launch. See `docs/decisions/0013-adjustment-sidecar.md`.
     private func applyPreparedSource(
         _ outcome: Result<WorkspacePreviewPipeline.Source, Error>,
-        whiteBalance: UserWhiteBalanceAdjustment,
+        request: SourcePreparationRequest,
         for url: URL
     ) {
+        // Both halves of the request are checked, because both decide what the
+        // prepared pixels are. A source prepared under profile P1 must not
+        // install into a document that has since moved to a P2 with a different
+        // basis — those are different pixels, and labelling them with P2 would
+        // be precisely the silent substitution this milestone refuses.
         guard case .decoded(var loaded) = status,
               loaded.url == url,
-              loaded.adjustments.whiteBalance == whiteBalance,
+              loaded.adjustments.whiteBalance == request.whiteBalance,
+              loaded.captureProfile == request.captureProfile,
               let renderer
         else { return }
 
@@ -1724,7 +2050,11 @@ final class DocumentState {
             loaded.source = source
             status = .decoded(loaded)
             renderer.request(
-                PreviewRenderRequest(source: source, adjustments: loaded.adjustments)
+                PreviewRenderRequest(
+                    source: source,
+                    captureProfile: loaded.captureProfile,
+                    adjustments: loaded.adjustments
+                )
             )
 
         case .failure(let error):
@@ -1755,9 +2085,11 @@ final class DocumentState {
         _ document: SettlingDocument,
         generation: Int,
         outcome: Result<WorkspacePreviewPipeline.Source, Error>,
-        whiteBalance: UserWhiteBalanceAdjustment
+        request: SourcePreparationRequest
     ) {
-        guard document.requested.whiteBalance == whiteBalance else { return }
+        guard document.requested.adjustments.whiteBalance == request.whiteBalance,
+              document.captureProfile == request.captureProfile
+        else { return }
 
         switch outcome {
         case .success(let source):
@@ -1765,7 +2097,11 @@ final class DocumentState {
             updated.source = source
             settling[generation] = updated
             updated.renderer.request(
-                PreviewRenderRequest(source: source, adjustments: updated.requested)
+                PreviewRenderRequest(
+                    source: source,
+                    captureProfile: updated.captureProfile,
+                    adjustments: updated.requested.adjustments
+                )
             )
 
         case .failure(let error):
@@ -1773,7 +2109,7 @@ final class DocumentState {
             record(
                 UnsavedAdjustment(
                     url: document.url,
-                    adjustments: document.requested,
+                    state: document.requested,
                     reason: .renderRefused
                 )
             )
@@ -1810,18 +2146,25 @@ final class DocumentState {
     /// would answer it by lying about the first.
     private func applyReprocessed(
         _ outcome: Result<WorkspacePreview, Error>,
-        adjustments: ImageAdjustments,
+        state: PhotographProcessingState,
         for url: URL
     ) {
+        // The whole record is compared, profile selection included: a render
+        // made under the profile the user has since moved away from is
+        // superseded exactly as a render of a superseded exposure is.
         guard case .decoded(var loaded) = status,
               loaded.url == url,
-              loaded.adjustments == adjustments
+              loaded.state == state
         else { return }
 
         switch outcome {
         case .success(let preview):
             loaded.owned = .rendered(preview)
-            loaded.persistence = write(adjustments, for: url).map {
+            // One record, written once. The capture profile and the four
+            // adjustments reach the sidecar together or not at all — a profile
+            // selection that landed on disk without the state it was rendered
+            // with would reopen showing something nobody ever saw.
+            loaded.persistence = write(state, for: url).map {
                 AdjustmentPersistence.saveFailed($0)
             } ?? .saved
         case .failure(let error):
@@ -1848,16 +2191,16 @@ final class DocumentState {
         _ document: SettlingDocument,
         generation: Int,
         outcome: Result<WorkspacePreview, Error>,
-        adjustments: ImageAdjustments
+        state: PhotographProcessingState
     ) {
-        guard document.requested == adjustments else { return }
+        guard document.requested == state else { return }
 
         switch outcome {
         case .success:
-            if let failure = write(adjustments, for: document.url) {
+            if let failure = write(state, for: document.url) {
                 record(
                     UnsavedAdjustment(
-                        url: document.url, adjustments: adjustments, reason: .saveRefused(failure)
+                        url: document.url, state: state, reason: .saveRefused(failure)
                     )
                 )
             }
@@ -1865,7 +2208,7 @@ final class DocumentState {
             Self.log(error, path: "Owned re-render", url: document.url)
             record(
                 UnsavedAdjustment(
-                    url: document.url, adjustments: adjustments, reason: .renderRefused
+                    url: document.url, state: state, reason: .renderRefused
                 )
             )
         }
@@ -1893,7 +2236,7 @@ final class DocumentState {
         document.renderer.cancelAll()
     }
 
-    /// Writes one rendered adjustment to its sidecar.
+    /// Writes one rendered photograph state to its sidecar.
     ///
     /// Synchronous, on the main actor, and small on purpose: one atomic
     /// replacement of a few hundred bytes, ordered by construction because
@@ -1904,13 +2247,13 @@ final class DocumentState {
     ///
     /// - Returns: the refusal, or `nil` when the record is on disk.
     private func write(
-        _ adjustments: ImageAdjustments, for url: URL
-    ) -> ImageAdjustmentPersistenceError? {
+        _ state: PhotographProcessingState, for url: URL
+    ) -> PhotographProcessingPersistenceError? {
         do {
-            try store.save(adjustments, for: url)
+            try store.save(state, for: url)
             return nil
         } catch {
-            Self.log(error, path: "Saving adjustments", url: url)
+            Self.log(error, path: "Saving settings", url: url)
             return error
         }
     }
@@ -1957,6 +2300,15 @@ final class DocumentState {
                 """
             )
             status = .adjustmentsUnreadable(error.url, error)
+
+        case .failure(.captureProfile(let error)):
+            Log.ui.error(
+                """
+                Did not open \(error.url.lastPathComponent, privacy: .public): \
+                \(error.localizedDescription, privacy: .public)
+                """
+            )
+            status = .captureProfileUnusable(error.url, error)
         }
     }
 }

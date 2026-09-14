@@ -306,7 +306,7 @@ struct EPL3OrientationCorrectionTests {
         // An in-memory store, deliberately: the production one would write a
         // sidecar beside the user's own RAW file, and a test must leave the
         // fixture directory exactly as it found it.
-        let state = DocumentState(store: StubImageAdjustmentStore())
+        let state = DocumentState(store: StubPhotographProcessingStore())
         state.open(url)
 
         let initial = try #require(

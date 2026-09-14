@@ -20,7 +20,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     nonisolated static let otherURL = URL(fileURLWithPath: "/tmp/mix-adjustment-other.orf")
 
     static func state(
-        store: StubImageAdjustmentStore,
+        store: StubPhotographProcessingStore,
         log: WorkspaceEventLog,
         render: DocumentState.PreviewRender? = nil
     ) -> DocumentState {
@@ -74,7 +74,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("A fresh open has the identity mix and offers the control")
     func aFreshOpenIsIdentity() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
 
         state.open(Self.url)
@@ -91,7 +91,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("Choosing the swap re-renders and saves the complete state")
     func choosingTheSwapSavesTheCompleteState() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
         state.open(Self.url)
         try await Self.waitUntilSettled(state)
@@ -112,7 +112,8 @@ struct WorkspaceChannelMixAdjustmentTests {
         #expect(store.saved(for: Self.url) == wanted)
         #expect(store.saved(for: Self.url)?.channelMix == .redBlueSwap)
         #expect(store.saved(for: Self.url)?.orientation == .identity)
-        #expect(store.saved(for: Self.url)?.schemaVersion == 4)
+        // And the capture profile beside them, in the same record.
+        #expect(store.savedState(for: Self.url)?.captureProfile == .builtinUncalibrated)
         if case .saved = state.adjustmentPersistence {} else {
             Issue.record("Expected .saved, got \(state.adjustmentPersistence)")
         }
@@ -121,7 +122,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("Asking for the mix already in force does nothing at all")
     func askingForTheSameMixDoesNothing() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
         state.open(Self.url)
         try await Self.waitUntilSettled(state)
@@ -143,7 +144,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("Identity after a swap is saved, and does not touch the orientation")
     func identityAfterASwapIsSaved() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
         state.open(Self.url)
         try await Self.waitUntilSettled(state)
@@ -180,7 +181,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("Resetting the orientation leaves the channel mix alone")
     func resettingTheOrientationKeepsTheMix() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
         state.open(Self.url)
         try await Self.waitUntilSettled(state)
@@ -248,7 +249,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("The retained pre-mix source survives a sequence of mixes untouched")
     func theRetainedSourceSurvivesEveryMix() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
         state.open(Self.url)
         try await Self.waitUntilSettled(state)
@@ -299,7 +300,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("A burst across both controls installs and saves only the newest state")
     func aBurstCollapsesToTheNewestCompleteState() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
         state.open(Self.url)
         try await Self.waitUntilSettled(state)
@@ -339,7 +340,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("States requested while a render is held collapse to the newest")
     func statesBehindAHeldRenderCollapse() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let held = ImageAdjustments(channelMix: .redBlueSwap)
         let gate = GatedRender(log: log, holds: { $0 == held })
         let state = Self.state(store: store, log: log, render: gate.render)
@@ -379,7 +380,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("A saved mix and rotation are the first thing rendered")
     func aSavedMixIsTheFirstRender() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let saved = ImageAdjustments(
             orientation: .quarterTurnRight, channelMix: .redBlueSwap
         )
@@ -431,7 +432,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("The restored image is the image the saved state produces")
     func theRestoredImageIsTheSavedOne() async throws {
         let byHandLog = WorkspaceEventLog()
-        let byHandStore = StubImageAdjustmentStore(log: byHandLog)
+        let byHandStore = StubPhotographProcessingStore(log: byHandLog)
         let byHand = Self.state(store: byHandStore, log: byHandLog)
         byHand.open(Self.url)
         try await Self.waitUntilSettled(byHand)
@@ -445,7 +446,7 @@ struct WorkspaceChannelMixAdjustmentTests {
         )
 
         let restoredLog = WorkspaceEventLog()
-        let restoredStore = StubImageAdjustmentStore(log: restoredLog)
+        let restoredStore = StubPhotographProcessingStore(log: restoredLog)
         restoredStore.preload(wanted, for: Self.url)
         let restored = Self.state(store: restoredStore, log: restoredLog)
         restored.open(Self.url)
@@ -460,7 +461,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("A saved explicit matrix is restored as an explicit matrix")
     func aSavedExplicitMatrixIsRestored() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let explicit = try UserChannelMixAdjustment.explicit(
             persistedMatrix: [0.5, 0, 0, 0, 1, 0, 0, 0, 2]
         )
@@ -492,7 +493,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("A mix whose render refuses is not saved, and says which kind of failure")
     func aRefusedMixRenderIsNotSaved() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let bad = ImageAdjustments(channelMix: .redBlueSwap)
         let state = Self.state(
             store: store,
@@ -549,10 +550,10 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("A save failure keeps the mixed image and reports itself")
     func aSaveFailureKeepsTheMixedImage() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         store.refuseSaves(
             with: .cannotWrite(
-                sidecar: JSONSidecarImageAdjustmentStore.sidecarURL(for: Self.url),
+                sidecar: JSONSidecarPhotographProcessingStore.sidecarURL(for: Self.url),
                 underlying: CocoaError(.fileWriteNoPermission)
             )
         )
@@ -587,7 +588,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("A mix requested just before a file switch still reaches its own sidecar")
     func aPendingMixSettlesAfterASwitch() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let held = ImageAdjustments(channelMix: .redBlueSwap)
         let gate = GatedRender(log: log, holds: { $0 == held })
         let state = DocumentState(
@@ -627,7 +628,7 @@ struct WorkspaceChannelMixAdjustmentTests {
         // A's decision reached A's sidecar, and only A's.
         #expect(store.saved(for: Self.url) == held)
         #expect(store.saved(for: Self.otherURL) == nil)
-        #expect(store.writeSummary == ["mix-adjustment.orf:none:redBlueSwap:0.0EV:defaultNeutralPatch"])
+        #expect(store.writeSummary == ["mix-adjustment.orf:builtin.uncalibrated:none:redBlueSwap:0.0EV:defaultNeutralPatch"])
 
         // A's preview never landed in B: B is still showing B, at B's size,
         // with B's own identity mix.
@@ -644,9 +645,12 @@ struct WorkspaceChannelMixAdjustmentTests {
             return
         }
         #expect(!source.preview.processing.channelMixApplied)
+        // `captureProfile` is a description, not a buffer: the profile these
+        // pixels were prepared under. Nothing full-resolution is reachable.
         #expect(
             Mirror(reflecting: source).children.compactMap(\.label)
-                == ["preview", "metadata", "url", "whiteBalance", "estimate"]
+                == ["preview", "metadata", "url", "captureProfile", "whiteBalance",
+                    "estimate"]
         )
     }
 
@@ -656,7 +660,7 @@ struct WorkspaceChannelMixAdjustmentTests {
     @Test("Reopening the same file with a pending mix serialises on its sidecar")
     func aSameURLReopenWaitsForItsOwnFile() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let held = ImageAdjustments(channelMix: .redBlueSwap)
         let gate = GatedRender(log: log, holds: { $0 == held })
         let state = Self.state(store: store, log: log, render: gate.render)

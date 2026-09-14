@@ -132,7 +132,8 @@ enum WorkspaceStubs {
         width: Int = 8,
         height: Int = 6,
         flip: Int = 0,
-        store: any ImageAdjustmentStore = StubImageAdjustmentStore(),
+        store: any PhotographProcessingStore = StubPhotographProcessingStore(),
+        registry: IRCaptureProfileRegistry = .builtin,
         previewPolicy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy
     ) -> DocumentState {
         DocumentState(
@@ -141,6 +142,7 @@ enum WorkspaceStubs {
                 mosaic: .success(mosaic(url: url, width: width, height: height, flip: flip))
             ),
             store: store,
+            registry: registry,
             previewPolicy: previewPolicy
         )
     }
@@ -153,7 +155,8 @@ enum WorkspaceStubs {
         width: Int = 8,
         height: Int = 6,
         flip: Int = 0,
-        store: any ImageAdjustmentStore = StubImageAdjustmentStore(),
+        store: any PhotographProcessingStore = StubPhotographProcessingStore(),
+        registry: IRCaptureProfileRegistry = .builtin,
         previewPolicy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy
     ) -> (DocumentState, CountingStubDecoder) {
         let decoder = CountingStubDecoder(
@@ -161,7 +164,12 @@ enum WorkspaceStubs {
             mosaic: .success(mosaic(url: url, width: width, height: height, flip: flip))
         )
         return (
-            DocumentState(decoder: decoder, store: store, previewPolicy: previewPolicy),
+            DocumentState(
+                decoder: decoder,
+                store: store,
+                registry: registry,
+                previewPolicy: previewPolicy
+            ),
             decoder
         )
     }
@@ -235,4 +243,89 @@ enum WorkspaceStubs {
         }
         return nil
     }
+}
+
+// MARK: - Capture profiles a test can install
+
+/// Profiles this build deliberately does **not** ship, so that the selection,
+/// invalidation and mismatch paths can be exercised without production growing
+/// fake capture configurations to make the tests possible.
+///
+/// Production has exactly one profile, and a picker with one item is not a
+/// choice. See `docs/decisions/0020-ir-capture-profile-foundation.md`,
+/// Decision 12.
+enum TestCaptureProfiles {
+
+    /// A second profile with the **same** processing basis as the built-in one.
+    ///
+    /// The metadata-only case: different name, different camera claim,
+    /// different filter, identical pixels by construction. Selecting it must
+    /// cost a re-render and not a re-preparation.
+    static let metadataOnly = IRCaptureProfile(
+        id: try! IRCaptureProfileID("user.metadata-only"),
+        name: "Metadata Only",
+        cameraMatch: .any,
+        sensorConversion: .fullSpectrum(vendor: "A Vendor"),
+        filter: try! IRFilterDescriptor.longPass(nominalNanometers: 720),
+        processingBasis: .uncalibratedSensorRGB
+    )
+
+    /// A profile tied to the reference camera's make and model.
+    ///
+    /// `RAWTestData.metadata()` names a different camera, so this one
+    /// mismatches the synthetic fixtures — which is what it is for.
+    static let olympusEPL3 = IRCaptureProfile(
+        id: try! IRCaptureProfileID("user.olympus-epl3-720nm"),
+        name: "Olympus E-PL3 720 nm",
+        cameraMatch: .camera(make: "OLYMPUS IMAGING CORP.", model: "E-PL3"),
+        sensorConversion: .fullSpectrum(vendor: nil),
+        filter: try! IRFilterDescriptor.longPass(nominalNanometers: 720),
+        processingBasis: .uncalibratedSensorRGB
+    )
+
+    /// A profile whose **processing basis differs**, so selecting it genuinely
+    /// changes pixels.
+    ///
+    /// The matrix carries no calibration claim — it is
+    /// `RAWCameraToWorkingColorTransform.explicit(matrix:)`, whose whole
+    /// contract is that the coefficients are finite — and it is deliberately
+    /// asymmetric with exact binary-fraction values, so that a rendering made
+    /// under it is unmistakably different from one made under the identity.
+    static let differentBasis = IRCaptureProfile(
+        id: try! IRCaptureProfileID("user-different-basis.experiment"),
+        name: "Different Basis (experimental)",
+        cameraMatch: .any,
+        sensorConversion: .unknown,
+        filter: .unknown,
+        processingBasis: .explicitMatrix(
+            try! RAWColorMatrix3x3(
+                m00: 0.5, m01: 0.25, m02: 0,
+                m10: 0, m11: 1, m12: 0,
+                m20: 0, m21: 0, m22: 2
+            )
+        )
+    )
+
+    /// An identifier no registry in these tests contains.
+    static let missingID = try! IRCaptureProfileID("user.does-not-exist")
+
+    /// A registry holding the built-in profile and the metadata-only one.
+    static let withMetadataOnly = try! IRCaptureProfileRegistry(
+        profiles: [.builtinUncalibrated, metadataOnly]
+    )
+
+    /// A registry holding the built-in profile and the camera-specific one.
+    static let withCameraSpecific = try! IRCaptureProfileRegistry(
+        profiles: [.builtinUncalibrated, olympusEPL3]
+    )
+
+    /// A registry holding the built-in profile and the one whose basis differs.
+    static let withDifferentBasis = try! IRCaptureProfileRegistry(
+        profiles: [.builtinUncalibrated, differentBasis]
+    )
+
+    /// Every test profile at once, for a suite that switches between them.
+    static let all = try! IRCaptureProfileRegistry(
+        profiles: [.builtinUncalibrated, metadataOnly, olympusEPL3, differentBasis]
+    )
 }

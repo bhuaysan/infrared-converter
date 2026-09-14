@@ -127,10 +127,13 @@ struct EPL3WhiteBalanceTests {
                 decoding: url, using: decoder
             )
             let pipeline = WorkspacePreviewPipeline()
+            let profile = IRCaptureProfile.builtinUncalibrated
             let withDefault = try pipeline.prepareSource(
-                base, whiteBalance: .defaultNeutralPatch
+                base, whiteBalance: .defaultNeutralPatch, captureProfile: profile
             )
-            let withPatch = try pipeline.prepareSource(base, whiteBalance: patch)
+            let withPatch = try pipeline.prepareSource(
+                base, whiteBalance: patch, captureProfile: profile
+            )
 
             #expect(withDefault.estimate.gains != withPatch.estimate.gains)
             #expect(withDefault.preview.values != withPatch.preview.values)
@@ -138,7 +141,9 @@ struct EPL3WhiteBalanceTests {
             // And picking the same patch twice from the same mosaic is
             // deterministic: gains never compound, because the second estimate
             // reads the same unbalanced samples as the first.
-            let again = try pipeline.prepareSource(base, whiteBalance: patch)
+            let again = try pipeline.prepareSource(
+                base, whiteBalance: patch, captureProfile: profile
+            )
             #expect(again.estimate.gains == withPatch.estimate.gains)
             #expect(again.preview.values == withPatch.preview.values)
         }
@@ -225,9 +230,16 @@ struct EPL3WhiteBalanceTests {
             let base = try pipeline.prepareBase(decoding: url, using: decoder)
             #expect(decoder.mosaicDecodeCount == 1)
 
-            _ = try pipeline.prepareSource(base, whiteBalance: .defaultNeutralPatch)
-            _ = try pipeline.prepareSource(base, whiteBalance: try Self.customPatch())
-            _ = try pipeline.prepareSource(base, whiteBalance: .defaultNeutralPatch)
+            let profile = IRCaptureProfile.builtinUncalibrated
+            _ = try pipeline.prepareSource(
+                base, whiteBalance: .defaultNeutralPatch, captureProfile: profile
+            )
+            _ = try pipeline.prepareSource(
+                base, whiteBalance: try Self.customPatch(), captureProfile: profile
+            )
+            _ = try pipeline.prepareSource(
+                base, whiteBalance: .defaultNeutralPatch, captureProfile: profile
+            )
 
             #expect(decoder.mosaicDecodeCount == 1)
         }
@@ -242,7 +254,9 @@ struct EPL3WhiteBalanceTests {
                 decoding: url, using: LibRawDecoder()
             )
             let source = try WorkspacePreviewPipeline().prepareSource(
-                base, whiteBalance: .defaultNeutralPatch
+                base,
+                whiteBalance: .defaultNeutralPatch,
+                captureProfile: .builtinUncalibrated
             )
 
             // The mosaic: one Float32 per sample, and no decoded UInt16 buffer
@@ -256,9 +270,17 @@ struct EPL3WhiteBalanceTests {
             #expect(base.activeAreaHeight == Self.fullHeight)
 
             // The preview: one reduced RGB buffer, and no upstream chain.
+            //
+            // `captureProfile` joined the list in the capture-profile milestone
+            // and is a description rather than a buffer: the profile these
+            // pixels were prepared under, which the workspace compares against
+            // a newly selected one to decide whether they are still valid. See
+            // `docs/decisions/0020-ir-capture-profile-foundation.md`,
+            // Decision 10. Nothing here reaches a full-resolution image.
             #expect(
                 Mirror(reflecting: source).children.compactMap(\.label)
-                    == ["preview", "metadata", "url", "whiteBalance", "estimate"]
+                    == ["preview", "metadata", "url", "captureProfile", "whiteBalance",
+                        "estimate"]
             )
             #expect(
                 source.preview.values.count
@@ -282,7 +304,7 @@ struct EPL3WhiteBalanceTests {
     @Test("A saved patch reopens as itself, with no default-balanced first pass")
     func aSavedPatchReopensAsItself() throws {
         try Self.withIsolatedFixture { url in
-            let store = JSONSidecarImageAdjustmentStore()
+            let store = JSONSidecarPhotographProcessingStore()
             let patch = try Self.customPatch()
             let saved = ImageAdjustments(
                 orientation: .halfTurn,
@@ -290,16 +312,20 @@ struct EPL3WhiteBalanceTests {
                 exposure: try UserExposureAdjustment(ev: -0.25),
                 whiteBalance: patch
             )
-            try store.save(saved, for: url)
+            try store.save(PhotographProcessingState(adjustments: saved), for: url)
 
             let loaded = try #require(try store.load(for: url))
-            #expect(loaded == saved)
-            #expect(loaded.whiteBalance == patch)
-            #expect(loaded.schemaVersion == 4)
+            #expect(loaded.adjustments == saved)
+            // The profile half travels with them, and is the built-in
+            // uncalibrated one: the only processing this project has ever done.
+            #expect(loaded.captureProfile == .builtinUncalibrated)
+            #expect(loaded.adjustments.whiteBalance == patch)
 
             // The first preparation there is uses that patch.
             let source = try WorkspacePreviewPipeline().prepare(
-                decoding: url, using: LibRawDecoder(), whiteBalance: loaded.whiteBalance
+                decoding: url,
+                using: LibRawDecoder(),
+                whiteBalance: loaded.adjustments.whiteBalance
             )
             #expect(source.whiteBalance == patch)
             #expect(
@@ -316,7 +342,7 @@ struct EPL3WhiteBalanceTests {
     @Test("A version 3 sidecar reopens with the historical centred patch")
     func aVersionThreeSidecarMigrates() throws {
         try Self.withIsolatedFixture { url in
-            let sidecar = JSONSidecarImageAdjustmentStore.sidecarURL(for: url)
+            let sidecar = JSONSidecarPhotographProcessingStore.sidecarURL(for: url)
             try Data(
                 #"""
                 {
@@ -329,12 +355,14 @@ struct EPL3WhiteBalanceTests {
             ).write(to: sidecar)
 
             let loaded = try #require(
-                try JSONSidecarImageAdjustmentStore().load(for: url)
+                try JSONSidecarPhotographProcessingStore().load(for: url)
             )
-            #expect(loaded.whiteBalance == .defaultNeutralPatch)
+            #expect(loaded.adjustments.whiteBalance == .defaultNeutralPatch)
 
             let source = try WorkspacePreviewPipeline().prepare(
-                decoding: url, using: LibRawDecoder(), whiteBalance: loaded.whiteBalance
+                decoding: url,
+                using: LibRawDecoder(),
+                whiteBalance: loaded.adjustments.whiteBalance
             )
             // The same 190-sample square version 3 was rendered with.
             #expect(source.neutralPatch.width == 190)

@@ -19,7 +19,7 @@ struct WorkspaceAdjustmentPersistenceTests {
     static func state(
         url: URL = WorkspaceAdjustmentPersistenceTests.url,
         flip: Int = 0,
-        store: StubImageAdjustmentStore,
+        store: StubPhotographProcessingStore,
         log: WorkspaceEventLog,
         refusing: [UserOrientationAdjustment] = []
     ) -> DocumentState {
@@ -73,7 +73,7 @@ struct WorkspaceAdjustmentPersistenceTests {
     @Test("With no saved adjustments the file opens exactly as it always did")
     func noSidecarOpensWithNoAdjustments() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
 
         state.open(Self.url)
@@ -101,7 +101,7 @@ struct WorkspaceAdjustmentPersistenceTests {
     @Test("Saved adjustments are read before the file is decoded or rendered")
     func savedAdjustmentsAreReadFirst() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         store.preload(ImageAdjustments(orientation: .quarterTurnRight), for: Self.url)
         let state = Self.state(store: store, log: log)
 
@@ -132,7 +132,7 @@ struct WorkspaceAdjustmentPersistenceTests {
     @Test("Opening with a sidecar renders once, not once per state")
     func openingWithASidecarRendersOnce() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         store.preload(ImageAdjustments(orientation: .halfTurn), for: Self.url)
         let state = Self.state(store: store, log: log)
 
@@ -151,7 +151,7 @@ struct WorkspaceAdjustmentPersistenceTests {
     @Test("The restored image is the image the saved adjustment produces")
     func theRestoredImageIsTheSavedOne() async throws {
         let byHandLog = WorkspaceEventLog()
-        let byHandStore = StubImageAdjustmentStore(log: byHandLog)
+        let byHandStore = StubPhotographProcessingStore(log: byHandLog)
         let byHand = Self.state(store: byHandStore, log: byHandLog)
         byHand.open(Self.url)
         _ = try await WorkspaceStubs.waitForPreview(byHand, adjustment: .identity)
@@ -161,7 +161,7 @@ struct WorkspaceAdjustmentPersistenceTests {
         )
 
         let restoredLog = WorkspaceEventLog()
-        let restoredStore = StubImageAdjustmentStore(log: restoredLog)
+        let restoredStore = StubPhotographProcessingStore(log: restoredLog)
         restoredStore.preload(ImageAdjustments(orientation: .quarterTurnRight), for: Self.url)
         let restored = Self.state(store: restoredStore, log: restoredLog)
         restored.open(Self.url)
@@ -178,7 +178,7 @@ struct WorkspaceAdjustmentPersistenceTests {
     @Test("A successfully rendered adjustment is saved")
     func aRenderedAdjustmentIsSaved() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
         state.open(Self.url)
         _ = try await WorkspaceStubs.waitForPreview(state, adjustment: .identity)
@@ -190,7 +190,14 @@ struct WorkspaceAdjustmentPersistenceTests {
         )
 
         #expect(store.saved(for: Self.url)?.orientation == .quarterTurnRight)
-        #expect(store.saved(for: Self.url)?.schemaVersion == ImageAdjustments.currentSchemaVersion)
+        // The whole record reaches the store: the adjustments and the capture
+        // profile the photograph is processed under, written together.
+        #expect(
+            store.savedState(for: Self.url)
+                == PhotographProcessingState(
+                    adjustments: ImageAdjustments(orientation: .quarterTurnRight)
+                )
+        )
         if case .saved = state.adjustmentPersistence {} else {
             Issue.record("Expected .saved, got \(state.adjustmentPersistence)")
         }
@@ -205,7 +212,7 @@ struct WorkspaceAdjustmentPersistenceTests {
     @Test("After several settled changes the store holds the current state only")
     func severalChangesLeaveTheCurrentState() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
         state.open(Self.url)
         _ = try await WorkspaceStubs.waitForPreview(state, adjustment: .identity)
@@ -239,7 +246,7 @@ struct WorkspaceAdjustmentPersistenceTests {
     @Test("A burst of changes persists the settled state and nothing else")
     func aBurstPersistsOnlyTheSettledState() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
         state.open(Self.url)
         _ = try await WorkspaceStubs.waitForPreview(state, adjustment: .identity)
@@ -266,7 +273,7 @@ struct WorkspaceAdjustmentPersistenceTests {
     @Test("A failed re-render leaves the last saved adjustment in place")
     func aFailedRenderLeavesTheSavedState() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log, refusing: [.halfTurn])
         state.open(Self.url)
         _ = try await WorkspaceStubs.waitForPreview(state, adjustment: .identity)
@@ -295,7 +302,7 @@ struct WorkspaceAdjustmentPersistenceTests {
     @Test("A save failure keeps the image and reports itself")
     func aSaveFailureKeepsTheImage() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         store.refuseSaves(
             with: .cannotWrite(
                 sidecar: URL(fileURLWithPath: "/tmp/persistence-example.orf.iradjustments.json"),
@@ -333,13 +340,14 @@ struct WorkspaceAdjustmentPersistenceTests {
     @Test("An unreadable sidecar stops the open instead of rendering identity")
     func anUnreadableSidecarStopsTheOpen() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
-        let sidecar = JSONSidecarImageAdjustmentStore.sidecarURL(for: Self.url)
+        let store = StubPhotographProcessingStore(log: log)
+        let sidecar = JSONSidecarPhotographProcessingStore.sidecarURL(for: Self.url)
         store.refuseLoad(
             for: Self.url,
             with: .cannotDecode(
                 sidecar: sidecar,
-                underlying: ImageAdjustmentError.unsupportedSchemaVersion(found: 2, supported: 1)
+                underlying: PhotographProcessingStateError
+                    .unsupportedSchemaVersion(found: 2, supported: 1)
             )
         )
         let state = Self.state(store: store, log: log)
@@ -356,7 +364,7 @@ struct WorkspaceAdjustmentPersistenceTests {
         #expect(error.sidecar == sidecar)
         // The typed refusal survived the file boundary and the document
         // boundary both.
-        #expect(error.adjustment == .unsupportedSchemaVersion(found: 2, supported: 1))
+        #expect(error.record == .unsupportedSchemaVersion(found: 2, supported: 1))
         #expect(error.errorDescription?.isEmpty == false)
         #expect(error.failureReason?.isEmpty == false)
 
@@ -378,7 +386,7 @@ struct WorkspaceAdjustmentPersistenceTests {
     @Test("Switching files does not carry one file's adjustments to another")
     func adjustmentsDoNotCrossFiles() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         store.preload(ImageAdjustments(orientation: .quarterTurnRight), for: Self.url)
         let state = Self.state(store: store, log: log)
 
@@ -410,7 +418,7 @@ struct WorkspaceAdjustmentPersistenceTests {
     /// the rule says it is, and the RAW file is byte-identical afterwards.
     @Test("A rotation survives a reopen, and the RAW file is untouched")
     func aRotationSurvivesAReopen() async throws {
-        let sandbox = try JSONSidecarImageAdjustmentStoreTests.Sandbox(rawName: "E-PL3.ORF")
+        let sandbox = try JSONSidecarPhotographProcessingStoreTests.Sandbox(rawName: "E-PL3.ORF")
         defer { sandbox.cleanUp() }
         let before = try Data(contentsOf: sandbox.raw)
 
@@ -419,7 +427,7 @@ struct WorkspaceAdjustmentPersistenceTests {
                 result: .success(RAWTestData.decodedRAW(url: sandbox.raw)),
                 mosaic: .success(WorkspaceStubs.mosaic(url: sandbox.raw))
             ),
-            store: JSONSidecarImageAdjustmentStore()
+            store: JSONSidecarPhotographProcessingStore()
         )
         first.open(sandbox.raw)
         _ = try await WorkspaceStubs.waitForPreview(first, adjustment: .identity)
@@ -442,7 +450,7 @@ struct WorkspaceAdjustmentPersistenceTests {
                 result: .success(RAWTestData.decodedRAW(url: sandbox.raw)),
                 mosaic: .success(WorkspaceStubs.mosaic(url: sandbox.raw))
             ),
-            store: JSONSidecarImageAdjustmentStore()
+            store: JSONSidecarPhotographProcessingStore()
         )
         second.open(sandbox.raw)
         try await Self.waitUntilSettled(second)

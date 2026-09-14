@@ -113,6 +113,17 @@ public struct FullResolutionExportRender: Sendable {
     public var whiteBalanceGains: RAWWhiteBalanceGains { estimate.gains }
 
     /// Width in pixels, as viewed — after orientation.
+    /// The capture profile this rendering was processed under, resolved.
+    public var captureProfile: IRCaptureProfile { request.captureProfile }
+    /// Its identity — the value a sidecar refers to, and the value a preview's
+    /// provenance must agree with.
+    public var captureProfileID: IRCaptureProfileID { request.captureProfile.id }
+    /// Whether this rendering's camera-to-working processing is a validated
+    /// infrared colour calibration. `false` for every profile this build ships.
+    public var isValidatedInfraredCalibration: Bool {
+        request.captureProfile.isValidatedInfraredCalibration
+    }
+
     public var pixelWidth: Int { image.width }
     /// Height in pixels, as viewed.
     public var pixelHeight: Int { image.height }
@@ -235,6 +246,13 @@ public struct FullResolutionExportPipeline: Sendable {
                 decoding: request.rawURL,
                 using: decoder,
                 whiteBalance: request.adjustments.whiteBalance,
+                // The resolved capture profile's basis, which is the same
+                // transform the preview was prepared with because it is the
+                // same profile value. There is no export profile, no export
+                // default and no registry lookup here. See
+                // `docs/decisions/0020-ir-capture-profile-foundation.md`,
+                // Decision 9.
+                cameraToWorkingTransform: request.captureProfile.cameraToWorkingTransform,
                 cancellation: cancellation
             )
         } catch is CancellationError {
@@ -304,7 +322,7 @@ public struct FullResolutionExportPipeline: Sendable {
                 to: destination,
                 metadata: rendered.metadata,
                 sourceURL: request.rawURL,
-                adjustments: request.adjustments
+                state: request.state
             )
         } catch let error as TIFFExportError {
             throw FullResolutionExportError.writingFailed(underlying: error)

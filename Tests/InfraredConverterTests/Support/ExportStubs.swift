@@ -57,7 +57,7 @@ final class RecordingExport: @unchecked Sendable {
             return TIFFExportResult(
                 destination: destination,
                 sourceURL: request.rawURL,
-                adjustments: request.adjustments,
+                state: request.state,
                 pixelWidth: 4056,
                 pixelHeight: 3040,
                 bitsPerComponent: 16,

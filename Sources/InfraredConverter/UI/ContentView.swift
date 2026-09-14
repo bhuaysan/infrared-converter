@@ -33,6 +33,8 @@ struct ContentView: View {
                 Divider().frame(height: 18)
                 ExportControl(documentState: documentState)
                 Divider().frame(height: 18)
+                CaptureProfileControl(documentState: documentState)
+                Divider().frame(height: 18)
                 WhiteBalanceControl(
                     documentState: documentState, isPicking: $isPickingNeutralPatch
                 )
@@ -125,6 +127,36 @@ struct ContentView: View {
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
                     .foregroundStyle(.tertiary)
+            }
+            .padding(40)
+
+        case .captureProfileUnusable(let url, let error):
+            // A third kind of refusal, shown as one. The photograph is
+            // presumed fine and so are the saved settings; what is missing, or
+            // wrong for this camera, is the capture profile they name. Nothing
+            // was substituted — the text says so, because a user who saw a
+            // picture here would reasonably assume it had been.
+            VStack(spacing: 8) {
+                Image(systemName: "camera.metering.unknown")
+                    .font(.largeTitle)
+                    .foregroundStyle(.secondary)
+                Text(url.lastPathComponent)
+                    .font(.headline)
+                Text(error.errorDescription ?? "The capture profile could not be used.")
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.secondary)
+                if let reason = error.failureReason {
+                    Text(reason)
+                        .font(.caption)
+                        .multilineTextAlignment(.center)
+                        .foregroundStyle(.tertiary)
+                }
+                if let id = error.profileID {
+                    Text(id.rawValue)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .foregroundStyle(.tertiary)
+                }
             }
             .padding(40)
         }
@@ -358,6 +390,8 @@ private struct RAWInspectorView: View {
                     row("Sensor readout", "\(geometry.rawWidth) × \(geometry.rawHeight)")
                 }
 
+                captureProfileSection
+
                 ownedPreviewSection
 
                 section("Sensor") {
@@ -436,6 +470,42 @@ private struct RAWInspectorView: View {
         }
     }
 
+    /// What produced the photograph, kept visibly apart from what the user
+    /// decided about it.
+    ///
+    /// The product-important separation of this milestone, expressed in the
+    /// inspector: a capture profile is reusable context — camera, conversion,
+    /// filter — and the adjustments below are this photograph's own edits.
+    /// Reading them in one undifferentiated list was what made the old
+    /// hard-coded transform invisible.
+    ///
+    /// Only values that exist are shown, and the calibration row says "No" in
+    /// plain words rather than being omitted. An absent row reads as "not
+    /// applicable"; this one has to read as "we have not characterised your
+    /// camera", because that is the fact.
+    @ViewBuilder
+    private var captureProfileSection: some View {
+        section("Capture") {
+            let profile = loaded.captureProfile
+            row("Profile", profile.name)
+            row("Profile ID", profile.id.rawValue)
+            row("Intended camera", profile.cameraMatch.shortDescription)
+            row("Conversion", profile.sensorConversion.shortDescription)
+            row("Filter", profile.filter.shortDescription)
+            row("Processing", profile.processingBasis.shortDescription)
+            row("Calibration", profile.isValidatedInfraredCalibration ? "Validated" : "No")
+            if !profile.isValidatedInfraredCalibration {
+                Text("""
+                    A capture profile records how the photograph was made. It is not a \
+                    measured colour calibration, and a nominal filter wavelength is not a \
+                    spectral response.
+                    """)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     /// What the application-owned pipeline did, in the order it did it.
     ///
     /// Every line here is read back from the preview's own provenance record,
@@ -448,6 +518,11 @@ private struct RAWInspectorView: View {
                 let processing = preview.processing
                 row("Size", "\(preview.pixelWidth) × \(preview.pixelHeight)")
                 row("Preview resolution", Self.resolutionDescription(preview.resolution))
+                // The profile this rendering was actually made under, from the
+                // preview's own provenance — not the selection. While a
+                // profile change is being prepared the control is already
+                // ahead of this row, exactly as the exposure slider is.
+                row("Capture profile", preview.captureProfile.name)
                 row("Recorded orientation", Self.recordedOrientationDescription(preview))
                 row("Your correction", Self.userOrientationDescription(preview))
                 row("Orientation applied", Self.orientationDescription(preview))
@@ -829,6 +904,66 @@ private struct WhiteBalanceControl: View {
 /// A freshly opened file with no saved decision is `.identity`, and it stays
 /// that way until a person chooses otherwise — nothing here inspects the
 /// photograph to guess whether it is infrared.
+/// The capture profile in force, and — when there is more than one to choose
+/// from — a way to select another.
+///
+/// ## Why there is no picker today
+///
+/// This build ships exactly one profile, `builtin.uncalibrated`. A menu with a
+/// single item is not a choice; it is a control that implies the application
+/// has capture configurations to offer when it has not. So the selection
+/// machinery exists in production — `DocumentState.setCaptureProfile`, the
+/// registry, the invalidation rule — and the control shows the current profile
+/// honestly until there is a second profile to switch to. Tests exercise the
+/// selection path with injected profiles rather than production growing fake
+/// ones to make a picker look useful. See
+/// `docs/decisions/0020-ir-capture-profile-foundation.md`, Decision 12.
+///
+/// There is deliberately no free-text profile field either. An identifier a
+/// user typed would name nothing, and a photograph pointing at nothing is the
+/// unresolvable state the open path refuses.
+private struct CaptureProfileControl: View {
+    let documentState: DocumentState
+
+    var body: some View {
+        let profile = documentState.captureProfile
+        let choices = documentState.availableCaptureProfiles
+
+        HStack(spacing: 6) {
+            Image(systemName: "camera.filters")
+                .foregroundStyle(.secondary)
+
+            if choices.count > 1 {
+                Menu {
+                    ForEach(choices) { choice in
+                        Button {
+                            documentState.setCaptureProfile(choice)
+                        } label: {
+                            if choice.id == profile.id {
+                                Label(choice.name, systemImage: "checkmark")
+                            } else {
+                                Text(choice.name)
+                            }
+                        }
+                    }
+                } label: {
+                    Text(profile.name)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            } else {
+                Text(profile.name)
+                    .font(.callout)
+            }
+        }
+        .help(profile.diagnosticDescription)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Capture profile: \(profile.diagnosticDescription)")
+        .disabled(!documentState.canAdjust)
+    }
+}
+
+
 private struct ChannelMixControl: View {
     let documentState: DocumentState
 

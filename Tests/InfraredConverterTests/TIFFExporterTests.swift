@@ -40,7 +40,7 @@ struct TIFFExporterTests {
             to: destination,
             metadata: metadata,
             sourceURL: sourceURL,
-            adjustments: adjustments
+            state: PhotographProcessingState(adjustments: adjustments)
         )
     }
 

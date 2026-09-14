@@ -1,15 +1,25 @@
 import Foundation
 
-/// One export, as the two facts it is made of.
+/// One export, as the facts it is made of.
 ///
 /// ```text
-/// the RAW file  +  ImageAdjustments
+/// the RAW file  +  the resolved capture profile  +  ImageAdjustments
 /// ```
 ///
-/// Which is the canonical editing state of a photograph, exactly as
-/// [ADR 0015](../../../docs/decisions/0015-reduced-resolution-preview.md) says
-/// it is. An export is therefore not a new kind of thing: it is that state,
+/// Which is the canonical processing state of a photograph, exactly as
+/// [ADR 0015](../../../docs/decisions/0015-reduced-resolution-preview.md) and
+/// [ADR 0020](../../../docs/decisions/0020-ir-capture-profile-foundation.md)
+/// say it is. An export is therefore not a new kind of thing: it is that state,
 /// rendered once more, at the sensor's own resolution, into a file.
+///
+/// It used to be two facts, the file and the adjustments, because the
+/// camera-to-working transform was a constant every path silently shared. Now
+/// that a capture profile chooses it, the profile is part of what an export is
+/// — and it travels **resolved**, as a whole `IRCaptureProfile`, not as an
+/// identifier to be looked up while the export runs. A registry lookup from
+/// inside a running export would be exactly the "look up mutable UI state after
+/// it starts" that the snapshot below exists to prevent, and it would reopen
+/// the question of what should happen if the answer changed halfway.
 ///
 /// ## It is a snapshot, and that is the point
 ///
@@ -32,6 +42,11 @@ import Foundation
 ///   the user currently has, whether or not they have been written to disk;
 ///   persistence and export are separate questions. See
 ///   `docs/decisions/0018-full-resolution-tiff-export.md`, Decision 9.
+/// - No registry, and no profile identifier to resolve later. The profile is
+///   already resolved; the export cannot pick a different one, cannot fall back
+///   to another one, and cannot notice one being edited. Preview and export
+///   therefore cannot disagree about which capture profile a photograph is
+///   processed under — they are handed the same resolved value.
 /// - No white-balance gains, and no normalised mosaic. The patch travels as
 ///   the user's intent inside `adjustments`, and the pipeline measures it from
 ///   the file it re-reads. An export started while a new patch is still being
@@ -41,21 +56,37 @@ import Foundation
 public struct ExportRequest: Equatable, Sendable {
     /// The RAW file to render. Read; never written, moved or modified.
     public let rawURL: URL
+    /// The capture profile to process it under, already resolved.
+    ///
+    /// The only thing it contributes to the rendering is
+    /// `cameraToWorkingTransform`; everything else it carries is provenance the
+    /// exported file's diagnostics can state.
+    public let captureProfile: IRCaptureProfile
     /// The complete canonical adjustment state to render it with.
     public let adjustments: ImageAdjustments
 
-    public init(rawURL: URL, adjustments: ImageAdjustments) {
+    public init(
+        rawURL: URL,
+        captureProfile: IRCaptureProfile,
+        adjustments: ImageAdjustments
+    ) {
         self.rawURL = rawURL
+        self.captureProfile = captureProfile
         self.adjustments = adjustments
     }
 
+    /// The canonical photograph state this request renders.
+    ///
+    /// Derived rather than stored: the profile is held resolved here, and its
+    /// identity is what the state — and therefore the sidecar — refers to.
+    public var state: PhotographProcessingState {
+        PhotographProcessingState(
+            captureProfile: captureProfile.id, adjustments: adjustments
+        )
+    }
+
     public var diagnosticDescription: String {
-        """
-        \(rawURL.lastPathComponent): orientation \(adjustments.orientation.persistedToken), \
-        mix \(adjustments.channelMix.kind.rawValue), \
-        exposure \(adjustments.exposure.signedDescription), \
-        white balance \(adjustments.whiteBalance.kind.rawValue)
-        """
+        "\(rawURL.lastPathComponent): \(state.diagnosticDescription)"
     }
 }
 

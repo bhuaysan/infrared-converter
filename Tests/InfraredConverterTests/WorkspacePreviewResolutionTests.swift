@@ -28,7 +28,7 @@ struct WorkspacePreviewResolutionTests {
     static let previewHeight = 12
 
     static func opened(
-        store: any ImageAdjustmentStore = StubImageAdjustmentStore()
+        store: any PhotographProcessingStore = StubPhotographProcessingStore()
     ) async throws -> DocumentState {
         let state = WorkspaceStubs.documentState(
             url: url,

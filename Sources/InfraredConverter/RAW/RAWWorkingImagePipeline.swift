@@ -12,7 +12,7 @@ import Foundation
 /// WhiteBalancedRAWMosaic
 ///     ↓  RAWDemosaicer (bilinear Bayer)
 /// DemosaicedRAWRGBImage
-///     ↓  RAWWorkingColorConverter (.sensorRGBIdentityFalseColor)
+///     ↓  RAWWorkingColorConverter (the capture profile's basis)
 /// WorkingColorRGBImage           ← full resolution, scene-linear, PRE-creative
 /// ```
 ///
@@ -39,6 +39,12 @@ import Foundation
 /// is no second resolver and no second estimator to disagree with. See
 /// `docs/decisions/0019-interactive-white-balance.md`.
 ///
+/// It mattered again once the camera-to-working transform became a profile's
+/// choice rather than a constant. Both end paths resolve the **same** profile
+/// and hand its basis's transform to this one function, so a preview and its
+/// export cannot be processed under different capture profiles. See
+/// `docs/decisions/0020-ir-capture-profile-foundation.md`, Decision 9.
+///
 /// ## Where it splits, and why there
 ///
 /// ```text
@@ -53,27 +59,28 @@ import Foundation
 /// re-reading the file. The second is split off because that is exactly where
 /// the two end paths diverge — the preview reduces and the export does not.
 ///
-/// ## What is decided here, and what is not
+/// ## Nothing is decided here
 ///
 /// Every stage below requires its decision to be named — there is no default
-/// transform and no default white balance anywhere in the processing API. One
-/// choice is made here, in the application layer, where it is visible:
+/// transform and no default white balance anywhere in the processing API — and
+/// this type now names none of them itself. Both are **parameters**:
 ///
-/// - **`.sensorRGBIdentityFalseColor`**, the IR-safe placement into the
-///   working space. The file's own `rgbFromCamera` is visible-light data whose
-///   validity for an infrared capture is the open question of this project,
-///   so it is not used.
+/// - **the camera-to-working transform**, which comes from the resolved
+///   `IRCaptureProfile`'s processing basis. It used to be a static constant
+///   here, `.sensorRGBIdentityFalseColor`, which every caller silently got;
+///   that made the application's one capture-processing assumption invisible
+///   and unselectable. `builtin.uncalibrated` supplies exactly that transform,
+///   so migrated photographs render identically. See
+///   `docs/decisions/0020-ir-capture-profile-foundation.md`.
+/// - **the white balance**, which is the user's own decision, and for which the
+///   default centred patch is one value that parameter can take
+///   (`UserWhiteBalanceAdjustment.defaultNeutralPatch`) rather than a hidden
+///   fallback inside a shared pipeline.
 ///
-/// The white balance is no longer among them. It used to be — a centred patch,
-/// hard-coded here, which every caller silently got. It is now a **parameter**,
-/// because it is a user decision, and the default centred patch is one value
-/// that parameter can take (`UserWhiteBalanceAdjustment.defaultNeutralPatch`)
-/// rather than a hidden fallback inside a shared pipeline.
-///
-/// What is **not** decided here is every adjustable stage after the working
-/// representation: no creative mix, no orientation, no exposure, no reduction
-/// and no encoding. Those belong to the path that renders, and they are what
-/// makes a preview a preview and an export an export.
+/// What is **not** handled here at all is every adjustable stage after the
+/// working representation: no creative mix, no orientation, no exposure, no
+/// reduction and no encoding. Those belong to the path that renders, and they
+/// are what makes a preview a preview and an export an export.
 ///
 /// ## Cost and cancellation
 ///
@@ -89,15 +96,6 @@ import Foundation
 /// end would keep a core and a buffer busy producing a picture nobody will
 /// see.
 struct RAWWorkingImagePipeline {
-
-    /// The camera-to-working transform every path uses.
-    ///
-    /// Not a colour claim. `.sensorRGBIdentityFalseColor` places camera-native
-    /// sensor RGB into the working space's coordinates without asserting that
-    /// the result is colorimetrically anything; a validated infrared
-    /// calibration would be a different transform with different provenance.
-    static let cameraToWorkingTransform = RAWCameraToWorkingColorTransform
-        .sensorRGBIdentityFalseColor
 
     /// The orientation a file's own metadata names, or `nil` when it names one
     /// this application does not model.
@@ -152,6 +150,7 @@ struct RAWWorkingImagePipeline {
     func prepare(
         _ source: NormalizedRAWSource,
         whiteBalance: UserWhiteBalanceAdjustment,
+        cameraToWorkingTransform: RAWCameraToWorkingColorTransform,
         cancellation: ProcessingCancellation = .none
     ) throws -> PreparedWorkingImage {
         let region = try whiteBalance.resolvedRegion(
@@ -175,7 +174,7 @@ struct RAWWorkingImagePipeline {
         // mosaic belongs to the caller, not to this result.
         let working = try RAWWorkingColorConverter().convert(
             demosaiced,
-            using: Self.cameraToWorkingTransform,
+            using: cameraToWorkingTransform,
             cancellation: cancellation
         )
 
@@ -204,10 +203,16 @@ struct RAWWorkingImagePipeline {
         decoding url: URL,
         using decoder: RAWDecoder,
         whiteBalance: UserWhiteBalanceAdjustment,
+        cameraToWorkingTransform: RAWCameraToWorkingColorTransform,
         cancellation: ProcessingCancellation = .none
     ) throws -> PreparedWorkingImage {
         let base = try RAWBasePreparationPipeline().prepare(decoding: url, using: decoder)
-        return try prepare(base, whiteBalance: whiteBalance, cancellation: cancellation)
+        return try prepare(
+            base,
+            whiteBalance: whiteBalance,
+            cameraToWorkingTransform: cameraToWorkingTransform,
+            cancellation: cancellation
+        )
     }
 }
 

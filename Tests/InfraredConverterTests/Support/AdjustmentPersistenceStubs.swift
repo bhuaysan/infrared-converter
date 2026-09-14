@@ -31,9 +31,9 @@ final class WorkspaceEventLog: @unchecked Sendable {
         /// two-slot architecture is that they run at different times and for
         /// different reasons. A rotation that produced one of these would be a
         /// defect no assertion on the final image could catch.
-        case preparedSource(UserWhiteBalanceAdjustment)
+        case preparedSource(SourcePreparationRequest)
         /// The white-balance-dependent half refused this decision.
-        case preparationRefused(UserWhiteBalanceAdjustment)
+        case preparationRefused(SourcePreparationRequest)
         /// A full render ran, for this complete state.
         case rendered(ImageAdjustments)
         /// A render refused, for this complete state.
@@ -86,9 +86,25 @@ final class WorkspaceEventLog: @unchecked Sendable {
     /// A burst of picks that produced one entry is the coalescing claim; a
     /// rotation that produced none is the "fast adjustments stay fast" claim.
     var preparations: [UserWhiteBalanceAdjustment] {
+        preparationRequests.map(\.whiteBalance)
+    }
+
+    /// The complete requests the heavy half actually ran, in order.
+    ///
+    /// This is the event that carries the capture profile, because this is the
+    /// pass a profile changes: the camera-to-working transform runs here. A
+    /// fast render's profile is asserted through the installed preview's own
+    /// provenance instead — the observable a user would actually see — rather
+    /// than duplicated into every ordering assertion in the suite.
+    var preparationRequests: [SourcePreparationRequest] {
         all.compactMap {
-            if case .preparedSource(let state) = $0 { return state } else { return nil }
+            if case .preparedSource(let request) = $0 { return request } else { return nil }
         }
+    }
+
+    /// The capture profiles the heavy half was run for, in order.
+    var preparedProfiles: [IRCaptureProfileID] {
+        preparationRequests.map(\.captureProfile.id)
     }
 
     /// Every white balance the heavy half was **asked** for, whether it
@@ -96,7 +112,8 @@ final class WorkspaceEventLog: @unchecked Sendable {
     var preparationAttempts: [UserWhiteBalanceAdjustment] {
         all.compactMap {
             switch $0 {
-            case .preparedSource(let state), .preparationRefused(let state): return state
+            case .preparedSource(let request), .preparationRefused(let request):
+                return request.whiteBalance
             default: return nil
             }
         }
@@ -113,17 +130,18 @@ final class WorkspaceEventLog: @unchecked Sendable {
     }
 }
 
-/// An in-memory `ImageAdjustmentStore` the test drives and then interrogates.
+/// An in-memory `PhotographProcessingStore` the test drives and then
+/// interrogates.
 ///
 /// It is not a fake filesystem: nothing here is atomic, nothing is encoded.
 /// Its job is to answer "what did the workspace ask for, in what order, and
 /// what did it try to write" — the questions the JSON store's own suite
 /// cannot answer because it does not know what a document is.
-final class StubImageAdjustmentStore: ImageAdjustmentStore, @unchecked Sendable {
+final class StubPhotographProcessingStore: PhotographProcessingStore, @unchecked Sendable {
     private let lock = NSLock()
-    private var stored: [URL: ImageAdjustments] = [:]
-    private var loadRefusals: [URL: ImageAdjustmentPersistenceError] = [:]
-    private var saveRefusal: ImageAdjustmentPersistenceError?
+    private var stored: [URL: PhotographProcessingState] = [:]
+    private var loadRefusals: [URL: PhotographProcessingPersistenceError] = [:]
+    private var saveRefusal: PhotographProcessingPersistenceError?
     let log: WorkspaceEventLog
 
     init(log: WorkspaceEventLog = WorkspaceEventLog()) {
@@ -131,28 +149,43 @@ final class StubImageAdjustmentStore: ImageAdjustmentStore, @unchecked Sendable 
     }
 
     /// Puts a saved record in place, as if a previous session had written it.
+    /// Seeds a photograph's saved adjustments under the built-in uncalibrated
+    /// profile — what every sidecar written before capture profiles existed
+    /// migrates to, and what a fresh one gets.
     func preload(_ adjustments: ImageAdjustments, for url: URL) {
+        preload(PhotographProcessingState(adjustments: adjustments), for: url)
+    }
+
+    /// Seeds a photograph's complete saved state, capture profile included.
+    func preload(_ state: PhotographProcessingState, for url: URL) {
         lock.lock()
         defer { lock.unlock() }
-        stored[url] = adjustments
+        stored[url] = state
     }
 
     /// Makes this file's record exist and refuse to be read.
-    func refuseLoad(for url: URL, with error: ImageAdjustmentPersistenceError) {
+    func refuseLoad(for url: URL, with error: PhotographProcessingPersistenceError) {
         lock.lock()
         defer { lock.unlock() }
         loadRefusals[url] = error
     }
 
     /// Makes every save refuse, as an unwritable volume would.
-    func refuseSaves(with error: ImageAdjustmentPersistenceError) {
+    func refuseSaves(with error: PhotographProcessingPersistenceError) {
         lock.lock()
         defer { lock.unlock() }
         saveRefusal = error
     }
 
     /// What is currently recorded for a file, without logging a load.
+    /// The adjustments half of what was saved, for the many assertions that
+    /// only care about that.
     func saved(for url: URL) -> ImageAdjustments? {
+        savedState(for: url)?.adjustments
+    }
+
+    /// The complete record that was saved, capture profile included.
+    func savedState(for url: URL) -> PhotographProcessingState? {
         lock.lock()
         defer { lock.unlock() }
         return stored[url]
@@ -164,7 +197,7 @@ final class StubImageAdjustmentStore: ImageAdjustmentStore, @unchecked Sendable 
     /// The event log records what was saved; this records where. One
     /// document's adjustment reaching another document's sidecar would be
     /// invisible in the first and obvious in the second.
-    private(set) var writes: [(url: URL, adjustments: ImageAdjustments)] = []
+    private(set) var writes: [(url: URL, state: PhotographProcessingState)] = []
 
     /// The writes, as a comparable list of file name and complete state.
     ///
@@ -176,15 +209,19 @@ final class StubImageAdjustmentStore: ImageAdjustmentStore, @unchecked Sendable 
         defer { lock.unlock() }
         return writes.map {
             """
-            \($0.url.lastPathComponent):\($0.adjustments.orientation.persistedToken)\
-            :\($0.adjustments.channelMix.kind.rawValue):\($0.adjustments.exposure.ev)EV\
-            :\($0.adjustments.whiteBalance.kind.rawValue)
+            \($0.url.lastPathComponent):\($0.state.captureProfile)\
+            :\($0.state.adjustments.orientation.persistedToken)\
+            :\($0.state.adjustments.channelMix.kind.rawValue)\
+            :\($0.state.adjustments.exposure.ev)EV\
+            :\($0.state.adjustments.whiteBalance.kind.rawValue)
             """
         }
     }
 
-    func load(for url: URL) throws(ImageAdjustmentPersistenceError) -> ImageAdjustments? {
-        let refusal: ImageAdjustmentPersistenceError? = {
+    func load(
+        for url: URL
+    ) throws(PhotographProcessingPersistenceError) -> PhotographProcessingState? {
+        let refusal: PhotographProcessingPersistenceError? = {
             lock.lock()
             defer { lock.unlock() }
             return loadRefusals[url]
@@ -194,33 +231,37 @@ final class StubImageAdjustmentStore: ImageAdjustmentStore, @unchecked Sendable 
             throw refusal
         }
 
-        let adjustments: ImageAdjustments? = {
+        let state: PhotographProcessingState? = {
             lock.lock()
             defer { lock.unlock() }
             return stored[url]
         }()
-        log.append(.loadedAdjustments(adjustments))
-        return adjustments
+        // The event carries the adjustments half. Which profile was loaded is
+        // observed where it has an effect — the capture profile the first
+        // preparation ran under — rather than restated in every ordering
+        // assertion in the suite.
+        log.append(.loadedAdjustments(state?.adjustments))
+        return state
     }
 
     func save(
-        _ adjustments: ImageAdjustments, for url: URL
-    ) throws(ImageAdjustmentPersistenceError) {
-        let refusal: ImageAdjustmentPersistenceError? = {
+        _ state: PhotographProcessingState, for url: URL
+    ) throws(PhotographProcessingPersistenceError) {
+        let refusal: PhotographProcessingPersistenceError? = {
             lock.lock()
             defer { lock.unlock() }
             return saveRefusal
         }()
         if let refusal {
-            log.append(.saveRefused(adjustments))
+            log.append(.saveRefused(state.adjustments))
             throw refusal
         }
 
         lock.lock()
-        stored[url] = adjustments
-        writes.append((url: url, adjustments: adjustments))
+        stored[url] = state
+        writes.append((url: url, state: state))
         lock.unlock()
-        log.append(.saved(adjustments))
+        log.append(.saved(state.adjustments))
     }
 }
 
@@ -265,12 +306,14 @@ struct RecordingRender: Sendable {
     var render: DocumentState.PreviewRender {
         let log = self.log
         let refuses = self.refuses
-        return { source, adjustments, cancellation in
+        return { source, captureProfile, adjustments, cancellation in
             if refuses(adjustments) {
                 log.append(.renderRefused(adjustments))
                 throw Refused()
             }
-            let preview = try DocumentState.pipelineRender(source, adjustments, cancellation)
+            let preview = try DocumentState.pipelineRender(
+                source, captureProfile, adjustments, cancellation
+            )
             log.append(.rendered(adjustments))
             return preview
         }
@@ -377,7 +420,7 @@ final class GatedRender: @unchecked Sendable {
     }
 
     var render: DocumentState.PreviewRender {
-        { [self] source, adjustments, cancellation in
+        { [self] source, captureProfile, adjustments, cancellation in
             if withLock({ holds(adjustments) }) {
                 didStart.signal()
                 guard release.wait(timeout: .now() + Self.waitLimit) == .success else {
@@ -388,7 +431,9 @@ final class GatedRender: @unchecked Sendable {
                 log.append(.renderRefused(adjustments))
                 throw Refused()
             }
-            let preview = try DocumentState.pipelineRender(source, adjustments, cancellation)
+            let preview = try DocumentState.pipelineRender(
+                source, captureProfile, adjustments, cancellation
+            )
             log.append(.rendered(adjustments))
             return preview
         }
@@ -475,15 +520,18 @@ struct RecordingPreparation: Sendable {
     var prepare: DocumentState.SourcePreparation {
         let log = self.log
         let refuses = self.refuses
-        return { base, whiteBalance, policy, cancellation in
+        return { base, whiteBalance, captureProfile, policy, cancellation in
+            let request = SourcePreparationRequest(
+                whiteBalance: whiteBalance, captureProfile: captureProfile
+            )
             if refuses(whiteBalance) {
-                log.append(.preparationRefused(whiteBalance))
+                log.append(.preparationRefused(request))
                 throw Refused()
             }
             let source = try DocumentState.pipelineSourcePreparation(
-                base, whiteBalance, policy, cancellation
+                base, whiteBalance, captureProfile, policy, cancellation
             )
-            log.append(.preparedSource(whiteBalance))
+            log.append(.preparedSource(request))
             return source
         }
     }
@@ -537,8 +585,21 @@ final class GatedPreparation: @unchecked Sendable {
         self.init(log: log, holds: { holdingPicks && !$0.isDefault })
     }
 
+    /// Whether a held pass ignores the cancellation it was handed.
+    ///
+    /// Off by default, which is production's behaviour: a superseded
+    /// preparation stops inside itself and is never delivered. A test that
+    /// wants to prove the **delivery guard** — that a source prepared for one
+    /// state cannot install into a document that has moved to another — needs a
+    /// pass that succeeds despite having been superseded, which is what this
+    /// produces.
+    var ignoresCancellation = false
+
     var prepare: DocumentState.SourcePreparation {
-        { [self] base, whiteBalance, policy, cancellation in
+        { [self] base, whiteBalance, captureProfile, policy, cancellation in
+            let request = SourcePreparationRequest(
+                whiteBalance: whiteBalance, captureProfile: captureProfile
+            )
             if withLock({ holds(whiteBalance) }) {
                 didStart.signal()
                 guard release.wait(timeout: .now() + Self.waitLimit) == .success else {
@@ -546,13 +607,17 @@ final class GatedPreparation: @unchecked Sendable {
                 }
             }
             if withLock({ refuses(whiteBalance) }) {
-                log.append(.preparationRefused(whiteBalance))
+                log.append(.preparationRefused(request))
                 throw Refused()
             }
             let source = try DocumentState.pipelineSourcePreparation(
-                base, whiteBalance, policy, cancellation
+                base,
+                whiteBalance,
+                captureProfile,
+                policy,
+                withLock({ ignoresCancellation }) ? .none : cancellation
             )
-            log.append(.preparedSource(whiteBalance))
+            log.append(.preparedSource(request))
             return source
         }
     }

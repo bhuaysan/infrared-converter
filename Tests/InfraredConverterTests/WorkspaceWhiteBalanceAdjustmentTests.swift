@@ -88,7 +88,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
         )
         let document = DocumentState(
             decoder: counting,
-            store: StubImageAdjustmentStore(log: log),
+            store: StubPhotographProcessingStore(log: log),
             render: RecordingRender(log: log).render,
             prepareSource: RecordingPreparation(log: log).prepare
         )
@@ -136,7 +136,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
                 result: .success(RAWTestData.decodedRAW(url: Self.url)),
                 mosaic: .success(WorkspaceStubs.mosaic(url: Self.url, width: 16, height: 12))
             ),
-            store: StubImageAdjustmentStore(log: log),
+            store: StubPhotographProcessingStore(log: log),
             render: RecordingRender(log: log).render,
             prepareSource: RecordingPreparation(log: log).prepare
         )
@@ -265,7 +265,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
     @Test("A picked patch becomes part of the complete adjustment record")
     func aPickedPatchIsCanonicalState() async throws {
         let patchA = try Self.patchA()
-        let store = StubImageAdjustmentStore()
+        let store = StubPhotographProcessingStore()
         let document = WorkspaceStubs.documentState(
             url: Self.url, width: 16, height: 12, store: store
         )
@@ -295,7 +295,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
                 result: .success(RAWTestData.decodedRAW(url: Self.url)),
                 mosaic: .success(WorkspaceStubs.mosaic(url: Self.url, width: 16, height: 12))
             ),
-            store: StubImageAdjustmentStore(log: log),
+            store: StubPhotographProcessingStore(log: log),
             render: RecordingRender(log: log).render,
             prepareSource: RecordingPreparation(log: log).prepare
         )
@@ -411,7 +411,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
                 result: .success(RAWTestData.decodedRAW(url: Self.url)),
                 mosaic: .success(WorkspaceStubs.mosaic(url: Self.url, width: 16, height: 12))
             ),
-            store: StubImageAdjustmentStore(log: log),
+            store: StubPhotographProcessingStore(log: log),
             render: RecordingRender(log: log).render,
             prepareSource: gate.prepare
         )
@@ -472,7 +472,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
         let patchA = try Self.patchA()
         let patchB = try Self.patchB()
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let a = patchA
         let b = patchB
         // Only A is gated, so it is the one that finishes late.
@@ -524,7 +524,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
                 result: .success(RAWTestData.decodedRAW(url: Self.url)),
                 mosaic: .success(WorkspaceStubs.mosaic(url: Self.url, width: 16, height: 12))
             ),
-            store: StubImageAdjustmentStore(log: log),
+            store: StubPhotographProcessingStore(log: log),
             render: RecordingRender(log: log).render,
             prepareSource: gate.prepare
         )
@@ -567,7 +567,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
         let patchA = try Self.patchA()
         let patchB = try Self.patchB()
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let a = patchA
         let b = patchB
         let gate = GatedPreparation(log: log, holds: { !$0.isDefault })
@@ -624,7 +624,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
                 result: .success(RAWTestData.decodedRAW(url: Self.url)),
                 mosaic: .success(WorkspaceStubs.mosaic(url: Self.url, width: 16, height: 12))
             ),
-            store: StubImageAdjustmentStore(log: log),
+            store: StubPhotographProcessingStore(log: log),
             render: RecordingRender(log: log).render,
             prepareSource: gate.prepare
         )
@@ -658,7 +658,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
         let patchA = try Self.patchA()
         let patchB = try Self.patchB()
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let bad = patchB
         let document = DocumentState(
             decoder: WorkspaceStubDecoder(
@@ -707,7 +707,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
     @Test("A save failure keeps the new white balance and the new preview")
     func aSaveFailureKeepsTheImage() async throws {
         let patchA = try Self.patchA()
-        let store = StubImageAdjustmentStore()
+        let store = StubPhotographProcessingStore()
         store.refuseSaves(with: .cannotWrite(
             sidecar: URL(fileURLWithPath: "/tmp/nope"),
             underlying: CocoaError(.fileWriteNoPermission)
@@ -740,7 +740,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
     func aSavedPatchIsUsedImmediately() async throws {
         let patchB = try Self.patchB()
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let saved = ImageAdjustments(
             orientation: .quarterTurnRight,
             channelMix: .redBlueSwap,
@@ -801,7 +801,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
     func leavingDuringAPreparationStillSaves() async throws {
         let patchA = try Self.patchA()
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedPreparation(log: log, holdingPicks: true)
         let document = DocumentState(
             decoder: MultiFileStubDecoder(
@@ -848,7 +848,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
     func reopeningWaitsForThePendingPatch() async throws {
         let patchA = try Self.patchA()
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedPreparation(log: log, holdingPicks: true)
         let document = DocumentState(
             decoder: MultiFileStubDecoder(
@@ -924,7 +924,7 @@ struct WorkspaceWhiteBalanceAdjustmentTests {
                 result: .success(RAWTestData.decodedRAW(url: Self.url)),
                 mosaic: .success(WorkspaceStubs.mosaic(url: Self.url, width: 16, height: 12))
             ),
-            store: StubImageAdjustmentStore(log: log),
+            store: StubPhotographProcessingStore(log: log),
             render: RecordingRender(log: log).render,
             prepareSource: gate.prepare,
             exportRun: recorder.run

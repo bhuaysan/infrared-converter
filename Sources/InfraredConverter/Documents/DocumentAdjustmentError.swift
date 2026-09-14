@@ -37,9 +37,9 @@ public struct DocumentAdjustmentError: Error, LocalizedError {
     public let url: URL
 
     /// What the persistence layer refused, kept as a value.
-    public let failure: ImageAdjustmentPersistenceError
+    public let failure: PhotographProcessingPersistenceError
 
-    public init(url: URL, failure: ImageAdjustmentPersistenceError) {
+    public init(url: URL, failure: PhotographProcessingPersistenceError) {
         self.url = url
         self.failure = failure
     }
@@ -52,12 +52,17 @@ public struct DocumentAdjustmentError: Error, LocalizedError {
     /// field.
     public var adjustment: ImageAdjustmentError? { failure.adjustment }
 
+    /// The record's own refusal about its shape, when that is what refused.
+    public var record: PhotographProcessingStateError? { failure.record }
+
     public var errorDescription: String? {
         "The saved adjustments for \(url.lastPathComponent) could not be used."
     }
 
     public var failureReason: String? {
-        let record = (failure.adjustment as? LocalizedError)?.failureReason
+        let record = failure.record?.failureReason
+            ?? failure.adjustment?.failureReason
+            ?? failure.captureProfile?.failureReason
             ?? failure.failureReason
         return """
             \(record ?? failure.localizedDescription) \

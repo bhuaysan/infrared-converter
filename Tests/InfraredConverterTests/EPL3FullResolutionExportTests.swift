@@ -139,7 +139,7 @@ struct EPL3FullResolutionExportTests {
             )
             // In particular, no sidecar: exporting is not editing.
             #expect(!contents.contains {
-                $0.lastPathComponent.hasSuffix(JSONSidecarImageAdjustmentStore.sidecarSuffix)
+                $0.lastPathComponent.hasSuffix(JSONSidecarPhotographProcessingStore.sidecarSuffix)
             })
         }
     }

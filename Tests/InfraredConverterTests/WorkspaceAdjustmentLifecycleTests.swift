@@ -35,7 +35,7 @@ struct WorkspaceAdjustmentLifecycleTests {
     }
 
     static func state(
-        store: StubImageAdjustmentStore,
+        store: StubPhotographProcessingStore,
         log: WorkspaceEventLog,
         gate: GatedRender
     ) -> DocumentState {
@@ -86,7 +86,7 @@ struct WorkspaceAdjustmentLifecycleTests {
     @Test("A requested adjustment is not reported as saved while its render runs")
     func aPendingAdjustmentIsNotReportedAsSaved() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(log: log, holding: [.halfTurn])
         let state = Self.state(store: store, log: log, gate: gate)
 
@@ -131,7 +131,7 @@ struct WorkspaceAdjustmentLifecycleTests {
     @Test("A refused render leaves the state not-saved, and says which kind")
     func aRefusedRenderIsNotSaved() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(log: log, refusing: [.halfTurn])
         let state = Self.state(store: store, log: log, gate: gate)
 
@@ -160,13 +160,13 @@ struct WorkspaceAdjustmentLifecycleTests {
         #expect(state.orientationAdjustment == .halfTurn)
         #expect(store.saved(for: Self.urlA)?.orientation == .quarterTurnRight)
         #expect(!state.hasPendingAdjustmentWork)
-        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity:0.0EV:defaultNeutralPatch"])
+        #expect(store.writeSummary == ["lifecycle-a.orf:builtin.uncalibrated:rotate90Clockwise:identity:0.0EV:defaultNeutralPatch"])
     }
 
     @Test("A rendered adjustment whose write refuses is explicitly not saved")
     func aRefusedWriteIsExplicit() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(log: log)
         let state = Self.state(store: store, log: log, gate: gate)
 
@@ -179,7 +179,7 @@ struct WorkspaceAdjustmentLifecycleTests {
 
         store.refuseSaves(
             with: .cannotWrite(
-                sidecar: JSONSidecarImageAdjustmentStore.sidecarURL(for: Self.urlA),
+                sidecar: JSONSidecarPhotographProcessingStore.sidecarURL(for: Self.urlA),
                 underlying: CocoaError(.fileWriteNoPermission)
             )
         )
@@ -205,7 +205,7 @@ struct WorkspaceAdjustmentLifecycleTests {
     @Test("An adjustment left mid-render is still saved, to its own sidecar")
     func aPendingAdjustmentSurvivesAFileSwitch() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(log: log, holding: [.quarterTurnRight])
         let state = Self.state(store: store, log: log, gate: gate)
 
@@ -233,7 +233,7 @@ struct WorkspaceAdjustmentLifecycleTests {
 
         #expect(store.saved(for: Self.urlA)?.orientation == .quarterTurnRight)
         // Written under A's own URL, and nowhere else.
-        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity:0.0EV:defaultNeutralPatch"])
+        #expect(store.writeSummary == ["lifecycle-a.orf:builtin.uncalibrated:rotate90Clockwise:identity:0.0EV:defaultNeutralPatch"])
         #expect(store.saved(for: Self.urlB) == nil)
         // Nothing was lost, so nothing is reported as lost.
         #expect(state.unsavedAdjustments.isEmpty)
@@ -251,7 +251,7 @@ struct WorkspaceAdjustmentLifecycleTests {
     @Test("A stale render from the previous file never installs into the new one")
     func aStaleRenderNeverInstalls() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(log: log, holding: [.halfTurn])
         let state = Self.state(store: store, log: log, gate: gate)
 
@@ -295,7 +295,7 @@ struct WorkspaceAdjustmentLifecycleTests {
     @Test("A reopen waits for the older generation's write, then starts from it")
     func aReopenWaitsForTheOlderGenerationsWrite() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(log: log, holding: [.quarterTurnRight])
         let state = Self.state(store: store, log: log, gate: gate)
 
@@ -356,7 +356,7 @@ struct WorkspaceAdjustmentLifecycleTests {
     @Test("A freshly reopened file reports unchanged, and it is the disk state")
     func aReopenedFileReportsTheDiskState() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(log: log, holding: [.halfTurn])
         let state = Self.state(store: store, log: log, gate: gate)
 
@@ -378,7 +378,7 @@ struct WorkspaceAdjustmentLifecycleTests {
         #expect(state.adjustmentPersistence.isDurable)
         // The claim, checked against the store rather than against itself.
         #expect(store.saved(for: Self.urlA)?.orientation == state.orientationAdjustment)
-        #expect(store.writeSummary == ["lifecycle-a.orf:rotate180:identity:0.0EV:defaultNeutralPatch"])
+        #expect(store.writeSummary == ["lifecycle-a.orf:builtin.uncalibrated:rotate180:identity:0.0EV:defaultNeutralPatch"])
     }
 
     /// The write-write race this follow-up exists for.
@@ -391,7 +391,7 @@ struct WorkspaceAdjustmentLifecycleTests {
     @Test("An older generation cannot overwrite a newer generation's save")
     func anOlderGenerationCannotOverwriteANewerSave() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(log: log, holding: [.quarterTurnRight])
         let state = Self.state(store: store, log: log, gate: gate)
 
@@ -427,7 +427,7 @@ struct WorkspaceAdjustmentLifecycleTests {
         #expect(newest.userOrientationAdjustment == .quarterTurnLeft)
         #expect(state.orientationAdjustment == .quarterTurnLeft)
         #expect(store.writeSummary == [
-            "lifecycle-a.orf:rotate90Clockwise:identity:0.0EV:defaultNeutralPatch", "lifecycle-a.orf:rotate270Clockwise:identity:0.0EV:defaultNeutralPatch"
+            "lifecycle-a.orf:builtin.uncalibrated:rotate90Clockwise:identity:0.0EV:defaultNeutralPatch", "lifecycle-a.orf:builtin.uncalibrated:rotate270Clockwise:identity:0.0EV:defaultNeutralPatch"
         ])
 
         // Nothing older is still moving, so nothing can change the file back —
@@ -445,7 +445,7 @@ struct WorkspaceAdjustmentLifecycleTests {
     @Test("A newer open supersedes a waiting reopen of the same file")
     func aNewerOpenSupersedesAWaitingReopen() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(log: log, holding: [.quarterTurnRight])
         let state = Self.state(store: store, log: log, gate: gate)
 
@@ -472,7 +472,7 @@ struct WorkspaceAdjustmentLifecycleTests {
         // of A ever decoded or installed anything: A was decoded once, for the
         // very first open, and B once.
         #expect(store.saved(for: Self.urlA)?.orientation == .quarterTurnRight)
-        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity:0.0EV:defaultNeutralPatch"])
+        #expect(store.writeSummary == ["lifecycle-a.orf:builtin.uncalibrated:rotate90Clockwise:identity:0.0EV:defaultNeutralPatch"])
         #expect(log.decodeCount == 2)
         #expect(state.selectedFileURL == Self.urlB)
         #expect(try Self.preview(state).pixelWidth == 10)
@@ -483,7 +483,7 @@ struct WorkspaceAdjustmentLifecycleTests {
     @Test("Repeated reopens of a settling file start exactly one decode")
     func repeatedReopensStartOneDecode() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(log: log, holding: [.quarterTurnRight])
         let state = Self.state(store: store, log: log, gate: gate)
 
@@ -505,7 +505,7 @@ struct WorkspaceAdjustmentLifecycleTests {
         // One decode for the first open, one for the surviving reopen.
         #expect(log.decodeCount == 2)
         #expect(log.renderedOrientations == [.identity, .quarterTurnRight, .quarterTurnRight])
-        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity:0.0EV:defaultNeutralPatch"])
+        #expect(store.writeSummary == ["lifecycle-a.orf:builtin.uncalibrated:rotate90Clockwise:identity:0.0EV:defaultNeutralPatch"])
         #expect(!state.hasPendingAdjustmentWork)
     }
 
@@ -514,7 +514,7 @@ struct WorkspaceAdjustmentLifecycleTests {
     @Test("A reopen waiting on a refusing render still opens, and keeps the report")
     func aReopenWaitingOnARefusingRenderStillOpens() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(
             log: log, holding: [.quarterTurnRight], refusing: [.quarterTurnRight]
         )
@@ -549,7 +549,7 @@ struct WorkspaceAdjustmentLifecycleTests {
     @Test("A left-behind adjustment whose render refuses is reported, not dropped")
     func aRefusedRenderAfterASwitchIsReported() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(log: log, holding: [.quarterTurnRight], refusing: [.quarterTurnRight])
         let state = Self.state(store: store, log: log, gate: gate)
 
@@ -582,12 +582,12 @@ struct WorkspaceAdjustmentLifecycleTests {
     @Test("Leaving a file after a failed save carries the failure with it")
     func aFailedSaveSurvivesTheSwitch() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(log: log)
         let state = Self.state(store: store, log: log, gate: gate)
         store.refuseSaves(
             with: .cannotWrite(
-                sidecar: JSONSidecarImageAdjustmentStore.sidecarURL(for: Self.urlA),
+                sidecar: JSONSidecarPhotographProcessingStore.sidecarURL(for: Self.urlA),
                 underlying: CocoaError(.fileWriteNoPermission)
             )
         )
@@ -624,7 +624,7 @@ struct WorkspaceAdjustmentLifecycleTests {
     @Test("Leaving a file with nothing at stake records nothing")
     func aCleanSwitchRecordsNothing() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(log: log)
         let state = Self.state(store: store, log: log, gate: gate)
 
@@ -640,7 +640,7 @@ struct WorkspaceAdjustmentLifecycleTests {
 
         #expect(state.unsavedAdjustments.isEmpty)
         #expect(!state.hasPendingAdjustmentWork)
-        #expect(store.writeSummary == ["lifecycle-a.orf:rotate90Clockwise:identity:0.0EV:defaultNeutralPatch"])
+        #expect(store.writeSummary == ["lifecycle-a.orf:builtin.uncalibrated:rotate90Clockwise:identity:0.0EV:defaultNeutralPatch"])
     }
 
     // MARK: - The old guarantees still hold
@@ -648,7 +648,7 @@ struct WorkspaceAdjustmentLifecycleTests {
     @Test("A burst that ends during a file switch still persists one state only")
     func aBurstAcrossASwitchPersistsOnce() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let gate = GatedRender(log: log, holding: [.quarterTurnRight])
         let state = Self.state(store: store, log: log, gate: gate)
 
@@ -672,7 +672,7 @@ struct WorkspaceAdjustmentLifecycleTests {
 
         // Exactly one write, of the state the user actually ended on. The held
         // render's own state was superseded and is nowhere on disk.
-        #expect(store.writeSummary == ["lifecycle-a.orf:\(settled.persistedToken):identity:0.0EV:defaultNeutralPatch"])
+        #expect(store.writeSummary == ["lifecycle-a.orf:builtin.uncalibrated:\(settled.persistedToken):identity:0.0EV:defaultNeutralPatch"])
         #expect(store.saved(for: Self.urlA)?.orientation == settled)
         #expect(store.saved(for: Self.urlB) == nil)
         #expect(state.unsavedAdjustments.isEmpty)

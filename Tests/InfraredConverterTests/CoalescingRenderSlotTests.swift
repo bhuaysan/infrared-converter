@@ -61,7 +61,9 @@ struct CoalescingRenderSlotTests {
 
     static func adjustments(_ orientation: UserOrientationAdjustment) -> PreviewRenderRequest {
         PreviewRenderRequest(
-            source: source, adjustments: ImageAdjustments(orientation: orientation)
+            source: source,
+            captureProfile: .builtinUncalibrated,
+            adjustments: ImageAdjustments(orientation: orientation)
         )
     }
 

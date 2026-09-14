@@ -163,6 +163,7 @@ enum PreviewTestData {
             preview: preview,
             metadata: metadata,
             url: url,
+            captureProfile: .builtinUncalibrated,
             whiteBalance: whiteBalance,
             estimate: whiteBalanceEstimate()
         )

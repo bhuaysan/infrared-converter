@@ -23,7 +23,7 @@ struct WorkspaceExportTests {
     }
 
     static func state(
-        store: StubImageAdjustmentStore = StubImageAdjustmentStore(),
+        store: StubPhotographProcessingStore = StubPhotographProcessingStore(),
         render: @escaping DocumentState.PreviewRender = DocumentState.pipelineRender,
         export: RecordingExport = RecordingExport(),
         decoder: (any RAWDecoder)? = nil
@@ -40,7 +40,7 @@ struct WorkspaceExportTests {
     }
 
     static func multiFileState(
-        store: StubImageAdjustmentStore = StubImageAdjustmentStore(),
+        store: StubPhotographProcessingStore = StubPhotographProcessingStore(),
         render: @escaping DocumentState.PreviewRender = DocumentState.pipelineRender,
         export: RecordingExport = RecordingExport()
     ) -> DocumentState {
@@ -104,7 +104,7 @@ struct WorkspaceExportTests {
         // The owned render refuses; the LibRaw reference still decodes, so the
         // file opens — and must not become exportable because of it.
         let state = Self.state(
-            render: { _, _, _ in throw RecordingRender.Refused() }
+            render: { _, _, _, _ in throw RecordingRender.Refused() }
         )
         state.open(Self.url)
         try await Self.waitUntilSettled(state)
@@ -119,7 +119,7 @@ struct WorkspaceExportTests {
     @Test("An export takes the current canonical state, not the last durable one")
     func anExportTakesTheCurrentCanonicalState() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         // The +1 EV render is held, so the document's durable state stays at
         // 0 EV while its requested state is +1 EV.
         let gate = GatedRender(log: log, holds: { $0.exposure.ev == 1 })
@@ -153,10 +153,10 @@ struct WorkspaceExportTests {
     @Test("A failed save does not change which state is exported")
     func aFailedSaveDoesNotChangeWhatIsExported() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         store.refuseSaves(
             with: .cannotWrite(
-                sidecar: JSONSidecarImageAdjustmentStore.sidecarURL(for: Self.url),
+                sidecar: JSONSidecarPhotographProcessingStore.sidecarURL(for: Self.url),
                 underlying: CocoaError(.fileWriteNoPermission)
             )
         )
@@ -191,7 +191,7 @@ struct WorkspaceExportTests {
     @Test("Exporting writes no sidecar")
     func exportingWritesNoSidecar() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store)
 
         state.open(Self.url)
@@ -405,7 +405,7 @@ struct WorkspaceExportTests {
                 result: .success(RAWTestData.decodedRAW(url: Self.url)),
                 mosaic: .success(WorkspaceStubs.mosaic(url: Self.url, width: 12, height: 8))
             ),
-            store: StubImageAdjustmentStore(),
+            store: StubPhotographProcessingStore(),
             previewPolicy: PreviewResolutionPolicy(maximumLongestEdge: 4)
         )
         state.open(Self.url)

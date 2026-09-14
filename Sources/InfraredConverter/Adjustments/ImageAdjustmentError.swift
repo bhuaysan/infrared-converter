@@ -19,6 +19,15 @@ import Foundation
 /// So an unreadable adjustment is reported, and the caller decides. That is
 /// the same policy `RAWImageOrientation.init?(decoderFlip:)` applies to an
 /// unmodelled decoder value, for the same reason.
+///
+/// ## What is deliberately not here any more
+///
+/// The **record's** own shape — which schema version it declares, and which
+/// fields that version has — moved to `PhotographProcessingStateError` when the
+/// sidecar stopped being an adjustments-only file. Everything below is one
+/// adjustment refusing one value; nothing below knows what a schema version is
+/// except as context in a message. See
+/// `docs/decisions/0020-ir-capture-profile-foundation.md`.
 public enum ImageAdjustmentError: Error, Equatable {
     /// A persisted orientation adjustment names a state this version does not
     /// model — a typo, a corrupted file, or a token a newer version writes.
@@ -26,25 +35,6 @@ public enum ImageAdjustmentError: Error, Equatable {
     /// The token is reported verbatim so the state can be investigated rather
     /// than guessed at.
     case unknownOrientationAdjustment(token: String)
-    /// The persisted adjustments declare a schema version this build cannot
-    /// read.
-    ///
-    /// A **newer** version may contain adjustments whose omission would change
-    /// the rendered image, so it is refused rather than partially applied. A
-    /// version below `1` is not a schema this project ever wrote.
-    case unsupportedSchemaVersion(found: Int, supported: Int)
-    /// A persisted adjustment record is missing a field its declared schema
-    /// version requires.
-    case missingAdjustment(field: String, schemaVersion: Int)
-    /// A persisted adjustment record carries a field its declared schema
-    /// version does not have.
-    ///
-    /// The mirror image of `missingAdjustment`, and it exists for the same
-    /// reason: an image-affecting field requires a schema version, so a record
-    /// that declares version 1 and carries a version 2 field is not a version
-    /// 1 record. Reading around the field would render a different photograph
-    /// from the one the user saved and then write the record back without it.
-    case unexpectedAdjustment(field: String, schemaVersion: Int)
     /// A persisted channel mix names a kind this version does not model — a
     /// typo, a corrupted file, or a token a newer version writes.
     ///
@@ -135,12 +125,6 @@ extension ImageAdjustmentError: LocalizedError {
         switch self {
         case .unknownOrientationAdjustment:
             return "The saved orientation adjustment could not be understood."
-        case .unsupportedSchemaVersion:
-            return "The saved adjustments were written by a different version of this app."
-        case .missingAdjustment:
-            return "The saved adjustments are incomplete."
-        case .unexpectedAdjustment:
-            return "The saved adjustments were written by a different version of this app."
         case .unknownChannelMixKind:
             return "The saved channel mix could not be understood."
         case .missingChannelMixField:
@@ -180,24 +164,6 @@ extension ImageAdjustmentError: LocalizedError {
                 models. It is reported rather than treated as "no correction", because a \
                 value we could not read and a deliberate decision to leave the photograph \
                 alone are different facts.
-                """
-        case .unsupportedSchemaVersion(let found, let supported):
-            return """
-                The adjustments declare schema version \(found); this version reads up to \
-                \(supported). A newer record may contain adjustments that change the image, \
-                so it is refused rather than partly applied.
-                """
-        case .missingAdjustment(let field, let schemaVersion):
-            return """
-                Schema version \(schemaVersion) requires "\(field)", and the record does not \
-                contain it.
-                """
-        case .unexpectedAdjustment(let field, let schemaVersion):
-            return """
-                Schema version \(schemaVersion) has no "\(field)", and the record contains \
-                one. A setting that changes the image requires its own schema version, so a \
-                record carrying this field is not a version \(schemaVersion) record and is \
-                refused rather than read around.
                 """
         case .unknownChannelMixKind(let token):
             return """

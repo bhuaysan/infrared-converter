@@ -65,7 +65,7 @@ struct DocumentStateTests {
             ),
             // In-memory: this suite is about the two RAW paths, and must
             // neither read nor write a sidecar on the way.
-            store: StubImageAdjustmentStore()
+            store: StubPhotographProcessingStore()
         )
     }
 
@@ -84,7 +84,7 @@ struct DocumentStateTests {
                     : .failure(.fileNotFound(url)),
                 mosaic: .success(WorkspaceStubs.mosaic(url: url, flip: 9))
             ),
-            store: StubImageAdjustmentStore()
+            store: StubPhotographProcessingStore()
         )
     }
 
@@ -94,7 +94,7 @@ struct DocumentStateTests {
     func startsWithNoSelection() {
         let state = DocumentState(
             decoder: StubDecoder(result: .failure(.decoderUnavailable)),
-            store: StubImageAdjustmentStore()
+            store: StubPhotographProcessingStore()
         )
         #expect(state.selectedFileURL == nil)
         if case .empty = state.status {} else {

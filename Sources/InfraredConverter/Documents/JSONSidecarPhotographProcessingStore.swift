@@ -1,6 +1,7 @@
 import Foundation
 
-/// The user's adjustments, as one JSON file beside the RAW file.
+/// One photograph's capture-profile reference and adjustments, as one JSON file
+/// beside the RAW file.
 ///
 /// ```text
 /// /Pictures/IR/OLYMPUS.ORF
@@ -14,9 +15,16 @@ import Foundation
 /// name — so `SCENE.ORF` and `SCENE.ARW` in one folder keep separate records
 /// instead of fighting over one.
 ///
-/// `sidecarURL(for:)` is the only place that rule is expressed. Nothing else
-/// in the project concatenates a suffix onto a RAW path; a naming rule spelled
-/// out in several places is a rule that eventually disagrees with itself.
+/// `sidecarURL(for:)` is the only place that rule is expressed. Nothing else in
+/// the project concatenates a suffix onto a RAW path; a naming rule spelled out
+/// in several places is a rule that eventually disagrees with itself.
+///
+/// The suffix still says `iradjustments` although the payload now also carries
+/// a capture-profile reference, and that is deliberate. It is the name every
+/// sidecar already written is called, and renaming it would orphan all of them
+/// to no benefit: a filename is an address, not a schema. The payload's shape
+/// is versioned inside the file, which is where a reader looks. See
+/// `docs/decisions/0013-adjustment-sidecar.md`.
 ///
 /// The properties it was chosen for:
 ///
@@ -30,17 +38,18 @@ import Foundation
 /// ## What it is not
 ///
 /// Not XMP, and deliberately not: this is an application-owned format for one
-/// application's adjustment record, and dressing it as an interchange standard
-/// would claim an interoperability nothing here implements. Not a recipe
-/// either — it is the state of *this* photograph, not a reusable preset. See
-/// `docs/decisions/0013-adjustment-sidecar.md`.
+/// application's record, and dressing it as an interchange standard would claim
+/// an interoperability nothing here implements. Not a recipe either — it is the
+/// state of *this* photograph, not a reusable preset. And not a place for
+/// profile **definitions**: it stores which profile, by stable identity, and
+/// the definition lives in the registry.
 ///
 /// ## The RAW file is never touched
 ///
-/// This type opens exactly one path, and it is the sidecar. The RAW URL is
-/// read as a string to derive a name and is never itself opened, written,
-/// renamed, deleted or truncated.
-public struct JSONSidecarImageAdjustmentStore: ImageAdjustmentStore {
+/// This type opens exactly one path, and it is the sidecar. The RAW URL is read
+/// as a string to derive a name and is never itself opened, written, renamed,
+/// deleted or truncated.
+public struct JSONSidecarPhotographProcessingStore: PhotographProcessingStore {
 
     /// What is appended to the RAW file's complete name.
     ///
@@ -56,15 +65,15 @@ public struct JSONSidecarImageAdjustmentStore: ImageAdjustmentStore {
             .appendingPathComponent("\(rawURL.lastPathComponent).\(sidecarSuffix)")
     }
 
-    /// The sidecar for a RAW file, for a caller holding a store rather than
-    /// the type.
+    /// The sidecar for a RAW file, for a caller holding a store rather than the
+    /// type.
     public func sidecarURL(for rawURL: URL) -> URL {
         Self.sidecarURL(for: rawURL)
     }
 
     public func load(
         for rawURL: URL
-    ) throws(ImageAdjustmentPersistenceError) -> ImageAdjustments? {
+    ) throws(PhotographProcessingPersistenceError) -> PhotographProcessingState? {
         let sidecar = Self.sidecarURL(for: rawURL)
 
         let data: Data
@@ -79,25 +88,27 @@ public struct JSONSidecarImageAdjustmentStore: ImageAdjustmentStore {
         }
 
         do {
-            return try JSONDecoder().decode(ImageAdjustments.self, from: data)
+            return try JSONDecoder().decode(PhotographProcessingState.self, from: data)
         } catch {
-            // `ImageAdjustments.init(from:)` throws `ImageAdjustmentError`
-            // for a record it refuses and `DecodingError` for bytes that are
-            // not that record. Both arrive here intact, and both stay intact:
-            // the case they are wrapped in keeps the value rather than its
-            // description.
+            // `PhotographProcessingState.init(from:)` throws
+            // `PhotographProcessingStateError` for a record shape it refuses,
+            // `ImageAdjustmentError` for a value it refuses,
+            // `IRCaptureProfileError` for a malformed identifier, and
+            // `DecodingError` for bytes that are not that record. All arrive
+            // here intact, and all stay intact: the case they are wrapped in
+            // keeps the value rather than its description.
             throw .cannotDecode(sidecar: sidecar, underlying: error)
         }
     }
 
     public func save(
-        _ adjustments: ImageAdjustments, for rawURL: URL
-    ) throws(ImageAdjustmentPersistenceError) {
+        _ state: PhotographProcessingState, for rawURL: URL
+    ) throws(PhotographProcessingPersistenceError) {
         let sidecar = Self.sidecarURL(for: rawURL)
 
         let data: Data
         do {
-            data = try Self.encoder().encode(adjustments)
+            data = try Self.encoder().encode(state)
         } catch {
             // Not reachable for any value this type can hold — every field
             // encodes unconditionally — but an encoding failure is still a

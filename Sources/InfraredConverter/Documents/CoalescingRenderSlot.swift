@@ -207,7 +207,17 @@ final class CoalescingRenderSlot<Request: Sendable, Output: Sendable> {
 struct PreviewRenderRequest: Sendable {
     /// The reduced, unmixed, unoriented scene-linear image to render from.
     let source: WorkspacePreviewPipeline.Source
-    /// The complete canonical state to apply to it.
+    /// The resolved capture profile the canonical state names.
+    ///
+    /// Carried beside the source rather than read from it: they are the same
+    /// profile whenever nothing has changed, and when a metadata-only profile
+    /// change is what triggered the render they deliberately differ — the
+    /// pixels are the ones the previous profile prepared, and the rendering is
+    /// labelled with the new one. That is exactly what a shared processing
+    /// basis means, and `WorkspacePreviewPipeline.render` refuses the case
+    /// where it does not hold.
+    let captureProfile: IRCaptureProfile
+    /// The complete canonical adjustment state to apply to it.
     let adjustments: ImageAdjustments
 }
 
@@ -215,14 +225,39 @@ struct PreviewRenderRequest: Sendable {
 /// preview.
 typealias PreviewRenderSlot = CoalescingRenderSlot<PreviewRenderRequest, WorkspacePreview>
 
-/// The heavy slot: one white-balance decision re-prepared from the retained
-/// normalised mosaic into a new reduced pre-mix preview.
+/// What one re-preparation of the reduced preview is asked for.
+///
+/// The two things upstream of the reduction that a user can change: the neutral
+/// patch the white balance is measured from, and the capture profile whose
+/// processing basis chooses the camera-to-working transform. Neither can be
+/// applied to an already-reduced buffer, which is what puts them both on the
+/// heavy path — and, since they are prepared by one pass, in one request.
+///
+/// `Equatable`, and cheap to compare: two adjustment-sized values, no pixels.
+/// The document compares the slot's `target` against a new request so that a
+/// second control moved during a preparation does not restart a pass already
+/// producing the right answer — and so that a change which *would* produce
+/// different pixels does restart it.
+struct SourcePreparationRequest: Equatable, Sendable {
+    /// The neutral patch to measure, as the user's intent.
+    let whiteBalance: UserWhiteBalanceAdjustment
+    /// The resolved profile whose processing basis chooses the
+    /// camera-to-working transform.
+    let captureProfile: IRCaptureProfile
+}
+
+/// The heavy slot: one white balance and one capture profile re-prepared from
+/// the retained normalised mosaic into a new reduced pre-mix preview.
 ///
 /// Separate from the fast slot rather than folded into it, because the two
 /// have different costs, different inputs and different results, and because
 /// "at most one at a time" is a claim each needs to make about itself. A white
 /// balance being re-prepared must not stop the exposure from re-rendering once
 /// it lands, and a render must not stop a newer patch from starting.
-typealias WhiteBalancePreparationSlot = CoalescingRenderSlot<
-    UserWhiteBalanceAdjustment, WorkspacePreviewPipeline.Source
+///
+/// Still two slots, not three, after capture profiles arrived. A profile whose
+/// processing basis differs needs exactly this pass and nothing more, so it
+/// joins the slot that already exists rather than inventing a cache of its own.
+typealias SourcePreparationSlot = CoalescingRenderSlot<
+    SourcePreparationRequest, WorkspacePreviewPipeline.Source
 >

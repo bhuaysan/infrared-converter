@@ -171,13 +171,28 @@ struct WorkspacePreviewPipeline {
     /// point has a default patch any more.
     static let initialWhiteBalance = UserWhiteBalanceAdjustment.initial
 
+    /// The capture profile a file with no saved selection gets.
+    ///
+    /// `builtin.uncalibrated` — the profile whose processing basis is exactly
+    /// the identity false-colour axis assignment every build of this
+    /// application has used. It is what a historical sidecar migrates to, and
+    /// what a photograph with no sidecar starts on, for the same reason in both
+    /// cases: it is the only camera-to-working processing this project has ever
+    /// done, and naming it is more honest than leaving it unstated. See
+    /// `docs/decisions/0020-ir-capture-profile-foundation.md`.
+    ///
+    /// It is not a recommendation. Nothing here inspects the camera, the
+    /// filename or the metadata to choose a profile — that would be exactly the
+    /// automatic selection this milestone refuses.
+    static let initialCaptureProfile = IRCaptureProfile.builtinUncalibrated
+
     /// The camera-to-working transform a freshly opened file gets.
     ///
-    /// Owned by `RAWWorkingImagePipeline`, which is the shared RAW front half
-    /// the export path uses too. Restated here rather than duplicated: a
-    /// second literal would be a second decision that could drift from this
-    /// one without anything failing.
-    static let initialTransform = RAWWorkingImagePipeline.cameraToWorkingTransform
+    /// Derived from the initial profile's processing basis rather than named
+    /// again. A second literal would be a second decision that could drift from
+    /// the profile's without anything failing.
+    static let initialTransform = IRCaptureProfile.builtinUncalibrated
+        .cameraToWorkingTransform
 
     /// How large the interactive preview a freshly opened file gets may be.
     ///
@@ -296,6 +311,7 @@ struct WorkspacePreviewPipeline {
     func prepareSource(
         _ base: NormalizedRAWSource,
         whiteBalance: UserWhiteBalanceAdjustment,
+        captureProfile: IRCaptureProfile,
         policy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy,
         cancellation: ProcessingCancellation = .none
     ) throws -> Source {
@@ -304,8 +320,16 @@ struct WorkspacePreviewPipeline {
         // export runs, which is what makes an export the same rendering as the
         // preview rather than a second pipeline that resembles it — and what
         // makes a saved patch resolve to the same samples in both.
+        //
+        // The transform comes from the resolved capture profile rather than
+        // from a constant, and it is the only thing a profile contributes to a
+        // pixel. Which is why the profile is recorded on the `Source` below: a
+        // reduced preview is only valid for the basis it was prepared under.
         let prepared = try RAWWorkingImagePipeline().prepare(
-            base, whiteBalance: whiteBalance, cancellation: cancellation
+            base,
+            whiteBalance: whiteBalance,
+            cameraToWorkingTransform: captureProfile.cameraToWorkingTransform,
+            cancellation: cancellation
         )
 
         // The reduction point, and the end of this phase. Everything above
@@ -332,6 +356,7 @@ struct WorkspacePreviewPipeline {
             preview: reduced,
             metadata: prepared.metadata,
             url: base.url,
+            captureProfile: captureProfile,
             whiteBalance: whiteBalance,
             estimate: prepared.estimate
         )
@@ -345,12 +370,14 @@ struct WorkspacePreviewPipeline {
         decoding url: URL,
         using decoder: RAWDecoder,
         whiteBalance: UserWhiteBalanceAdjustment = WorkspacePreviewPipeline.initialWhiteBalance,
+        captureProfile: IRCaptureProfile = WorkspacePreviewPipeline.initialCaptureProfile,
         policy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy,
         cancellation: ProcessingCancellation = .none
     ) throws -> Source {
         try prepareSource(
             prepareBase(decoding: url, using: decoder),
             whiteBalance: whiteBalance,
+            captureProfile: captureProfile,
             policy: policy,
             cancellation: cancellation
         )
@@ -397,9 +424,24 @@ struct WorkspacePreviewPipeline {
     ///   `OrientationError`, `DisplayRenderingError`, or `CancellationError`.
     func render(
         _ source: Source,
+        captureProfile: IRCaptureProfile,
         adjustments: ImageAdjustments,
         cancellation: ProcessingCancellation = .none
     ) throws -> WorkspacePreview {
+        // The one guard that keeps a profile's name honest. Nothing in this
+        // function can re-run the camera-to-working transform — the source was
+        // prepared with one, upstream — so rendering a source under a profile
+        // whose basis differs would label these pixels with a processing
+        // decision they were not produced by. Two profiles that share a basis
+        // are interchangeable here by construction, which is exactly what
+        // makes a metadata-only profile change a cheap re-render rather than a
+        // re-preparation. See ADR 0020, Decision 8.
+        guard captureProfile.processingBasis == source.captureProfile.processingBasis else {
+            throw IRCaptureProfileError.processingBasisMismatch(
+                prepared: source.captureProfile.id, requested: captureProfile.id
+            )
+        }
+
         let mixed = try IRChannelMixer().apply(
             to: source.preview,
             mix: adjustments.channelMix.mix,
@@ -424,6 +466,7 @@ struct WorkspacePreviewPipeline {
         return WorkspacePreview(
             image: try DisplayPreviewCGImageAdapter.makeCGImage(from: encoded),
             processing: encoded.processing,
+            captureProfile: captureProfile,
             whiteBalanceAdjustment: source.whiteBalance,
             estimate: source.estimate,
             orientationProvenance: OrientationProvenance(
@@ -439,6 +482,30 @@ struct WorkspacePreviewPipeline {
         )
     }
 
+    /// The same render, under the profile the source was prepared with.
+    ///
+    /// The identity case, and it is a real one rather than a convenience
+    /// default: a rendering's capture profile and its source's are the same
+    /// value except in exactly one situation — a metadata-only profile change,
+    /// where the basis is unchanged and the label is not. Callers that are not
+    /// in that situation should not have to restate the profile, and restating
+    /// it is exactly where the two could be made to disagree by accident.
+    ///
+    /// The document uses the explicit overload, because it is the one caller
+    /// that can be in that situation.
+    func render(
+        _ source: Source,
+        adjustments: ImageAdjustments,
+        cancellation: ProcessingCancellation = .none
+    ) throws -> WorkspacePreview {
+        try render(
+            source,
+            captureProfile: source.captureProfile,
+            adjustments: adjustments,
+            cancellation: cancellation
+        )
+    }
+
     /// Both phases, for a caller that has no reason to keep the scene-linear
     /// state — a test, or a one-shot render.
     ///
@@ -447,6 +514,7 @@ struct WorkspacePreviewPipeline {
         decoding url: URL,
         using decoder: RAWDecoder,
         adjustments: ImageAdjustments = .none,
+        captureProfile: IRCaptureProfile = WorkspacePreviewPipeline.initialCaptureProfile,
         policy: PreviewResolutionPolicy = WorkspacePreviewPipeline.previewPolicy,
         cancellation: ProcessingCancellation = .none
     ) throws -> WorkspacePreview {
@@ -455,9 +523,11 @@ struct WorkspacePreviewPipeline {
                 decoding: url,
                 using: decoder,
                 whiteBalance: adjustments.whiteBalance,
+                captureProfile: captureProfile,
                 policy: policy,
                 cancellation: cancellation
             ),
+            captureProfile: captureProfile,
             adjustments: adjustments,
             cancellation: cancellation
         )
@@ -527,6 +597,16 @@ extension WorkspacePreviewPipeline {
         let metadata: RAWMetadata
         /// The file these pixels came from.
         let url: URL
+        /// The capture profile these pixels were prepared under.
+        ///
+        /// Recorded because the profile's processing basis chose the
+        /// camera-to-working transform that produced them, and that stage is
+        /// upstream of the reduction: this buffer is valid only for that basis.
+        /// `render` refuses a profile whose basis disagrees, and
+        /// `DocumentState` compares against it to decide whether selecting a
+        /// profile costs a re-preparation or only a re-render. See
+        /// `docs/decisions/0020-ir-capture-profile-foundation.md`, Decision 8.
+        let captureProfile: IRCaptureProfile
         /// The white balance the **user** asked for, which these pixels were
         /// prepared with.
         ///
@@ -573,6 +653,17 @@ struct WorkspacePreview {
     /// settings, clip counts, mix, camera transform, demosaic, gains,
     /// normalisation.
     let processing: DisplayPreviewProcessing
+    /// The capture profile this rendering was processed under, resolved.
+    ///
+    /// Carried whole rather than as an identifier, so the inspector can state
+    /// the camera, the conversion, the filter and — above all — whether the
+    /// processing is a validated infrared calibration, without looking anything
+    /// up. For every profile this build ships that last answer is `false`, and
+    /// it is derived from the transform's own provenance rather than asserted.
+    ///
+    /// It is **provenance**, not an edit: the photograph-local decisions are
+    /// the four adjustments below it.
+    let captureProfile: IRCaptureProfile
     /// The white balance the user asked for, as the canonical adjustment
     /// rather than as the region or the gains it became.
     ///
@@ -651,4 +742,12 @@ struct WorkspacePreview {
     var fullResolutionSourcePixelWidth: Int { resolution.sourceWidth }
     /// Height of that same area.
     var fullResolutionSourcePixelHeight: Int { resolution.sourceHeight }
+
+    /// The identity of the capture profile this rendering was processed under.
+    var captureProfileID: IRCaptureProfileID { captureProfile.id }
+    /// Whether this rendering's camera-to-working processing is a validated
+    /// infrared colour calibration. `false` for every profile this build ships.
+    var isValidatedInfraredCalibration: Bool {
+        captureProfile.isValidatedInfraredCalibration
+    }
 }

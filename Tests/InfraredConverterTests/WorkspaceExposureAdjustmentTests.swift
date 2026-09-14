@@ -24,7 +24,7 @@ struct WorkspaceExposureAdjustmentTests {
     }
 
     static func state(
-        store: StubImageAdjustmentStore,
+        store: StubPhotographProcessingStore,
         log: WorkspaceEventLog,
         render: DocumentState.PreviewRender? = nil
     ) -> DocumentState {
@@ -75,7 +75,7 @@ struct WorkspaceExposureAdjustmentTests {
     @Test("Setting the exposure re-renders and saves the complete state at schema 4")
     func settingTheExposureSavesTheCompleteState() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
         state.open(Self.url)
         try await Self.waitUntilSettled(state)
@@ -91,7 +91,7 @@ struct WorkspaceExposureAdjustmentTests {
         let preview = try #require(await WorkspaceStubs.waitForPreview(state, adjustments: wanted))
         #expect(preview.renderedExposureEV == 0.7)
         #expect(store.saved(for: Self.url) == wanted)
-        #expect(store.saved(for: Self.url)?.schemaVersion == 4)
+        #expect(store.savedState(for: Self.url)?.captureProfile == .builtinUncalibrated)
         guard case .saved = state.adjustmentPersistence else {
             Issue.record("Expected .saved, got \(state.adjustmentPersistence)")
             return
@@ -101,7 +101,7 @@ struct WorkspaceExposureAdjustmentTests {
     @Test("Asking for the exposure already in force does nothing at all")
     func askingForTheSameExposureDoesNothing() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
         state.open(Self.url)
         try await Self.waitUntilSettled(state)
@@ -121,7 +121,7 @@ struct WorkspaceExposureAdjustmentTests {
     @Test("Reset Exposure returns to 0 EV and leaves the mix and orientation alone")
     func resetExposureChangesOnlyTheExposure() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
         state.open(Self.url)
         try await Self.waitUntilSettled(state)
@@ -147,7 +147,7 @@ struct WorkspaceExposureAdjustmentTests {
     @Test("The other controls' resets leave the exposure alone")
     func otherResetsKeepTheExposure() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
         state.open(Self.url)
         try await Self.waitUntilSettled(state)
@@ -191,7 +191,7 @@ struct WorkspaceExposureAdjustmentTests {
     @Test("A slider burst faster than rendering renders, installs and saves only the newest state")
     func aSliderBurstCollapsesToTheNewest() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let held = ImageAdjustments(exposure: try Self.ev(0.1))
         let gate = GatedRender(log: log, holds: { $0 == held })
         let state = Self.state(store: store, log: log, render: gate.render)
@@ -231,7 +231,7 @@ struct WorkspaceExposureAdjustmentTests {
         #expect(log.renders == [.none, newest])
         // Written: the newest, once.
         #expect(log.saves == [newest])
-        #expect(store.writeSummary == ["exposure-adjustment.orf:none:identity:1.5EV:defaultNeutralPatch"])
+        #expect(store.writeSummary == ["exposure-adjustment.orf:builtin.uncalibrated:none:identity:1.5EV:defaultNeutralPatch"])
         for intermediate in requested.dropLast() {
             #expect(!log.renders.contains(intermediate))
             #expect(!log.saves.contains(intermediate))
@@ -248,7 +248,7 @@ struct WorkspaceExposureAdjustmentTests {
     @Test("An ungated burst still persists only the newest state")
     func anUngatedBurstPersistsOnlyTheNewest() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let state = Self.state(store: store, log: log)
         state.open(Self.url)
         try await Self.waitUntilSettled(state)
@@ -311,7 +311,7 @@ struct WorkspaceExposureAdjustmentTests {
     @Test("A saved exposure, mix and rotation are all in the first render")
     func aSavedExposureIsTheFirstRender() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let saved = ImageAdjustments(
             orientation: .quarterTurnLeft, channelMix: .redBlueSwap, exposure: try Self.ev(1.25)
         )
@@ -345,7 +345,7 @@ struct WorkspaceExposureAdjustmentTests {
     @Test("A saved exposure beyond the slider opens unchanged and is not rewritten")
     func aSavedExposureBeyondTheSliderIsKept() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let saved = ImageAdjustments(exposure: try Self.ev(6))
         store.preload(saved, for: Self.url)
         let state = Self.state(store: store, log: log)
@@ -375,7 +375,7 @@ struct WorkspaceExposureAdjustmentTests {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let raw = directory.appendingPathComponent("IR.ORF")
-        let store = JSONSidecarImageAdjustmentStore()
+        let store = JSONSidecarPhotographProcessingStore()
         let decoder = WorkspaceStubDecoder(
             result: .success(RAWTestData.decodedRAW(url: raw)),
             mosaic: .success(WorkspaceStubs.mosaic(url: raw))
@@ -404,13 +404,21 @@ struct WorkspaceExposureAdjustmentTests {
 
         let object = try #require(
             try JSONSerialization.jsonObject(
-                with: Data(contentsOf: JSONSidecarImageAdjustmentStore.sidecarURL(for: raw))
+                with: Data(contentsOf: JSONSidecarPhotographProcessingStore.sidecarURL(for: raw))
             ) as? [String: Any]
         )
-        #expect(object["schemaVersion"] as? Int == 4)
-        #expect(object["orientation"] as? String == "rotate90Clockwise")
-        #expect((object["channelMix"] as? [String: Any])?["kind"] as? String == "redBlueSwap")
-        #expect(object["exposureEV"] as? Double == 1)
+        // The version 5 shape: the capture-profile reference beside an
+        // `adjustments` object, rather than four fields at the top level.
+        #expect(object["schemaVersion"] as? Int == 5)
+        #expect(object["captureProfileID"] as? String == "builtin.uncalibrated")
+        let adjustments = try #require(object["adjustments"] as? [String: Any])
+        #expect(adjustments["orientation"] as? String == "rotate90Clockwise")
+        #expect((adjustments["channelMix"] as? [String: Any])?["kind"] as? String
+            == "redBlueSwap")
+        #expect(adjustments["exposureEV"] as? Double == 1)
+        // And exactly one authority per field: nothing is left at the top.
+        #expect(object["orientation"] == nil)
+        #expect(object["exposureEV"] == nil)
 
         let secondLog = WorkspaceEventLog()
         let second = DocumentState(decoder: decoder, store: store, render: RecordingRender(log: secondLog).render)
@@ -430,7 +438,7 @@ struct WorkspaceExposureAdjustmentTests {
     @Test("An exposure whose render refuses stays requested and is not saved")
     func aRefusedExposureRenderIsNotSaved() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let bad = try Self.ev(1.0)
         let state = Self.state(
             store: store,
@@ -462,10 +470,10 @@ struct WorkspaceExposureAdjustmentTests {
     @Test("A save failure keeps the exposed image and reports itself")
     func aSaveFailureKeepsTheExposedImage() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         store.refuseSaves(
             with: .cannotWrite(
-                sidecar: JSONSidecarImageAdjustmentStore.sidecarURL(for: Self.url),
+                sidecar: JSONSidecarPhotographProcessingStore.sidecarURL(for: Self.url),
                 underlying: CocoaError(.fileWriteNoPermission)
             )
         )
@@ -494,7 +502,7 @@ struct WorkspaceExposureAdjustmentTests {
     @Test("A slider state still rendering when another file opens reaches its own sidecar")
     func aPendingExposureSettlesAfterASwitch() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let held = ImageAdjustments(exposure: try Self.ev(1.2))
         let gate = GatedRender(log: log, holds: { $0 == held })
         let state = DocumentState(
@@ -531,7 +539,7 @@ struct WorkspaceExposureAdjustmentTests {
         // A's complete newest state reached A's sidecar, and only A's.
         #expect(store.saved(for: Self.url) == held)
         #expect(store.saved(for: Self.otherURL) == nil)
-        #expect(store.writeSummary == ["exposure-adjustment.orf:none:identity:1.2EV:defaultNeutralPatch"])
+        #expect(store.writeSummary == ["exposure-adjustment.orf:builtin.uncalibrated:none:identity:1.2EV:defaultNeutralPatch"])
 
         // A's preview never landed in B.
         let stillB = try Self.preview(state)
@@ -543,7 +551,7 @@ struct WorkspaceExposureAdjustmentTests {
     @Test("Reopening the same file with a pending exposure serialises on its sidecar")
     func aSameURLReopenWaitsForItsOwnFile() async throws {
         let log = WorkspaceEventLog()
-        let store = StubImageAdjustmentStore(log: log)
+        let store = StubPhotographProcessingStore(log: log)
         let held = ImageAdjustments(exposure: try Self.ev(1.2))
         let gate = GatedRender(log: log, holds: { $0 == held })
         let state = Self.state(store: store, log: log, render: gate.render)

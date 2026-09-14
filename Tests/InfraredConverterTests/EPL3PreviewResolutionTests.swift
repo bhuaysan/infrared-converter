@@ -151,7 +151,7 @@ struct EPL3PreviewResolutionTests {
     @Test("Opening the fixture writes no sidecar and changes no bytes")
     func openingWritesNothing() throws {
         try RAWFixtures.withIsolatedCopy { url in
-            let sidecar = JSONSidecarImageAdjustmentStore.sidecarURL(for: url)
+            let sidecar = JSONSidecarPhotographProcessingStore.sidecarURL(for: url)
             #expect(!FileManager.default.fileExists(atPath: sidecar.path))
 
             let before = try Self.digest(of: url)
