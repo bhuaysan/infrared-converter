@@ -125,29 +125,56 @@ public struct IRCalibrationFitter: Sendable {
     /// What differs is *which patch*: a calibration session's neutral is a
     /// patch of the target, chosen once for the session, and never a region
     /// somebody picked in a photograph they were editing.
+    ///
+    /// ## The neutral reference has to be usable, not merely present
+    ///
+    /// `IRCalibrationMeasurementSet` requires only that the named patch was
+    /// *measured*, and that is the right rule there: evidence describes what
+    /// the camera produced, and an exclusion is a judgement about it rather
+    /// than a fact of the measurement. A session whose neutral patch turned
+    /// out to be clipped is a real thing that happened, and the evidence must
+    /// be able to say so.
+    ///
+    /// What must not happen is that the patch is then used anyway. Every gain
+    /// multiplies every patch in the fit, so an excluded neutral reference
+    /// does not affect one patch — it determines the white balance of the
+    /// whole transform, through data the evidence itself marked unusable. So
+    /// the refusal lives here, in the fit, where the judgement is acted on.
     static func sessionGains(
         for measurements: IRCalibrationMeasurementSet
-    ) throws -> [Int: Double] {
+    ) throws(IRCalibrationFitError) -> IRCalibrationSessionGains {
         guard let neutral = measurements.whiteBalancePolicy.neutralPatch else {
-            return [:]
+            return .unbalanced
         }
         guard let patch = measurements.measurement(for: neutral) else {
-            throw IRCalibrationError.unknownTargetPatch(
-                patch: neutral.rawValue, target: measurements.target.displayName
+            throw .unmeasuredNeutralReference(patch: neutral.rawValue)
+        }
+        if let exclusion = patch.exclusion {
+            throw .excludedNeutralReference(patch: neutral.rawValue, exclusion: exclusion)
+        }
+
+        // Every RGB channel has to be represented, because every RGB channel
+        // of every fitted patch is about to be scaled by a gain derived from
+        // this one. A neutral patch missing blue defines no blue gain, and the
+        // only alternatives are refusing and quietly leaving blue unbalanced.
+        for channel in [RAWLinearRGBChannel.red, .green, .blue]
+        where patch.planes(for: channel).isEmpty {
+            throw .missingChannelResponse(
+                patch: neutral.rawValue, channel: Self.name(of: channel)
             )
         }
 
         var means: [Int: Double] = [:]
         for plane in patch.planes {
             guard plane.mean.isFinite else {
-                throw IRCalibrationFitError.nonFiniteSample(
+                throw .nonFiniteSample(
                     patch: neutral.rawValue,
                     field: "neutral plane \(plane.colorPlane) mean",
                     value: plane.mean
                 )
             }
             guard plane.mean > 0 else {
-                throw IRCalibrationFitError.nonFiniteSample(
+                throw .nonFiniteSample(
                     patch: neutral.rawValue,
                     field: """
                         neutral plane \(plane.colorPlane) mean (a neutral reference at or \
@@ -160,12 +187,20 @@ public struct IRCalibrationFitter: Sendable {
         }
 
         guard let target = means.values.max() else {
-            throw IRCalibrationFitError.missingChannelResponse(
-                patch: neutral.rawValue, channel: "any"
-            )
+            throw .missingChannelResponse(patch: neutral.rawValue, channel: "any")
         }
 
-        return means.mapValues { target / $0 }
+        return IRCalibrationSessionGains(
+            neutralPatch: neutral, byColorPlane: means.mapValues { target / $0 }
+        )
+    }
+
+    static func name(of channel: RAWLinearRGBChannel) -> String {
+        switch channel {
+        case .red: return "red"
+        case .green: return "green"
+        case .blue: return "blue"
+        }
     }
 
     // MARK: - Camera RGB
@@ -177,28 +212,29 @@ public struct IRCalibrationFitter: Sendable {
     /// site. See ``IRCalibrationGreenChannelPolicy``.
     static func cameraRGB(
         for patch: IRCalibrationPatchMeasurement,
-        gains: [Int: Double],
+        gains: IRCalibrationSessionGains,
         policy: IRCalibrationGreenChannelPolicy
-    ) throws -> SIMD3<Double> {
+    ) throws(IRCalibrationFitError) -> SIMD3<Double> {
         func response(
             _ channel: RAWLinearRGBChannel, _ name: String
-        ) throws -> Double {
+        ) throws(IRCalibrationFitError) -> Double {
             let planes = patch.planes(for: channel)
             guard !planes.isEmpty else {
-                throw IRCalibrationFitError.missingChannelResponse(
+                throw .missingChannelResponse(
                     patch: patch.patch.rawValue, channel: name
                 )
             }
             var total = 0.0
             for plane in planes {
                 guard plane.mean.isFinite else {
-                    throw IRCalibrationFitError.nonFiniteSample(
+                    throw .nonFiniteSample(
                         patch: patch.patch.rawValue,
                         field: "plane \(plane.colorPlane) mean",
                         value: plane.mean
                     )
                 }
-                total += plane.mean * (gains[plane.colorPlane] ?? 1)
+                total += try plane.mean
+                    * gains.gain(forColorPlane: plane.colorPlane, of: patch.patch)
             }
             switch policy {
             case .meanOfGreenPlaneMeans:
@@ -216,7 +252,7 @@ public struct IRCalibrationFitter: Sendable {
 
         for (name, value) in [("red", red), ("green", green), ("blue", blue)]
         where !value.isFinite {
-            throw IRCalibrationFitError.nonFiniteSample(
+            throw .nonFiniteSample(
                 patch: patch.patch.rawValue, field: "balanced \(name)", value: value
             )
         }

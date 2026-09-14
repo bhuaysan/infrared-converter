@@ -56,21 +56,22 @@ struct IRCalibrationFitterTests {
         )
         let gains = try IRCalibrationFitter.sessionGains(for: measurements)
 
-        #expect(abs((gains[0] ?? 0) - 1.0) < 1e-12)        // red, strongest
-        #expect(abs((gains[1] ?? 0) - 2.0) < 1e-12)        // green plane 1
-        #expect(abs((gains[3] ?? 0) - 2.0) < 1e-12)        // green plane 3
-        #expect(abs((gains[2] ?? 0) - 4.0) < 1e-12)        // blue
-        #expect(gains.values.allSatisfy { $0 >= 1 - 1e-12 })
+        #expect(gains.basis == .neutralPatch(neutral))
+        #expect(abs((gains.byColorPlane[0] ?? 0) - 1.0) < 1e-12)        // red, strongest
+        #expect(abs((gains.byColorPlane[1] ?? 0) - 2.0) < 1e-12)        // green plane 1
+        #expect(abs((gains.byColorPlane[3] ?? 0) - 2.0) < 1e-12)        // green plane 3
+        #expect(abs((gains.byColorPlane[2] ?? 0) - 4.0) < 1e-12)        // blue
+        #expect(gains.byColorPlane.values.allSatisfy { $0 >= 1 - 1e-12 })
     }
 
     @Test("With no session white balance, no gain is applied at all")
     func noSessionWhiteBalance() throws {
         let measurements = CalibrationTestData.measurementSet(whiteBalancePolicy: .none)
-        #expect(try IRCalibrationFitter.sessionGains(for: measurements).isEmpty)
+        #expect(try IRCalibrationFitter.sessionGains(for: measurements).isUnbalanced)
 
         let patch = try #require(measurements.measurement(for: CalibrationTestData.patch(1)))
         let camera = try IRCalibrationFitter.cameraRGB(
-            for: patch, gains: [:], policy: .meanOfGreenPlaneMeans
+            for: patch, gains: .unbalanced, policy: .meanOfGreenPlaneMeans
         )
         let red = try #require(patch.planes(for: .red).first)
         #expect(abs(camera.x - red.mean) < 1e-12)
@@ -141,6 +142,207 @@ struct IRCalibrationFitterTests {
         }
     }
 
+    // MARK: - The neutral reference has to be usable
+
+    /// The evidence may still *record* an excluded neutral patch — that is a
+    /// historical fact about the session — but no fit may be derived from it.
+    /// Its gains scale every channel of every fitted patch, so an unusable
+    /// neutral reference decides the white balance of the whole transform.
+    @Test(
+        "A neutral reference the evidence excluded is refused by the fit, whatever excluded it",
+        arguments: [
+            IRCalibrationPatchExclusion.clipped(clippedSamples: 400, totalSamples: 400),
+            .incompleteColorPlanes(missing: [2, 3]),
+            .nonFiniteSample,
+            .noReferenceValue,
+            .excludedByOperator(reason: "a fingerprint across the patch"),
+        ]
+    )
+    func excludedNeutralReferenceIsRefused(exclusion: IRCalibrationPatchExclusion) throws {
+        let neutral = CalibrationTestData.patch(20)
+        let measurements = CalibrationTestData.measurementSet(
+            whiteBalancePolicy: .neutralPatch(neutral), exclusions: [20: exclusion]
+        )
+
+        // The evidence still holds the measurement and the judgement about it.
+        let recorded = try #require(measurements.measurement(for: neutral))
+        #expect(recorded.exclusion == exclusion)
+        #expect(measurements.whiteBalancePolicy == .neutralPatch(neutral))
+
+        #expect(
+            throws: IRCalibrationFitError.excludedNeutralReference(
+                patch: neutral.rawValue, exclusion: exclusion
+            )
+        ) {
+            _ = try IRCalibrationFitter.sessionGains(for: measurements)
+        }
+
+        let reference = CalibrationTestData.referenceDataset(
+            for: CalibrationTestData.measurementSet(), matrix: CalibrationTestData.syntheticMatrix
+        )
+        #expect(throws: IRCalibrationFitError.self) {
+            _ = try IRCalibrationFitter().fit(
+                measurements: measurements, reference: reference,
+                now: CalibrationTestData.fittedAt
+            )
+        }
+    }
+
+    @Test("A neutral reference with no response in one channel defines no gains")
+    func neutralReferenceMissingAChannel() throws {
+        let neutral = CalibrationTestData.patch(1)
+        let measurements = try Self.measurementSet(
+            neutral: neutral,
+            neutralPlanes: [
+                try IRCalibrationPlaneMeasurement(
+                    colorPlane: 0, channel: .red, sampleCount: 100, mean: 0.6,
+                    clippedSampleCount: 0
+                ),
+                try IRCalibrationPlaneMeasurement(
+                    colorPlane: 1, channel: .green, sampleCount: 100, mean: 0.4,
+                    clippedSampleCount: 0
+                ),
+            ]
+        )
+
+        #expect(
+            throws: IRCalibrationFitError.missingChannelResponse(
+                patch: neutral.rawValue, channel: "blue"
+            )
+        ) {
+            _ = try IRCalibrationFitter.sessionGains(for: measurements)
+        }
+    }
+
+    /// The `?? 1` this replaced: a fitted patch measured on a colour plane the
+    /// neutral reference never saw used to be left silently unbalanced while
+    /// every other plane was scaled.
+    @Test("A colour plane the neutral reference defines no gain for is refused, never left at 1")
+    func missingGainIsNeverIdentity() throws {
+        let neutral = CalibrationTestData.patch(1)
+        // A three-plane neutral patch — no second green — beside four-plane
+        // patches everywhere else.
+        let measurements = try Self.measurementSet(
+            neutral: neutral,
+            neutralPlanes: [
+                try IRCalibrationPlaneMeasurement(
+                    colorPlane: 0, channel: .red, sampleCount: 100, mean: 0.6,
+                    clippedSampleCount: 0
+                ),
+                try IRCalibrationPlaneMeasurement(
+                    colorPlane: 1, channel: .green, sampleCount: 100, mean: 0.4,
+                    clippedSampleCount: 0
+                ),
+                try IRCalibrationPlaneMeasurement(
+                    colorPlane: 2, channel: .blue, sampleCount: 100, mean: 0.2,
+                    clippedSampleCount: 0
+                ),
+            ]
+        )
+
+        let gains = try IRCalibrationFitter.sessionGains(for: measurements)
+        #expect(gains.byColorPlane[3] == nil)
+
+        let fourPlane = try #require(measurements.measurement(for: CalibrationTestData.patch(2)))
+        #expect(
+            throws: IRCalibrationFitError.missingWhiteBalanceGain(
+                patch: fourPlane.patch.rawValue, colorPlane: 3, neutralPatch: neutral.rawValue
+            )
+        ) {
+            _ = try IRCalibrationFitter.cameraRGB(
+                for: fourPlane, gains: gains, policy: .meanOfGreenPlaneMeans
+            )
+        }
+    }
+
+    @Test("A neutral reference at or below zero defines no gain")
+    func neutralReferenceAtZero() throws {
+        let neutral = CalibrationTestData.patch(1)
+        let measurements = try Self.measurementSet(
+            neutral: neutral,
+            neutralPlanes: [
+                try IRCalibrationPlaneMeasurement(
+                    colorPlane: 0, channel: .red, sampleCount: 100, mean: 0.6,
+                    clippedSampleCount: 0
+                ),
+                try IRCalibrationPlaneMeasurement(
+                    colorPlane: 1, channel: .green, sampleCount: 100, mean: 0.4,
+                    clippedSampleCount: 0
+                ),
+                try IRCalibrationPlaneMeasurement(
+                    colorPlane: 2, channel: .blue, sampleCount: 100, mean: 0,
+                    clippedSampleCount: 0
+                ),
+                try IRCalibrationPlaneMeasurement(
+                    colorPlane: 3, channel: .green, sampleCount: 100, mean: 0.4,
+                    clippedSampleCount: 0
+                ),
+            ]
+        )
+
+        #expect(throws: IRCalibrationFitError.self) {
+            _ = try IRCalibrationFitter.sessionGains(for: measurements)
+        }
+    }
+
+    /// With no session white balance a gain of 1 is the answer rather than a
+    /// fallback, and the type says which of the two it is.
+    @Test("An unbalanced session applies an explicit gain of 1, not a missing one")
+    func unbalancedGainsAreExplicit() throws {
+        let gains = IRCalibrationSessionGains.unbalanced
+        #expect(gains.isUnbalanced)
+        #expect(gains.neutralPatch == nil)
+        #expect(gains.byColorPlane.isEmpty)
+        #expect(
+            try gains.gain(forColorPlane: 7, of: CalibrationTestData.patch(1)) == 1
+        )
+    }
+
+    /// Evidence describing an excluded neutral patch is still constructible:
+    /// the measurement happened, and only the fit is refused.
+    @Test("Evidence may still record a neutral reference that was excluded")
+    func evidenceKeepsAnExcludedNeutralReference() throws {
+        let neutral = CalibrationTestData.patch(20)
+        let measurements = CalibrationTestData.measurementSet(
+            whiteBalancePolicy: .neutralPatch(neutral),
+            exclusions: [20: .clipped(clippedSamples: 400, totalSamples: 400)]
+        )
+        #expect(measurements.excludedPatchCount == 1)
+        #expect(measurements.measurement(for: neutral)?.isIncluded == false)
+    }
+
+    /// A measurement set whose first patch is the neutral reference and whose
+    /// planes are given explicitly; every other patch is the ordinary
+    /// four-plane synthetic one.
+    static func measurementSet(
+        neutral: IRCalibrationTargetPatchID,
+        neutralPlanes: [IRCalibrationPlaneMeasurement]
+    ) throws -> IRCalibrationMeasurementSet {
+        let responses = Array(CalibrationTestData.syntheticCameraResponses().prefix(8))
+        var patches = responses.enumerated().map { index, response in
+            CalibrationTestData.patchMeasurement(
+                CalibrationTestData.patch(index + 1),
+                red: response.0, green: response.1, blue: response.2
+            )
+        }
+        let index = try #require(patches.firstIndex { $0.patch == neutral })
+        patches[index] = try IRCalibrationPatchMeasurement(
+            patch: neutral, region: patches[index].region, planes: neutralPlanes
+        )
+
+        return try IRCalibrationMeasurementSet(
+            id: CalibrationTestData.measurementID(),
+            measuredAt: CalibrationTestData.measuredAt,
+            target: .colorCheckerClassic24,
+            illuminant: .d65,
+            captureContext: CalibrationTestData.context(),
+            normalization: CalibrationTestData.normalization(),
+            whiteBalancePolicy: .neutralPatch(neutral),
+            patches: patches,
+            provenance: CalibrationTestData.provenance()
+        )
+    }
+
     // MARK: - The green collapse
 
     /// The rule is the *unweighted mean of the per-plane means*, so how the
@@ -156,10 +358,10 @@ struct IRCalibrationFitterTests {
         )
 
         let a = try IRCalibrationFitter.cameraRGB(
-            for: even, gains: [:], policy: .meanOfGreenPlaneMeans
+            for: even, gains: .unbalanced, policy: .meanOfGreenPlaneMeans
         )
         let b = try IRCalibrationFitter.cameraRGB(
-            for: lopsided, gains: [:], policy: .meanOfGreenPlaneMeans
+            for: lopsided, gains: .unbalanced, policy: .meanOfGreenPlaneMeans
         )
 
         #expect(abs(a.y - 0.5) < 1e-12)

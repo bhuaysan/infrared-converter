@@ -161,7 +161,7 @@ struct IRCalibrationMeasurementPipelineTests {
 
         // And the collapse averages them back to the painted value.
         let camera = try IRCalibrationFitter.cameraRGB(
-            for: patch, gains: [:], policy: .meanOfGreenPlaneMeans
+            for: patch, gains: .unbalanced, policy: .meanOfGreenPlaneMeans
         )
         #expect(abs(camera.y - Self.flatResponses()[0].g) < 1e-6)
     }

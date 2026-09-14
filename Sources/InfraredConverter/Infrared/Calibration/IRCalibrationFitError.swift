@@ -24,6 +24,30 @@ public enum IRCalibrationFitError: Error, Equatable {
     /// A patch admitted to the fit has no measured samples of some channel.
     case missingChannelResponse(patch: String, channel: String)
 
+    /// The session names a neutral reference that was never measured.
+    ///
+    /// `IRCalibrationMeasurementSet` refuses this when the evidence is built,
+    /// so it is a second line rather than the first. It exists because the
+    /// fitter must not depend on having been handed evidence somebody else
+    /// already checked.
+    case unmeasuredNeutralReference(patch: String)
+
+    /// The session's neutral reference is a patch the evidence excluded.
+    ///
+    /// The evidence may record it — a clipped or badly sampled neutral patch
+    /// is a fact about what happened — but a fit may not use it. Every gain it
+    /// defines multiplies every patch in the fit, so an unusable neutral
+    /// reference does not spoil one patch, it decides the white balance of the
+    /// whole transform.
+    case excludedNeutralReference(patch: String, exclusion: IRCalibrationPatchExclusion)
+
+    /// A colour plane the session's white balance defines no gain for.
+    ///
+    /// Under a neutral-patch policy this is a refusal rather than a gain of
+    /// `1`: a transform balanced in two channels and left unity in the third
+    /// is not the transform the recorded policy describes.
+    case missingWhiteBalanceGain(patch: String, colorPlane: Int, neutralPatch: String)
+
     case nonFiniteSample(patch: String, field: String, value: Double)
 
     /// A camera channel that is zero across every patch.
@@ -59,6 +83,12 @@ extension IRCalibrationFitError: LocalizedError {
             return "A patch being fitted has no reference value."
         case .missingChannelResponse:
             return "A patch being fitted has no measured response in one channel."
+        case .unmeasuredNeutralReference:
+            return "The calibration session's neutral reference was never measured."
+        case .excludedNeutralReference:
+            return "The calibration session's neutral reference is not usable."
+        case .missingWhiteBalanceGain:
+            return "The calibration session's white balance does not cover one colour plane."
         case .nonFiniteSample:
             return "A measured value is not a finite number."
         case .zeroChannelVariation:
@@ -102,6 +132,31 @@ extension IRCalibrationFitError: LocalizedError {
                 Patch "\(patch)" has no measured \(channel) samples. Its region contains no \
                 site of that colour filter, which means it is too small or too badly aligned \
                 to contain whole CFA cells.
+                """
+
+        case .unmeasuredNeutralReference(let patch):
+            return """
+                The session states that patch "\(patch)" is its neutral reference, and no \
+                measurement of that patch is in the evidence. The gains it defines cannot be \
+                re-derived, so the fit would not be reproducible from what was recorded.
+                """
+
+        case .excludedNeutralReference(let patch, let exclusion):
+            return """
+                The session's neutral reference is patch "\(patch)", which the evidence \
+                excluded: \(exclusion.shortDescription). Its gains scale every channel of \
+                every patch in the fit, so using it would let data the evidence marked \
+                unusable set the white balance of the whole transform. The evidence keeps \
+                the measurement; what it cannot do is fit from it. Re-photograph the chart, \
+                or fit the session unbalanced.
+                """
+
+        case .missingWhiteBalanceGain(let patch, let plane, let neutral):
+            return """
+                Patch "\(patch)" was measured on colour plane \(plane), and the neutral \
+                reference "\(neutral)" defines no gain for that plane. Leaving it at 1 while \
+                every other plane is scaled would produce a transform that is balanced in \
+                some channels and not in others, and nothing in the artefact would say so.
                 """
 
         case .nonFiniteSample(let patch, let field, let value):
