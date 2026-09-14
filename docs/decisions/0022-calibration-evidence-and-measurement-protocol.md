@@ -569,3 +569,150 @@ reconstruction, arbitrary spectral response fitting, ICC profile generation, DNG
 matrices, a generic "paste matrix" calibration interface, automatic calibration
 selection, filter inference, temperature/tint, tone curves, and GPU or Metal
 work.
+
+---
+
+## Amendment (2026-09-14) — the artefact verifies its own matrix
+
+Three claims above were true of the design and not yet true of the code. An
+independent review found the gaps, and this amendment closes them. No decision
+here is reversed; each is enforced where it had been described.
+
+### 1. The fit is re-derived, not believed
+
+Decision 7 says evidence and result are separate and a result is a conclusion
+drawn from evidence. Decision 15 says:
+
+> A file cannot describe a calibration that could not have been constructed in
+> memory.
+
+Both were true of every field *except the numbers that matter*. `IRCalibration`
+checked that its three parts named each other — the measurement identity, the
+reference identity, the session white-balance policy, the residual patch set,
+the excluded count — and nothing looked at a coefficient. A hand-edited
+`.ircalibration.json` could keep honest measurements and honest-looking
+residuals beside a matrix fitted from nothing at all, and every check passed.
+
+Constructing a calibration now **recomputes** the transform from the stored
+evidence and the stored reference dataset, and refuses the artefact unless the
+stored matrix, residuals, conditioning and sample count agree with what comes
+out. Decoding reconstructs through that same initialiser, so the guarantee
+holds at the file boundary rather than only in memory.
+
+```text
+stored measurements + stored reference dataset
+         ↓  IRCalibrationFitter.derive
+recomputed matrix, residuals, conditioning
+         ↓  IRCalibrationFitAgreement
+agrees with what the artefact stores  —  or IRCalibrationError.unverifiableFit
+```
+
+**One implementation, not two.** The arithmetic that `fit` runs was separated
+from the `IRCalibrationFitResult` packaging around it —
+`IRCalibrationFitter.derive` — and the verifier calls exactly that. A checker
+written independently "to check the first" would be a second definition of the
+white-balance derivation, the green collapse and the solver, and the day the
+two disagreed nothing could say which was right. Recomputation catches a
+tampered or corrupted artefact; it does not claim to catch a wrong solver.
+
+### 2. Agreement is tight, tolerated, and defined in one place
+
+`IRCalibrationFitAgreement` is the only rule by which a stored number is judged
+against a recomputed one:
+
+```text
+relative   1e-12    ≈ 4500 × Double.ulpOfOne
+absolute   1e-12    for residuals that are legitimately zero
+```
+
+Not exact equality — although the solver *does* reproduce itself bit for bit,
+and a test asserts that it does, because the arithmetic is deterministic and
+IEEE 754 `+ - * /` and `sqrt` are correctly rounded. Requiring exactness would
+additionally assert that every future compiler, standard library and
+architecture will agree in the last place, and the cost of that assertion being
+wrong falls on somebody's stored measurements: a chart, a lamp and an afternoon
+become unreadable because a re-derived coefficient moved by one ulp.
+
+The magnitude is justified from both sides. Above: the forward error of the
+solve is bounded by roughly the condition number of the normal equations times
+the machine epsilon, and the conditioning floor admits data whose worst case is
+of order `1e-14`, so `1e-12` leaves two orders of magnitude of headroom. Below:
+a coefficient, residual or determinant edited by a person differs in a digit
+that is visible in the file. An edit small enough to pass this test changes no
+number anybody reads.
+
+The absolute floor exists because an exact fit has residuals of exactly zero,
+and a relative comparison of `0` against `3e-17` compares nothing. Residuals
+live in the working representation, where the magnitudes that matter are of
+order `1`, so at that scale the two terms say the same thing.
+
+If the solver's arithmetic ever changes enough to break bit-identity, the
+answer is a fit-method version bump, not a wider tolerance.
+
+### 3. An unreproducible fit method is refused
+
+`IRCalibrationFitMethod` records what produced a matrix. It may not be taken as
+a promise that this build can reproduce it. `isReproducibleByThisBuild` is true
+only for `least-squares-3x3@v1`, and a persisted fit naming any other algorithm
+or version is refused.
+
+Refused rather than carried with an "unverified but historical" status, because
+no such status exists in this model and inventing one would create exactly the
+place to park a matrix nothing has checked. A historical algorithm becomes
+reproducible by being implemented, which is a deliberate act: a solver that can
+still produce its coefficients, and a case here.
+
+### 4. One residual per fitted patch, on the type that owns the list
+
+Decision 8 states the rule as "a calibration claiming 24 patches may not carry
+23 residuals", and the check compared **sets** of patch identities. A set is
+unchanged by a duplicate, so a fit carrying two residuals for one patch and
+none for another passed it — while doubling that patch's weight in the RMSE,
+the mean residual and the included-patch count, and in any future acceptance
+criterion computed from them.
+
+`IRCalibrationFitMetrics` now refuses a duplicate patch outright, and a
+negative excluded count with it. `IRCalibration` keeps its own second layer and
+no longer relies on `Set`: it counts the residuals against the included patches
+and compares the two sorted lists element by element.
+
+### 5. A neutral reference must be usable, not merely present
+
+Decision 5 gives a calibration session its own neutral reference; decision 9
+says a clipped patch is excluded and never averaged in. Between them was a gap:
+`IRCalibrationMeasurementSet` required only that the named neutral patch had
+been *measured*, and the fitter then used it even when the evidence had
+excluded it — for clipping, for missing colour planes, for a non-finite sample,
+or by the operator's own judgement. An excluded patch could therefore set the
+white balance of the whole transform, because gains scale every channel of
+every fitted patch.
+
+The evidence keeps that permission, deliberately. A measurement is a historical
+fact and an exclusion is a judgement about it, so a session whose neutral patch
+turned out to be clipped must still be recordable — otherwise the evidence
+would have to be edited to describe what happened, which is the failure
+decision 7 exists to prevent. The refusal belongs where the judgement is acted
+on, and that is the fit.
+
+`IRCalibrationFitter` refuses a neutral reference that is unmeasured, excluded,
+non-positive in any plane, or missing a red, green or blue response.
+
+The silent identity gain is gone with it. Gains were a `[Int: Double]`, and
+`gains[plane] ?? 1` reads correctly for an unbalanced session and silently
+wrongly for a balanced one — a plane the neutral reference never saw was left
+unbalanced while every other plane was scaled, producing a transform balanced
+in two channels and not in the third, with nothing in the artefact saying so.
+`IRCalibrationSessionGains` carries whether a session was balanced at all: under
+`.unbalanced` a gain of `1` is the stated answer, and under `.neutralPatch` a
+missing gain is a typed refusal.
+
+### What did not change
+
+- `IRCalibration` is still not `Codable`; persistence is still
+  `IRCalibrationRecord`, still at schema version 1.
+- RMSE and the maximum residual are still derived and still not persisted.
+- No capture profile became calibrated, `IRCaptureProcessingBasis` is
+  untouched, `.explicitMatrix` still has no wire format, and
+  `isValidatedInfraredCalibration` is still `false` everywhere.
+- No acceptance criteria were established; nothing reaches `validated`.
+- Preview and export are untouched, and neither resolves a calibration.

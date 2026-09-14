@@ -234,6 +234,29 @@ offered because a balanced fit's coefficients are easier to compare between
 sessions. **The gains are re-derived from the stored evidence on every fit**, so
 a calibration cannot disagree with the measurements it claims to come from.
 
+### The neutral reference has to be usable
+
+Its gains scale every channel of every fitted patch, so an unusable neutral
+reference does not spoil one patch — it sets the white balance of the whole
+transform. A fit is therefore refused when the named patch is:
+
+```text
+not measured at all
+excluded by the evidence     clipping, incomplete planes, a non-finite sample, the operator
+at or below zero in a plane  a neutral reference at zero defines no gain
+missing red, green or blue   a channel with no gain cannot be balanced
+```
+
+The **evidence** may still record every one of those. A measurement is a
+historical fact and an exclusion is a judgement about it, so a session whose
+neutral patch turned out to be clipped is recordable exactly as it happened.
+What cannot follow from it is a fit. Re-photograph the chart, choose another
+neutral patch, or fit the session `none`.
+
+There is no identity fallback anywhere in this. Under `none` every plane has a
+gain of `1` because that is the answer; under `neutralPatch` a plane the neutral
+reference never saw is a refusal, not a `1`.
+
 ---
 
 ## 7. Measurement domain — the mosaic, before demosaicing
@@ -354,6 +377,8 @@ The fit refuses rather than producing coefficients when:
 | a channel zero across every patch | nothing can be learned about that column |
 | normalised Gram determinant < 1e-9 | the responses are too collinear to determine a unique map |
 | a non-finite measured or reference value | one propagates into all nine coefficients |
+| an unmeasured, excluded or zero neutral reference | its gains would set the white balance of the whole transform |
+| a colour plane the neutral reference defines no gain for | the transform would be balanced in some channels and not others |
 
 The conditioning test is computed on **column-normalised** responses, so it
 measures independence rather than exposure. It is a numerical-degeneracy guard,
@@ -462,6 +487,31 @@ Anybody holding a calibration artefact can check it without the RAW file:
 If any step disagrees, the artefact is wrong. That property — not the size of
 any residual — is what makes a calibration reviewable.
 
+### The application does this on every read
+
+It is not left to a diligent reader. Constructing a calibration — from a fresh
+fit or from a file, which is the same code path — recomputes the transform from
+the stored evidence and the stored reference dataset and refuses the artefact
+unless the stored matrix, residuals, conditioning and sample count agree with
+the result. A file cannot describe a calibration that could not have been
+constructed in memory.
+
+Two consequences worth knowing before you edit one by hand:
+
+- **Editing a matrix, a residual or a conditioning figure makes the file
+  unreadable.** That is the point. Editing the evidence or the reference values
+  does too, because the matrix beside them is then a conclusion drawn from
+  numbers that are no longer there. Re-fit instead: a new calibration identity
+  naming the same measurement set, with the old one left intact.
+- **A fit recorded by a method this build cannot reproduce is refused**, not
+  read unverified. Today that means anything other than `least-squares-3x3@v1`.
+
+Agreement is judged at `1e-12` relative with a `1e-12` absolute floor for
+residuals that are legitimately zero — tight enough that no edit a person could
+make and mean would pass, loose enough that a stored artefact survives
+last-place drift in a future build's arithmetic. It is one rule, in one place
+(`IRCalibrationFitAgreement`).
+
 ---
 
 ## 14. The checklist
@@ -485,7 +535,7 @@ Capture
 Measure
   [ ] four chart corners marked, clockwise from the top left
   [ ] no patch excluded for clipping — if any was, re-expose and start again
-  [ ] session neutral patch chosen from the target (20, not 19)
+  [ ] session neutral patch chosen from the target (20, not 19), and unclipped
 
 Fit
   [ ] the fit converged, and the conditioning number is comfortably above 1e-9
