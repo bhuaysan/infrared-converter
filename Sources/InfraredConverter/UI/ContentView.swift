@@ -5,7 +5,30 @@ import UniformTypeIdentifiers
 /// The workspace. It presents whatever `DocumentState` currently holds and
 /// collects the "Open RAW…" action; it performs no decoding of its own.
 struct ContentView: View {
-    @State private var documentState = DocumentState()
+
+    /// The application's one owner of capture-profile definitions.
+    ///
+    /// Passed in rather than created here, so that every window shares one
+    /// library. Two windows each reading the Application Support folder for
+    /// themselves would hold two registries built at two moments, and a profile
+    /// created in one would be invisible in the other. See
+    /// `docs/decisions/0021-user-capture-profile-library.md`.
+    let profileLibrary: IRCaptureProfileLibrary
+
+    @State private var documentState: DocumentState
+
+    /// Whether the capture-profile library sheet is open.
+    @State private var isShowingProfileLibrary = false
+
+    init(profileLibrary: IRCaptureProfileLibrary) {
+        self.profileLibrary = profileLibrary
+        // The document is given the registry that exists now, rather than being
+        // built on the built-in one and corrected afterwards: a photograph
+        // opened immediately must resolve a user profile on its first attempt.
+        _documentState = State(
+            initialValue: DocumentState(registry: profileLibrary.registry)
+        )
+    }
 
     /// Whether the next click on the preview picks a neutral patch.
     ///
@@ -33,7 +56,10 @@ struct ContentView: View {
                 Divider().frame(height: 18)
                 ExportControl(documentState: documentState)
                 Divider().frame(height: 18)
-                CaptureProfileControl(documentState: documentState)
+                CaptureProfileControl(
+                    documentState: documentState,
+                    isShowingLibrary: $isShowingProfileLibrary
+                )
                 Divider().frame(height: 18)
                 WhiteBalanceControl(
                     documentState: documentState, isPicking: $isPickingNeutralPatch
@@ -50,6 +76,19 @@ struct ContentView: View {
             .padding(12)
         }
         .frame(minWidth: 1080, minHeight: 520)
+        .sheet(isPresented: $isShowingProfileLibrary) {
+            CaptureProfileLibraryView(
+                library: profileLibrary, documentState: documentState
+            )
+        }
+        // The one path by which a change to the library reaches an open
+        // document. The version counter is what changes; the registry is a
+        // value with no equality to compare, and re-resolving on every
+        // observation would be doing by search what a counter does by
+        // construction.
+        .onChange(of: profileLibrary.version) {
+            documentState.updateCaptureProfiles(profileLibrary.registry)
+        }
     }
 
     @ViewBuilder
@@ -157,6 +196,32 @@ struct ContentView: View {
                         .textSelection(.enabled)
                         .foregroundStyle(.tertiary)
                 }
+
+                // The remedy, and it is the user's to take. Nothing has
+                // substituted a profile; pressing this is an explicit edit that
+                // reopens the photograph under the built-in uncalibrated
+                // profile, keeps every saved adjustment, and saves the new
+                // selection once it has actually rendered.
+                if let recovery = documentState.captureProfileRecovery {
+                    VStack(spacing: 6) {
+                        Button("Use \(recovery.name) Instead") {
+                            documentState.useUncalibratedCaptureProfile()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Text("""
+                            Your white balance, rotation, channel mix and exposure for \
+                            this photograph are kept exactly as they are. Only the \
+                            capture profile changes.
+                            """)
+                            .font(.caption)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(.top, 8)
+                }
+
+                Button("Capture Profiles…") { isShowingProfileLibrary = true }
+                    .buttonStyle(.link)
             }
             .padding(40)
         }
@@ -879,6 +944,71 @@ private struct WhiteBalanceControl: View {
 }
 
 
+/// The capture profile in force, the profiles it can be changed to, and the
+/// way into the library.
+///
+/// ## Every profile is listed, including the ones that do not fit
+///
+/// A profile made for another camera is shown and **disabled**, with the
+/// reason in its help text, rather than hidden. Hiding it would leave somebody
+/// who had just created a profile staring at a menu that does not contain it,
+/// wondering whether it saved — and the honest answer is that it saved and
+/// does not apply here.
+///
+/// Selection is always a person's: nothing in this control, or anywhere else,
+/// reads a file and picks a profile from it. There is no free-text field
+/// either — an identifier a user typed would name nothing, and a photograph
+/// pointing at nothing is the unresolvable state the open path refuses.
+private struct CaptureProfileControl: View {
+    let documentState: DocumentState
+    @Binding var isShowingLibrary: Bool
+
+    var body: some View {
+        let profile = documentState.captureProfile
+        let choices = documentState.captureProfileChoices
+
+        HStack(spacing: 6) {
+            Image(systemName: "camera.filters")
+                .foregroundStyle(.secondary)
+
+            // The menu itself stays usable with nothing open, because the
+            // library is reachable through it: a person may want to write down
+            // a camera and a filter before they open a photograph. It is the
+            // selection items that are disabled when there is nothing to apply
+            // them to.
+            Menu {
+                ForEach(choices) { choice in
+                    Button {
+                        documentState.setCaptureProfile(choice.profile)
+                    } label: {
+                        if choice.id == profile.id {
+                            Label(choice.profile.name, systemImage: "checkmark")
+                        } else {
+                            Text(choice.profile.name)
+                        }
+                    }
+                    // A profile that does not describe this camera would be
+                    // refused by the document anyway. Disabling it says so
+                    // before the click rather than after it.
+                    .disabled(!documentState.canAdjust || !choice.isApplicable)
+                    .help(choice.refusalDescription ?? choice.profile.diagnosticDescription)
+                }
+
+                Divider()
+
+                Button("Capture Profiles…") { isShowingLibrary = true }
+            } label: {
+                Text(profile.name)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        }
+        .help(profile.diagnosticDescription)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Capture profile: \(profile.diagnosticDescription)")
+    }
+}
+
 /// The creative infrared channel-mix control.
 ///
 /// Two choices, because there are two the project can honestly offer: traverse
@@ -904,66 +1034,6 @@ private struct WhiteBalanceControl: View {
 /// A freshly opened file with no saved decision is `.identity`, and it stays
 /// that way until a person chooses otherwise — nothing here inspects the
 /// photograph to guess whether it is infrared.
-/// The capture profile in force, and — when there is more than one to choose
-/// from — a way to select another.
-///
-/// ## Why there is no picker today
-///
-/// This build ships exactly one profile, `builtin.uncalibrated`. A menu with a
-/// single item is not a choice; it is a control that implies the application
-/// has capture configurations to offer when it has not. So the selection
-/// machinery exists in production — `DocumentState.setCaptureProfile`, the
-/// registry, the invalidation rule — and the control shows the current profile
-/// honestly until there is a second profile to switch to. Tests exercise the
-/// selection path with injected profiles rather than production growing fake
-/// ones to make a picker look useful. See
-/// `docs/decisions/0020-ir-capture-profile-foundation.md`, Decision 12.
-///
-/// There is deliberately no free-text profile field either. An identifier a
-/// user typed would name nothing, and a photograph pointing at nothing is the
-/// unresolvable state the open path refuses.
-private struct CaptureProfileControl: View {
-    let documentState: DocumentState
-
-    var body: some View {
-        let profile = documentState.captureProfile
-        let choices = documentState.availableCaptureProfiles
-
-        HStack(spacing: 6) {
-            Image(systemName: "camera.filters")
-                .foregroundStyle(.secondary)
-
-            if choices.count > 1 {
-                Menu {
-                    ForEach(choices) { choice in
-                        Button {
-                            documentState.setCaptureProfile(choice)
-                        } label: {
-                            if choice.id == profile.id {
-                                Label(choice.name, systemImage: "checkmark")
-                            } else {
-                                Text(choice.name)
-                            }
-                        }
-                    }
-                } label: {
-                    Text(profile.name)
-                }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-            } else {
-                Text(profile.name)
-                    .font(.callout)
-            }
-        }
-        .help(profile.diagnosticDescription)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Capture profile: \(profile.diagnosticDescription)")
-        .disabled(!documentState.canAdjust)
-    }
-}
-
-
 private struct ChannelMixControl: View {
     let documentState: DocumentState
 

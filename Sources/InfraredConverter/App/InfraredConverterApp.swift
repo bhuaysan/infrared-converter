@@ -36,13 +36,31 @@ struct InfraredConverterApp: App {
     /// types, the icon, code signing and entitlements — and none of that is
     /// here. This makes `swift run` usable for development; it does not make
     /// the executable a distributable application.
+    ///
+    /// ## What else is built here
+    ///
+    /// The capture-profile library, and deliberately here rather than in a
+    /// view. It reads an application-owned folder, it is shared by every
+    /// window, and a profile created in one window must be visible in the next
+    /// without a restart — all three of which are properties of the
+    /// application, not of a screen. See
+    /// `docs/decisions/0021-user-capture-profile-library.md`.
     init() {
         NSApplication.shared.setActivationPolicy(.regular)
     }
 
+    /// The one profile library this process has.
+    ///
+    /// Loaded once, from Application Support, when the application starts. A
+    /// location that cannot be determined, or a library that will not read, is
+    /// reported through the library's own load failures and still leaves the
+    /// built-in uncalibrated profile working: it is a value this build holds
+    /// rather than a file it reads.
+    @State private var profileLibrary = IRCaptureProfileLibrary.applicationSupport()
+
     var body: some Scene {
         WindowGroup("Infrared Converter") {
-            ContentView()
+            ContentView(profileLibrary: profileLibrary)
                 // Brings the window to the front on launch. Without a bundle,
                 // nothing else does: `open` is what normally activates an
                 // application, and a binary started from a shell inherits no
