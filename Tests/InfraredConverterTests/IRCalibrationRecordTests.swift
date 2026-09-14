@@ -558,6 +558,264 @@ struct IRCalibrationRecordTests {
         }
     }
 
+    // MARK: - Tampering
+
+    /// The claim this section exists to enforce: **a file cannot describe a
+    /// calibration that could not have been constructed in memory.** Every
+    /// test below starts from an honest encoded artefact, changes one number
+    /// or one token by hand the way a person with a text editor would, and
+    /// expects the read to refuse.
+    ///
+    /// Note what is *not* changed in most of them: the evidence and the
+    /// reference dataset stay exactly as they were. That is the whole point —
+    /// these are the edits that leave every structural check satisfied.
+
+    static func tampered(
+        _ change: (inout [String: Any]) throws -> Void
+    ) throws -> Data {
+        var object = try Self.object(try Self.encode(try CalibrationTestData.calibration()))
+        try change(&object)
+        return try Self.data(object)
+    }
+
+    static func tamperWithFit(
+        _ change: (inout [String: Any]) throws -> Void
+    ) throws -> Data {
+        try tampered { object in
+            var fit = try #require(object["fit"] as? [String: Any])
+            try change(&fit)
+            object["fit"] = fit
+        }
+    }
+
+    /// Reads a tampered file and returns the verification failure it produced,
+    /// or `nil` if it was accepted or refused for some other reason.
+    static func verificationFailure(
+        _ data: Data
+    ) -> IRCalibrationFitVerificationFailure? {
+        do {
+            _ = try Self.decode(data)
+            return nil
+        } catch let error as IRCalibrationError {
+            guard case .unverifiableFit(let failure) = error else { return nil }
+            return failure
+        } catch {
+            return nil
+        }
+    }
+
+    @Test("A file whose matrix was edited is refused: the evidence no longer produces it")
+    func tamperedMatrixInFileRefused() throws {
+        let data = try Self.tamperWithFit { fit in
+            var matrix = try #require(fit["matrix"] as? [String: Any])
+            let original = try #require(matrix["m02"] as? Double)
+            matrix["m02"] = original + 0.02
+            fit["matrix"] = matrix
+        }
+
+        guard case .matrixDisagrees(let row, let column, _, _)? =
+            Self.verificationFailure(data)
+        else {
+            Issue.record("A hand-edited matrix was accepted")
+            return
+        }
+        #expect(row == 0)
+        #expect(column == 2)
+    }
+
+    @Test("A file whose residual was edited is refused")
+    func tamperedResidualInFileRefused() throws {
+        let data = try Self.tamperWithFit { fit in
+            var metrics = try #require(fit["metrics"] as? [String: Any])
+            var residuals = try #require(metrics["residuals"] as? [[String: Any]])
+            let original = try #require(residuals[2]["green"] as? Double)
+            residuals[2]["green"] = original + 0.05
+            metrics["residuals"] = residuals
+            fit["metrics"] = metrics
+        }
+
+        guard case .residualDisagrees(_, let channel, _, _)? = Self.verificationFailure(data)
+        else {
+            Issue.record("A hand-edited residual was accepted")
+            return
+        }
+        #expect(channel == "green")
+    }
+
+    @Test("A file whose normalised Gram determinant was edited is refused")
+    func tamperedDeterminantInFileRefused() throws {
+        let data = try Self.tamperWithFit { fit in
+            var conditioning = try #require(fit["conditioning"] as? [String: Any])
+            let original = try #require(conditioning["normalizedGramDeterminant"] as? Double)
+            conditioning["normalizedGramDeterminant"] = original * 10
+            fit["conditioning"] = conditioning
+        }
+
+        guard case .conditioningDisagrees(let field, _, _)? = Self.verificationFailure(data)
+        else {
+            Issue.record("A hand-edited determinant was accepted")
+            return
+        }
+        #expect(field.contains("determinant"))
+    }
+
+    @Test("A file whose channel norms were edited is refused")
+    func tamperedChannelNormsInFileRefused() throws {
+        let data = try Self.tamperWithFit { fit in
+            var conditioning = try #require(fit["conditioning"] as? [String: Any])
+            var norms = try #require(conditioning["channelNorms"] as? [Double])
+            norms[0] += 1
+            conditioning["channelNorms"] = norms
+            fit["conditioning"] = conditioning
+        }
+
+        guard case .conditioningDisagrees(let field, _, _)? = Self.verificationFailure(data)
+        else {
+            Issue.record("Hand-edited channel norms were accepted")
+            return
+        }
+        #expect(field.contains("red"))
+    }
+
+    @Test("A file whose sample count was edited is refused")
+    func tamperedSampleCountInFileRefused() throws {
+        let data = try Self.tamperWithFit { fit in
+            var conditioning = try #require(fit["conditioning"] as? [String: Any])
+            let original = try #require(conditioning["sampleCount"] as? Int)
+            conditioning["sampleCount"] = original + 3
+            fit["conditioning"] = conditioning
+        }
+
+        guard case .sampleCountDisagrees(let stored, let recomputed)? =
+            Self.verificationFailure(data)
+        else {
+            Issue.record("A hand-edited sample count was accepted")
+            return
+        }
+        #expect(stored == 27)
+        #expect(recomputed == 24)
+    }
+
+    /// A duplicate is invisible to a comparison of patch *sets*, and doubles
+    /// that patch's weight in every derived metric.
+    @Test("A file carrying two residuals for one patch is refused")
+    func duplicateResidualInFileRefused() throws {
+        let data = try Self.tamperWithFit { fit in
+            var metrics = try #require(fit["metrics"] as? [String: Any])
+            var residuals = try #require(metrics["residuals"] as? [[String: Any]])
+            // Replace the last patch's residual with a second copy of the
+            // first: the count is unchanged and the set of identities shrinks
+            // by one.
+            residuals[residuals.count - 1] = residuals[0]
+            metrics["residuals"] = residuals
+            fit["metrics"] = metrics
+        }
+
+        do {
+            _ = try Self.decode(data)
+            Issue.record("A duplicated residual was accepted")
+        } catch let error as IRCalibrationError {
+            guard case .duplicateTargetPatch = error else {
+                Issue.record("Expected a duplicate refusal, got \(error)")
+                return
+            }
+        }
+    }
+
+    @Test("A file whose excluded-patch count was edited is refused")
+    func tamperedExcludedCountInFileRefused() throws {
+        let data = try Self.tamperWithFit { fit in
+            var metrics = try #require(fit["metrics"] as? [String: Any])
+            metrics["excludedPatchCount"] = 4
+            fit["metrics"] = metrics
+        }
+
+        do {
+            _ = try Self.decode(data)
+            Issue.record("A hand-edited excluded-patch count was accepted")
+        } catch let error as IRCalibrationError {
+            guard case .inconsistentResiduals = error else {
+                Issue.record("Expected a residual-consistency refusal, got \(error)")
+                return
+            }
+        }
+    }
+
+    @Test(
+        "A file naming a fit method this build cannot reproduce is refused",
+        arguments: [
+            ["algorithm": "least-squares-3x3", "version": 2] as [String: Any],
+            ["algorithm": "least-squares-3x3", "version": 99],
+            ["algorithm": "ridge-3x3", "version": 1],
+        ]
+    )
+    func unknownFitMethodInFileRefused(method: [String: Any]) throws {
+        let data = try Self.tamperWithFit { fit in fit["method"] = method }
+
+        guard case .unreproducibleMethod(let algorithm, let version, _)? =
+            Self.verificationFailure(data)
+        else {
+            Issue.record("An unreproducible fit method was accepted")
+            return
+        }
+        #expect(algorithm == method["algorithm"] as? String)
+        #expect(version == method["version"] as? Int)
+    }
+
+    /// The other direction: leave the fit alone and edit the *evidence*. The
+    /// matrix is then a conclusion drawn from measurements that are no longer
+    /// in the file.
+    @Test("A file whose measured means were edited is refused, because its matrix is now stale")
+    func tamperedEvidenceInFileRefused() throws {
+        let data = try Self.tampered { object in
+            var measurements = try #require(object["measurements"] as? [String: Any])
+            var patches = try #require(measurements["patches"] as? [[String: Any]])
+            var planes = try #require(patches[3]["planes"] as? [[String: Any]])
+            let original = try #require(planes[0]["mean"] as? Double)
+            planes[0]["mean"] = original + 0.1
+            patches[3]["planes"] = planes
+            measurements["patches"] = patches
+            object["measurements"] = measurements
+        }
+
+        // Which number is reported first is an ordering detail — the matrix
+        // is checked before the residuals and the conditioning, and all three
+        // have moved. What matters is that the file no longer reads.
+        #expect(Self.verificationFailure(data) != nil)
+    }
+
+    /// And the same for the values the fit aimed at.
+    @Test("A file whose reference values were edited is refused")
+    func tamperedReferenceValuesInFileRefused() throws {
+        let data = try Self.tampered { object in
+            var reference = try #require(object["reference"] as? [String: Any])
+            var values = try #require(reference["values"] as? [String: Any])
+            var patch = try #require(values["07"] as? [String: Any])
+            let original = try #require(patch["blue"] as? Double)
+            patch["blue"] = original + 0.08
+            values["07"] = patch
+            reference["values"] = values
+            object["reference"] = reference
+        }
+
+        #expect(Self.verificationFailure(data) != nil)
+    }
+
+    /// Tampering is refused; an untouched file is not. Verification runs on
+    /// every read, so this is the test that would catch it becoming too
+    /// strict.
+    @Test("An untouched file still reads, and its fit still verifies")
+    func honestFileStillReads() throws {
+        let original = try CalibrationTestData.calibration()
+        let decoded = try Self.decode(try Self.encode(original))
+        #expect(decoded == original)
+        #expect(throws: Never.self) {
+            try IRCalibrationFitVerifier().verify(
+                decoded.fit, measurements: decoded.measurements, reference: decoded.reference
+            )
+        }
+    }
+
     // MARK: - Schema independence
 
     /// A calibration's schema, a profile's schema and a photograph sidecar's
