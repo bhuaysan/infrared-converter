@@ -237,8 +237,14 @@ struct WorkspacePreviewResolutionTests {
         let state = try await Self.opened()
         let source = try #require(try Self.loaded(state).source)
 
+        // `captureProfile` is a description, not a buffer: the profile these
+        // pixels were prepared under, which decides whether they are still
+        // valid when another is selected. Nothing full-resolution is reachable.
         let labels = Mirror(reflecting: source).children.compactMap(\.label)
-        #expect(labels == ["preview", "metadata", "url", "whiteBalance", "estimate"])
+        #expect(
+            labels == ["preview", "metadata", "url", "captureProfile", "whiteBalance",
+                       "estimate"]
+        )
 
         // The one buffer it does hold is the reduced one.
         let previewLabels = Mirror(reflecting: source.preview).children.compactMap(\.label)
