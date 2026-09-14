@@ -237,14 +237,24 @@ public struct IRCalibrationFitter: Sendable {
             )
         }
 
-        // Every RGB channel has to be represented, because every RGB channel
-        // of every fitted patch is about to be scaled by a gain derived from
-        // this one. A neutral patch missing blue defines no blue gain, and the
-        // only alternatives are refusing and quietly leaving blue unbalanced.
-        for channel in [RAWLinearRGBChannel.red, .green, .blue]
-        where patch.planes(for: channel).isEmpty {
-            throw .missingChannelResponse(
-                patch: neutral.rawValue, channel: Self.name(of: channel)
+        // Every colour plane the layout produced has to be measured here,
+        // because every plane of every fitted patch is about to be scaled by a
+        // gain derived from this one. Checked against the evidence's recorded
+        // signature rather than against "does it have red, green and blue?":
+        // a four-plane RGGB neutral patch missing its second green still has
+        // all three channels, and the gains it defines would balance green
+        // from one phase.
+        //
+        // Valid evidence cannot fail this — an included patch is complete
+        // against the signature, and an excluded neutral reference was already
+        // refused above — which is the point of stating it here rather than
+        // trusting it.
+        let measured = Set(patch.planes.map(\.colorPlane))
+        let missing = measurements.colorPlaneSignature.colorPlanes
+            .filter { !measured.contains($0) }
+        guard missing.isEmpty else {
+            throw .incompleteNeutralReference(
+                patch: neutral.rawValue, missingColorPlanes: missing
             )
         }
 

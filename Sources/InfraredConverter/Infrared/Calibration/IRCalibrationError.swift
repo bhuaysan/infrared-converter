@@ -58,6 +58,31 @@ public enum IRCalibrationError: Error, Equatable {
     /// artefact alone.
     case inconsistentResiduals(reason: String)
 
+    /// A colour-plane signature that cannot describe a sensor layout a 3x3
+    /// transform can be fitted from.
+    case invalidColorPlaneSignature(reason: String)
+
+    /// A patch measured on a colour plane the recorded signature does not
+    /// have.
+    ///
+    /// Refused rather than ignored: a plane nobody expected carries a mean
+    /// that would be collapsed into one of the three channels, and a reader
+    /// has no way to tell whether the signature or the measurement is the
+    /// mistake.
+    case unexpectedColorPlane(patch: String, colorPlane: Int)
+
+    /// A patch whose plane is measured as a different channel from the one the
+    /// signature says that plane is.
+    case colorPlaneChannelMismatch(
+        patch: String, colorPlane: Int, expected: String, found: String
+    )
+
+    /// A patch admitted to the fit that does not carry every expected plane.
+    case incompletePatchMeasurement(patch: String, missing: [Int])
+
+    /// A patch whose recorded incompleteness is not the incompleteness it has.
+    case inconsistentPatchExclusion(patch: String, claimed: [Int], missing: [Int])
+
     /// A chart quadrilateral that cannot produce patch regions.
     case invalidChartGeometry(reason: String)
 
@@ -101,6 +126,16 @@ extension IRCalibrationError: LocalizedError {
             return "This calibration's fit was not computed against the reference stored with it."
         case .inconsistentResiduals:
             return "This calibration's error metrics do not match its measurements."
+        case .invalidColorPlaneSignature:
+            return "That is not a usable sensor colour-plane signature."
+        case .unexpectedColorPlane:
+            return "A calibration patch was measured on a colour plane the sensor has not."
+        case .colorPlaneChannelMismatch:
+            return "A calibration patch disagrees with the sensor about what a colour plane is."
+        case .incompletePatchMeasurement:
+            return "A fitted calibration patch is missing a colour plane."
+        case .inconsistentPatchExclusion:
+            return "A calibration patch records the wrong missing colour planes."
         case .invalidChartGeometry:
             return "That is not a usable calibration chart outline."
         case .unverifiableFit(let failure):
@@ -187,6 +222,49 @@ extension IRCalibrationError: LocalizedError {
                 be any good, so they are recomputed from the residual list rather than \
                 stored twice, and the residual list must correspond to the patches that were \
                 actually fitted.
+                """
+
+        case .invalidColorPlaneSignature(let reason):
+            return reason
+
+        case .unexpectedColorPlane(let patch, let plane):
+            return """
+                Patch "\(patch)" carries a measurement of colour plane \(plane), which this \
+                sensor layout does not have. One of the two is wrong and nothing in the \
+                evidence says which, so neither is believed.
+                """
+
+        case .colorPlaneChannelMismatch(let patch, let plane, let expected, let found):
+            return """
+                The sensor layout says colour plane \(plane) is \(expected), and patch \
+                "\(patch)" records it as \(found). A plane relabelled after the fact would \
+                move a measured response into another channel of the fit, which is the one \
+                edit to evidence that changes a transform while leaving every number in the \
+                file looking plausible.
+                """
+
+        case .incompletePatchMeasurement(let patch, let missing):
+            return """
+                Patch "\(patch)" is admitted to the fit and has no measurement of colour \
+                plane\(missing.count == 1 ? "" : "s") \
+                \(missing.map(String.init).joined(separator: ", ")). Fitting it would collapse \
+                a channel from fewer planes than the sensor has — on an RGGB layout, a green \
+                response taken from one of the two green phases — and the artefact would say \
+                nothing about it. An incomplete patch may exist only as explicitly excluded \
+                evidence.
+                """
+
+        case .inconsistentPatchExclusion(let patch, let claimed, let missing):
+            let claimedText = claimed.isEmpty
+                ? "none" : claimed.map(String.init).joined(separator: ", ")
+            let missingText = missing.isEmpty
+                ? "none" : missing.map(String.init).joined(separator: ", ")
+            return """
+                Patch "\(patch)" records that colour plane\(claimed.count == 1 ? "" : "s") \
+                \(claimedText) were not sampled, and the planes actually absent from it are \
+                \(missingText). An exclusion is the evidence's own account of why a patch is \
+                not fitted, and one that describes a different patch from the one it is \
+                attached to is worse than none.
                 """
 
         case .invalidChartGeometry(let reason):

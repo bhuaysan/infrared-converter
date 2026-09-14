@@ -59,6 +59,20 @@ public enum IRCalibrationFitError: Error, Equatable {
     /// tuned constant.
     case clippedNeutralReference(patch: String, clippedSamples: Int, totalSamples: Int)
 
+    /// The session's neutral reference does not carry every colour plane the
+    /// sensor layout produced.
+    ///
+    /// A second line rather than the first: `IRCalibrationMeasurementSet`
+    /// refuses an *included* patch that is incomplete against the recorded
+    /// signature, and this fitter refuses an *excluded* neutral reference, so
+    /// valid evidence cannot reach here. It exists because the fitter must not
+    /// depend on having been handed evidence somebody else already checked —
+    /// and because what it prevents is the quietest failure in this
+    /// subsystem: gains derived from three planes of a four-plane layout,
+    /// balancing green from one phase and scaling every patch of the fit by
+    /// the result.
+    case incompleteNeutralReference(patch: String, missingColorPlanes: [Int])
+
     /// A colour plane the session's white balance defines no gain for.
     ///
     /// Under a neutral-patch policy this is a refusal rather than a gain of
@@ -107,6 +121,8 @@ extension IRCalibrationFitError: LocalizedError {
             return "The calibration session's neutral reference is not usable."
         case .clippedNeutralReference:
             return "The calibration session's neutral reference contains clipped samples."
+        case .incompleteNeutralReference:
+            return "The calibration session's neutral reference is missing a colour plane."
         case .missingWhiteBalanceGain:
             return "The calibration session's white balance does not cover one colour plane."
         case .nonFiniteSample:
@@ -183,6 +199,17 @@ extension IRCalibrationFitError: LocalizedError {
                 it cannot do is fit from it. Re-expose the capture so the neutral patch sits \
                 clear of saturation and photograph the chart again, or fit the session \
                 unbalanced.
+                """
+
+        case .incompleteNeutralReference(let patch, let missing):
+            return """
+                The session's neutral reference is patch "\(patch)", and it carries no \
+                measurement of colour plane\(missing.count == 1 ? "" : "s") \
+                \(missing.map(String.init).joined(separator: ", ")). Every plane of the layout \
+                contributes a gain, and every gain scales every fitted patch, so a neutral \
+                reference measured on fewer planes than the sensor has would balance a \
+                channel from part of itself and leave nothing in the artefact saying which \
+                part.
                 """
 
         case .missingWhiteBalanceGain(let patch, let plane, let neutral):

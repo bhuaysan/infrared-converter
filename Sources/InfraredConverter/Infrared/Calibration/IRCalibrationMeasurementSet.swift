@@ -162,6 +162,7 @@ public struct IRCalibrationPatchMeasurement: Equatable, Sendable {
 ///  ├── target              which chart, and therefore what the patch ids mean
 ///  ├── illuminant          what was lighting it
 ///  ├── captureContext      camera, conversion and filter, by value
+///  ├── colorPlaneSignature which colour planes the sensor layout produced
 ///  ├── domain              where in the pipeline the responses were measured
 ///  ├── normalization       which normalisation produced the numbers
 ///  ├── clippingPolicy      what counted as too close to saturation
@@ -186,6 +187,17 @@ public struct IRCalibrationMeasurementSet: Equatable, Sendable {
     public let target: IRCalibrationTarget
     public let illuminant: IRCalibrationIlluminant
     public let captureContext: IRCalibrationCaptureContext
+
+    /// Which colour planes the sensor layout produced at the moment of
+    /// measurement, and what each one is.
+    ///
+    /// The **expectation**, recorded from the sensor layout rather than
+    /// derived from the patches, which is what lets every patch below be
+    /// checked for completeness against something. See
+    /// ``IRCalibrationColorPlaneSignature`` for why a union of the planes the
+    /// patches happen to carry cannot serve.
+    public let colorPlaneSignature: IRCalibrationColorPlaneSignature
+
     public let domain: IRCalibrationMeasurementDomain
     public let normalization: IRCalibrationNormalizationProvenance
     public let clippingPolicy: IRCalibrationClippingPolicy
@@ -206,6 +218,7 @@ public struct IRCalibrationMeasurementSet: Equatable, Sendable {
         target: IRCalibrationTarget,
         illuminant: IRCalibrationIlluminant,
         captureContext: IRCalibrationCaptureContext,
+        colorPlaneSignature: IRCalibrationColorPlaneSignature,
         domain: IRCalibrationMeasurementDomain = .default,
         normalization: IRCalibrationNormalizationProvenance,
         clippingPolicy: IRCalibrationClippingPolicy = .default,
@@ -226,6 +239,7 @@ public struct IRCalibrationMeasurementSet: Equatable, Sendable {
             guard seen.insert(measurement.patch).inserted else {
                 throw .duplicateTargetPatch(patch: measurement.patch.rawValue)
             }
+            try Self.validate(measurement, against: colorPlaneSignature)
         }
 
         if let neutral = whiteBalancePolicy.neutralPatch {
@@ -254,6 +268,7 @@ public struct IRCalibrationMeasurementSet: Equatable, Sendable {
         self.target = target
         self.illuminant = illuminant
         self.captureContext = captureContext
+        self.colorPlaneSignature = colorPlaneSignature
         self.domain = domain
         self.normalization = normalization
         self.clippingPolicy = clippingPolicy
@@ -261,6 +276,76 @@ public struct IRCalibrationMeasurementSet: Equatable, Sendable {
         self.patches = patches.sorted { $0.patch < $1.patch }
         self.provenance = provenance
         self.sourceFileName = sourceFileName
+    }
+
+    // MARK: - Completeness against the signature
+
+    /// Checks one patch against the layout the session recorded.
+    ///
+    /// ```text
+    /// plane not in the signature          refused, always
+    /// plane recorded as another channel   refused, always
+    /// every expected plane present        included, or excluded for any reason
+    ///                                     except a claim of incompleteness
+    /// a plane absent                      excluded, and a claim of
+    ///                                     incompleteness must name exactly
+    ///                                     the planes that are absent
+    /// ```
+    ///
+    /// The asymmetry between included and excluded is the point. A **fitted**
+    /// patch must be complete, because collapsing a channel from fewer planes
+    /// than the sensor has silently changes what was measured — on an RGGB
+    /// layout, a green taken from one phase instead of the mean of two. An
+    /// **excluded** patch may be incomplete, because incompleteness is a real
+    /// thing that happens to a region near the edge of the active area, and
+    /// evidence has to be able to record it.
+    ///
+    /// What an excluded patch may not do is *misdescribe* it. An exclusion is
+    /// the evidence's own account of why a patch was not fitted, and one
+    /// naming planes other than the missing ones is a statement about a
+    /// different patch. A patch excluded for some other reason entirely —
+    /// a non-finite sample, an operator's judgement — is left alone: it makes
+    /// no claim about which planes are present, so there is nothing to
+    /// contradict.
+    static func validate(
+        _ patch: IRCalibrationPatchMeasurement,
+        against signature: IRCalibrationColorPlaneSignature
+    ) throws(IRCalibrationError) {
+        for plane in patch.planes {
+            guard let expected = signature.channel(forColorPlane: plane.colorPlane) else {
+                throw .unexpectedColorPlane(
+                    patch: patch.patch.rawValue, colorPlane: plane.colorPlane
+                )
+            }
+            guard expected == plane.channel else {
+                throw .colorPlaneChannelMismatch(
+                    patch: patch.patch.rawValue,
+                    colorPlane: plane.colorPlane,
+                    expected: IRCalibrationColorPlaneSignature.name(of: expected),
+                    found: IRCalibrationColorPlaneSignature.name(of: plane.channel)
+                )
+            }
+        }
+
+        let measured = Set(patch.planes.map(\.colorPlane))
+        let missing = signature.colorPlanes.filter { !measured.contains($0) }
+
+        if case .incompleteColorPlanes(let claimed) = patch.exclusion {
+            guard Set(claimed) == Set(missing) else {
+                throw .inconsistentPatchExclusion(
+                    patch: patch.patch.rawValue,
+                    claimed: claimed.sorted(),
+                    missing: missing
+                )
+            }
+            return
+        }
+
+        guard missing.isEmpty || !patch.isIncluded else {
+            throw .incompletePatchMeasurement(
+                patch: patch.patch.rawValue, missing: missing
+            )
+        }
     }
 
     public var includedPatches: [IRCalibrationPatchMeasurement] {
@@ -304,6 +389,7 @@ public struct IRCalibrationMeasurementSet: Equatable, Sendable {
             target: target,
             illuminant: illuminant,
             captureContext: captureContext,
+            colorPlaneSignature: colorPlaneSignature,
             domain: domain,
             normalization: normalization,
             clippingPolicy: clippingPolicy,
@@ -319,6 +405,7 @@ public struct IRCalibrationMeasurementSet: Equatable, Sendable {
         \(id) — \(patches.count) patches of \(target.displayName) \
         (\(includedPatchCount) included, \(excludedPatchCount) excluded), \
         \(captureContext.diagnosticDescription), \(illuminant.diagnosticDescription), \
+        planes [\(colorPlaneSignature.diagnosticDescription)], \
         \(domain.diagnosticDescription), \(normalization.diagnosticDescription), \
         \(whiteBalancePolicy.diagnosticDescription), \(provenance.diagnosticDescription)
         """

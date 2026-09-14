@@ -144,6 +144,12 @@ public struct IRCalibrationMeasurementPipeline: Sendable {
         let layout = source.mosaic.sensorColorLayout
         let channels = try Self.channelsByColorPlane(in: layout)
 
+        // The one reading of the sensor layout in this path becomes the
+        // evidence's recorded expectation. Not inferred afterwards from the
+        // planes the patches happened to contain — that inference is exactly
+        // what the signature exists to remove.
+        let signature = try IRCalibrationColorPlaneSignature(channelsByColorPlane: channels)
+
         let regions = try session.geometry.patchRegions(
             activeAreaWidth: source.activeAreaWidth,
             activeAreaHeight: source.activeAreaHeight
@@ -188,6 +194,7 @@ public struct IRCalibrationMeasurementPipeline: Sendable {
                 filter: session.filter,
                 measuredUnderProfile: session.measuredUnderProfile
             ),
+            colorPlaneSignature: signature,
             domain: session.domain,
             normalization: IRCalibrationNormalizationProvenance(source.mosaic.processing),
             clippingPolicy: session.clippingPolicy,
