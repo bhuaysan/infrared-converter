@@ -242,10 +242,26 @@ transform. A fit is therefore refused when the named patch is:
 
 ```text
 not measured at all
-excluded by the evidence     clipping, incomplete planes, a non-finite sample, the operator
-at or below zero in a plane  a neutral reference at zero defines no gain
-missing red, green or blue   a channel with no gain cannot be balanced
+excluded by the evidence      clipping, incomplete planes, a non-finite sample, the operator
+carrying any clipped sample   even one, and even when the policy would include it
+at or below zero in a plane   a neutral reference at zero defines no gain
+missing an expected plane     every plane of the layout has to be there, not every channel
 ```
+
+**Zero clipped samples, whatever the general clipping tolerance says.**
+`maximumClippedSampleFraction` decides whether an *ordinary* patch is included,
+and that judgement is bounded: a tolerated patch contributes one row to a fit
+with many rows, and the other rows constrain it. The neutral reference is not
+one row. Its gains multiply every channel of every fitted patch, so one censored
+sample inside it sets the white balance of the whole transform from a value the
+sensor did not record. A patch may therefore be included by the policy and
+refused as the neutral reference; that is the difference between what a patch
+contributes and what a reference decides.
+
+**Every expected plane, not merely every channel.** On a four-plane RGGB layout
+a neutral patch carrying `0 R, 1 G, 2 B` has all three channels and is still
+refused: its green gain would come from one phase, and every patch in the fit
+would be scaled by it. See section 7.
 
 The **evidence** may still record every one of those. A measurement is a
 historical fact and an exclusion is a judgement about it, so a session whose
@@ -304,6 +320,49 @@ Unweighted, so that a patch rectangle containing one more G1 site than G2 —
 which depends on where its corner lands on the CFA grid — cannot change the
 measured green. Because the per-plane means survive in the evidence, a different
 rule can be applied later without re-photographing anything.
+
+### The sensor's colour planes are recorded, not inferred
+
+A patch measurement carries the planes that were **present** inside its region,
+and nothing in a list of present planes says which planes were supposed to be
+there. Evidence in which every patch carries `0 R, 1 G, 2 B` on a four-plane
+RGGB sensor would look complete, and the fit would collapse a "pair" of one
+green and produce a transform fitted to half the green sites.
+
+That failure is invisible exactly when it is systematic: a plane missing from
+one patch is an incomplete patch, and a plane missing from every patch is
+nothing at all.
+
+So the measurement set records the **signature** of the sensor layout — an
+ordered `plane -> channel` list — read from the decoder's own colour
+description at the moment of measurement, by the same code the demosaicer uses:
+
+```text
+0 -> red
+1 -> green
+2 -> blue
+3 -> green
+```
+
+Never inferred from the patches. A genuinely three-plane Bayer layout, on which
+both green sites share plane `1`, records three entries and is right to.
+
+Every patch is then checked against it:
+
+```text
+a plane the layout has not           refused, always
+a plane recorded as another channel  refused, always
+every expected plane present         may be included, or excluded for any
+                                     reason except a claim of incompleteness
+a plane absent                       must be excluded, and if it claims
+                                     incompleteness it must name exactly the
+                                     planes that are absent
+```
+
+A **fitted** patch has to be complete. An **incomplete** patch may exist only as
+explicitly excluded evidence — which is a real thing that happens to a region
+near the edge of the active area, and evidence has to be able to record it —
+and it may not misdescribe which planes it lacks.
 
 ### Patch regions
 
@@ -443,7 +502,8 @@ missing, however well it fitted:
 - a serial number, when a specific body is claimed;
 - at least 12 included patches;
 - at least one degree of freedom;
-- no clipped samples among the fitted patches.
+- no clipped samples among the fitted patches;
+- every fitted patch complete against the recorded colour-plane signature.
 
 ---
 
@@ -459,8 +519,8 @@ fit            the transform, and how it fitted  derivable from the two above
 ```
 
 The measurement set records: its own identity, when, the target, the illuminant,
-the capture context (camera, conversion, filter — **by value**), the measurement
-domain and green policy, the normalisation provenance, the clipping policy, the
+the capture context (camera, conversion, filter — **by value**), the sensor's
+colour-plane signature, the measurement domain and green policy, the normalisation provenance, the clipping policy, the
 session white-balance policy, every patch's region and per-plane means and
 sample counts and clipped counts and inclusion, the author and tool, and the
 source file's **name** (never its path).
@@ -498,9 +558,10 @@ constructed in memory.
 
 Two consequences worth knowing before you edit one by hand:
 
-- **Editing a matrix, a residual or a conditioning figure makes the file
-  unreadable.** That is the point. Editing the evidence or the reference values
-  does too, because the matrix beside them is then a conclusion drawn from
+- **Material changes to fit-determining values, without recomputing the fit,
+  are refused.** Edit a matrix, a residual or a conditioning figure and the
+  recomputation disagrees; edit the evidence or the reference values and it
+  disagrees too, because the matrix beside them is then a conclusion drawn from
   numbers that are no longer there. Re-fit instead: a new calibration identity
   naming the same measurement set, with the old one left intact.
 - **A fit recorded by a method this build cannot reproduce is refused**, not
@@ -511,6 +572,31 @@ residuals that are legitimately zero — tight enough that no edit a person coul
 make and mean would pass, loose enough that a stored artefact survives
 last-place drift in a future build's arithmetic. It is one rule, in one place
 (`IRCalibrationFitAgreement`).
+
+### What this proves, and what it does not
+
+It proves **internal consistency**: that the conclusion in the file follows from
+the evidence in the file, by the method the file names. That is what makes a
+calibration reviewable.
+
+It is **not** tamper protection in the cryptographic sense — there is no
+signature, no MAC and no chain of custody. Anybody who edits the evidence *and*
+re-runs the fit gets a file that verifies, because it is a consistent
+calibration of whatever the edited evidence now says. It proves nothing about
+provenance or authorship: `provenance.author` is a string somebody typed. And it
+cannot check the fields the fit does not determine — the illuminant, the capture
+context, the notes, the source file name — because those are evidence about the
+world, and no arithmetic here can confirm them.
+
+### Older artefacts
+
+A calibration file at **schema version 1** predates the colour-plane signature
+and is refused rather than read. It is understood completely; what it lacks is
+the statement of which planes the sensor produced, and that cannot be recovered
+without inventing it — the patches are the inference the signature exists to
+remove, and "four planes means RGGB" is an assumption about somebody else's
+camera. Re-measure the chart and re-fit; the RAW file and the reference dataset
+are unchanged.
 
 ---
 
@@ -535,7 +621,9 @@ Capture
 Measure
   [ ] four chart corners marked, clockwise from the top left
   [ ] no patch excluded for clipping — if any was, re-expose and start again
-  [ ] session neutral patch chosen from the target (20, not 19), and unclipped
+  [ ] session neutral patch chosen from the target (20, not 19), with zero
+      clipped samples — not merely below the clipping tolerance
+  [ ] the recorded colour-plane signature matches the sensor you shot with
 
 Fit
   [ ] the fit converged, and the conditioning number is comfortably above 1e-9

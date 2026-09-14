@@ -725,3 +725,213 @@ missing gain is a typed refusal.
   `isValidatedInfraredCalibration` is still `false` everywhere.
 - No acceptance criteria were established; nothing reaches `validated`.
 - Preview and export are untouched, and neither resolves a calibration.
+
+---
+
+## Amendment (2026-09-14, second) — evidence states what it expected to measure
+
+Two further gaps from the same review. Both are cases where a rule was stated
+against the wrong quantity, so data that broke the rule passed it.
+
+### 1. A neutral reference may contain no clipped sample at all
+
+The previous amendment made the fit refuse a neutral reference the evidence had
+**excluded**. That turned out to be the wrong test, because whether a patch is
+excluded is decided by `IRCalibrationClippingPolicy`, and
+`maximumClippedSampleFraction` is configurable:
+
+```text
+clipped samples            1
+total samples            400
+maximum clipped fraction  0.01
+```
+
+Under that policy the patch is included, and could then define the session's
+white balance.
+
+The tolerance is defensible for an *ordinary* patch, and its defensibility is
+bounded: a tolerated patch contributes one row to a least-squares problem with
+many rows, and the other rows constrain it. The neutral reference is not one
+row. Its gains multiply every channel of every patch admitted to the fit, so a
+censored sample inside it does not perturb the fit — it displaces the white
+balance of the whole transform, from a value the sensor did not record.
+
+So the neutral reference requires `clippedSampleCount == 0` over every plane,
+independent of the policy, and `IRCalibrationFitter` refuses with
+`clippedNeutralReference` naming the patch and the counts. Zero is a definition
+here, not a threshold.
+
+A patch may therefore be included by the general policy and refused as the
+neutral reference, and that is not the two rules disagreeing. It is the
+difference between what a patch *contributes* and what a reference *decides*.
+
+As in the previous amendment, nothing is repaired: the policy is not rewritten,
+the evidence is not edited, the patch is not excluded behind the operator's
+back. The measurement stands exactly as recorded, because what happened is a
+fact. Re-expose the capture, or fit the session unbalanced.
+
+`IRCalibrationClippingPolicy`'s own initialiser was hardened while this was
+being written. It accepted any pair of `Double`s, including ones whose effect is
+silent rather than loud — a NaN threshold makes every clipping comparison false,
+so nothing is ever clipped and a saturated chart fits cleanly, which on the
+artefact is indistinguishable from a well-exposed one. A finite positive
+threshold and a fraction in `0...1` are now required, as typed domain errors,
+and decoding goes through the same initialiser. These are definitions, not new
+empirical constants; the default is still normalised saturation with no
+tolerance.
+
+### 2. Evidence records the sensor colour-plane signature
+
+Decision 3 records *where* responses were measured and decision 4 records *how*
+green is collapsed. Neither records **which colour planes the sensor produced**,
+and an `IRCalibrationPatchMeasurement` carries only the planes that were
+present inside its region.
+
+Nothing in a list of present planes says which planes were supposed to be
+there. So evidence assembled by hand, or read from an edited file, could carry
+
+```text
+0 -> R
+1 -> G
+2 -> B
+```
+
+for every patch of a four-plane RGGB sensor and look complete. The fitter would
+see red, green and blue, collapse a one-element green "pair" — the mean of one
+number — and produce a transform fitted to half the green sites, with nothing
+anywhere saying so. The measurement-set check was "has it red, green and blue?",
+which this passes.
+
+The failure is invisible precisely when it is systematic. A plane missing from
+one patch shows up as an incomplete patch; a plane missing from every patch
+shows up as nothing at all. Deriving the expectation from the measurements
+cannot catch it, because the measurements are what is in question.
+
+So `IRCalibrationMeasurementSet` carries an `IRCalibrationColorPlaneSignature`:
+an ordered `plane -> channel` list, sorted ascending by plane so two records of
+one layout are equal and encode identically.
+
+**The authority is the sensor layout at the moment of measurement.**
+`IRCalibrationMeasurementPipeline` already reads it, once, through
+`channelsByColorPlane(in:)` — the same reading of `colorDescription` the
+demosaicer uses — and that reading becomes the recorded signature. Never a union
+of the planes the patches happen to contain; never the first patch; never an
+assumption that four planes mean RGGB. A genuinely three-plane Bayer layout, on
+which both green sites share plane `1`, records three entries and is correct to.
+
+#### Completeness against the signature
+
+Every patch is checked when the evidence is built:
+
+```text
+plane not in the signature          refused, always
+plane recorded as another channel   refused, always
+every expected plane present        included, or excluded for any reason
+                                    except a claim of incompleteness
+a plane absent                      must be excluded, and a claim of
+                                    incompleteness must name exactly the
+                                    planes that are absent
+```
+
+The asymmetry between included and excluded is the point.
+
+A **fitted** patch must be complete, because collapsing a channel from fewer
+planes than the sensor has silently changes what was measured — on an RGGB
+layout, a green taken from one phase instead of the mean of two, which is
+exactly the phase dependence decision 4 exists to remove.
+
+An **excluded** patch may be incomplete, because incompleteness is a real thing
+that happens to a region near the edge of the active area, and evidence has to
+be able to record it. This is decision 7 again: a measurement is a historical
+fact and an exclusion is a judgement about it. What an excluded patch may not
+do is *misdescribe* which planes it lacks — an exclusion is the evidence's own
+account of why a patch was not fitted, and one naming planes other than the
+missing ones is a statement about a different patch.
+
+A patch excluded for some other reason entirely — a non-finite sample, an
+operator's judgement — is left alone: it makes no claim about which planes are
+present, so there is nothing to contradict.
+
+#### The neutral reference, again
+
+With the signature recorded, the fitter's neutral-reference check is against it
+rather than against "has it red, green and blue?". A four-plane neutral patch
+missing its second green has all three channels, and the gains it defines would
+balance green from one phase.
+
+Valid evidence can no longer reach that guard — an included patch is complete,
+and an excluded neutral reference was already refused — which is why it is
+stated there rather than trusted. `missingWhiteBalanceGain` stays for the same
+reason, as a layer that is now unreachable from valid evidence and is tested
+directly.
+
+### 3. Schema version 2, and version 1 is refused
+
+The signature is evidence, so it is persisted, and its absence and its presence
+mean different things about the fit a file carries. That is a schema-version
+bump rather than an optional field with a default: a reader that defaulted it
+would be deciding what somebody else's evidence said.
+
+```text
+<calibration id>.ircalibration.json   schema version 2
+```
+
+still independent of the capture profile's schema and of the photograph
+sidecar's, which did not move.
+
+A version 1 file is **refused**, with a typed
+`IRCalibrationRecordError.insufficientSchemaVersion` naming the field it lacks.
+It is understood completely — this is not a record from the future — and it is
+not migrated, because every available source for the missing signature is an
+invention:
+
+- the patches themselves are the inference the field exists to remove;
+- "four planes means RGGB" is an assumption about somebody else's camera.
+
+Reading an old calibration as though it carried evidence it does not is worse
+than refusing it, because the refusal is visible and the invention is not. No
+calibration in this project reaches a pixel, no capture profile references one,
+and the RAW files and reference datasets are unchanged, so the recovery is to
+re-measure and re-fit.
+
+### 4. What self-verification proves, stated more carefully
+
+The previous amendment's wording, and the protocol's, said that editing a
+number "makes the file unreadable". That is too strong in one direction and too
+weak in another, and the difference matters to somebody deciding what to trust.
+
+More precisely: **material changes to fit-determining values, without
+recomputing the fit, are refused.** A calibration's matrix, residuals,
+conditioning and sample count are recomputed from its evidence and reference
+dataset on construction, and an edit to any of those — or to the evidence or
+reference values they were derived from — makes the recomputation disagree, and
+the artefact is refused. An edit small enough to pass the `1e-12` agreement
+changes no digit anybody reads.
+
+What it does **not** prove:
+
+- It is not tamper protection in the cryptographic sense. There is no
+  signature, no MAC and no chain of custody. Anybody who edits the evidence
+  *and* re-runs the fit produces a file that verifies, because it is a
+  consistent calibration of whatever the edited evidence now says.
+- It says nothing about provenance or authorship. `provenance.author` is a
+  string somebody typed.
+- It does not check fields the fit does not determine — the illuminant, the
+  capture context, the notes, the source file name. Those are evidence about
+  the world, and no arithmetic here can confirm them.
+
+Self-verification proves **internal consistency**: that the conclusion in the
+file follows from the evidence in the file, by the method the file names. That
+is what makes a calibration reviewable, and it is a different claim from
+authenticity.
+
+### What did not change
+
+- `IRCaptureProcessingBasis` is untouched, `.explicitMatrix` still has no wire
+  format, and `isValidatedInfraredCalibration` is still `false` everywhere.
+- No acceptance criteria were established; nothing reaches `validated`.
+- The capture profile schema and the photograph sidecar schema did not move.
+- Preview, export, Metal, demosaicing and the reference dataset semantics are
+  untouched, and nothing resolves a calibration.
+- The illuminant model, the chart geometry, the lens scope and the solver are
+  unchanged.
