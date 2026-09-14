@@ -166,3 +166,51 @@ extension IRCaptureProfileID: Codable {
         try container.encode(rawValue)
     }
 }
+
+// MARK: - Namespaces, and who may claim them
+
+extension IRCaptureProfileID {
+
+    /// The namespace reserved for profiles a build of this application ships.
+    ///
+    /// It is reserved in one direction only: nothing stops this build from
+    /// adding `builtin.` profiles, and nothing lets a **user** profile claim
+    /// one. A stored user profile calling itself `builtin.uncalibrated` would
+    /// shadow the one profile every build guarantees, and a photograph that
+    /// resolved to it would render under a definition the application did not
+    /// author while reporting the identity that it did. See
+    /// `docs/decisions/0021-user-capture-profile-library.md`.
+    public static let builtinNamespace = "builtin"
+
+    /// The namespace `generatedUserID()` produces, and the one a person's own
+    /// profiles are expected to use.
+    ///
+    /// Not enforced on the way in: a profile file carrying, say, a `vendor.`
+    /// identity is readable by this build, because a future namespace must not
+    /// be unreadable for syntactic reasons. Only `builtin.` is refused.
+    public static let userNamespace = "user"
+
+    /// Whether this identity belongs to a namespace a user profile may not
+    /// claim.
+    public var isReserved: Bool { namespace == Self.builtinNamespace }
+
+    /// A fresh, stable identity for a profile a person is creating.
+    ///
+    /// ```text
+    /// user.550e8400-e29b-41d4-a716-446655440000
+    /// ```
+    ///
+    /// A UUID rather than a slug of the display name, and the choice is the
+    /// same one `IRCaptureProfileID` exists to make: a name is rewritten, and
+    /// an identity derived from it would change with it, silently taking every
+    /// photograph's profile away. Two profiles a person calls "720 nm" are also
+    /// two profiles, and a name-derived identity would make them one.
+    ///
+    /// A UUID's canonical spelling is lowercase hexadecimal and hyphens, which
+    /// is a subset of what a segment already allows, so the result validates by
+    /// construction — `try!` is honest here, and a test asserts it over many
+    /// draws rather than once.
+    public static func generatedUserID() -> IRCaptureProfileID {
+        try! IRCaptureProfileID("\(userNamespace).\(UUID().uuidString.lowercased())")
+    }
+}
