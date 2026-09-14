@@ -467,7 +467,11 @@ A camera model profile may contain:
 
 The first of these now exists, as `IRCaptureProfile`: a reusable, stably identified description of the camera, the sensor conversion and the filter, plus the one field that reaches a pixel — its `IRCaptureProcessingBasis`. A photograph references it by `IRCaptureProfileID`; the definition lives in a registry, never copied into a sidecar. Camera matching is exact, validates a selection a person already made, and never makes one. An unresolvable or mismatched profile refuses the photograph rather than being replaced by another. See `docs/decisions/0020-ir-capture-profile-foundation.md`.
 
-Nothing in it is a calibration. `isValidatedInfraredCalibration` is derived from the transform's own provenance rather than asserted by the profile, and it is `false` for every profile this project ships.
+Those definitions are now **persisted**, so a person can record a real capture configuration once and assign it to many photographs. One JSON file per profile, named by its validated identifier, in an application-owned Application Support folder, at a profile schema version of its own — independent of the photograph sidecar's. The registry is a composition of the built-in profiles and the loaded user ones, refusing a duplicate identity rather than resolving it; it is replaced, never mutated, through one owner, `IRCaptureProfileLibrary`, which is the only thing in the project that reads that folder. A corrupt file costs one profile and is reported; the built-in profile is a value and always exists. See `docs/decisions/0021-user-capture-profile-library.md`.
+
+**A user-defined profile is not a calibrated profile.** `isValidatedInfraredCalibration` is derived from the transform's own provenance rather than asserted by the profile, and it is `false` for every profile this project ships and every profile a user can create. Only `uncalibratedSensorRGB` has a wire format at all: `IRCaptureProcessingBasis` is deliberately not `Codable`, `.explicitMatrix` stays runtime-only, and attempting to persist one is a typed refusal rather than a silent downgrade — the alternative would turn an internal escape hatch into a public infrared-calibration interchange format that nothing validates.
+
+Identity is generated (`user.<uuid>`) and never derived from the display name, so renaming a profile breaks no photograph. `builtin.` is reserved: a user profile may neither save nor load under it. Editing a profile is an immutable replacement under the same identity, and it changes what every referencing photograph resolves to the next time it is opened — but it never touches any photograph's adjustments, and it never rewrites a sidecar, because the canonical state did not change.
 
 A `CaptureConfiguration` describes the physical camera state relevant to the photograph, for example:
 
@@ -1126,7 +1130,7 @@ Examples:
 ```text
 docs/decisions/0001-use-libraw.md
 docs/decisions/0006-working-color-space.md
-docs/decisions/0021-metal-render-pipeline.md
+docs/decisions/0022-metal-render-pipeline.md
 ```
 
 The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`. The creative channel-mix stage that depends on it is `docs/decisions/0007-infrared-channel-mixing.md`, the display boundary that turns its result into pixels is `docs/decisions/0008-display-preview-rendering.md`, the geometry stage between them is `docs/decisions/0009-application-owned-orientation.md`, and the user-owned orientation adjustment composed onto that is `docs/decisions/0010-user-owned-orientation-adjustment.md`.
@@ -1144,6 +1148,8 @@ That exposure is the third canonical user adjustment and the first continuous on
 That the full-resolution export restarts from the RAW file with the same canonical adjustments, that preview and export share the RAW front half and every adjustment stage and diverge only at resolution, range policy, bit depth and destination, why the exposure arithmetic and the sRGB transfer function each became one shared primitive, why a 16-bit integer TIFF still needs an explicit counted clip, why the pixels are oriented and the orientation tag is `1`, and why an export is a snapshot that neither waits for a preview nor writes a sidecar, is `docs/decisions/0018-full-resolution-tiff-export.md`.
 
 That a reusable capture profile is a different kind of state from a photograph-local adjustment, that a photograph's canonical state became the pair `capture-profile reference + ImageAdjustments`, that identity is a validated namespaced string rather than a display name or a path, that a profile's camera, conversion and filter are metadata while only its processing basis reaches a pixel, that an unresolvable or mismatched profile refuses the open rather than being substituted, that the registry holds definitions while the sidecar holds a reference, that the sidecar schema is at version 5 with a nested payload and tested version 1 to 4 migrations to `builtin.uncalibrated` proven pixel-neutral, that schema ownership moved off `ImageAdjustments`, that preview and export are handed the same resolved profile, and that a profile change costs a re-preparation only when its processing basis differs, is `docs/decisions/0020-ir-capture-profile-foundation.md`.
+
+That those definitions are now persisted — one JSON file per profile, named by its validated identifier, under an application-owned Application Support folder, at a profile schema version of its own that is independent of the sidecar's — that the registry became a composition of built-in and user profiles which refuses a duplicate identity rather than resolving it, that it is replaced rather than mutated through one owner (`IRCaptureProfileLibrary`) which is the only thing that reads that folder, that only `uncalibratedSensorRGB` has a wire format so `.explicitMatrix` stays runtime-only and a persistence attempt is a typed refusal rather than a silent downgrade, that identity is generated and never derived from the display name while `builtin.` is reserved in both directions, that a corrupt profile costs one profile and is reported rather than swallowed, that editing a definition is an immutable replacement which changes what every referencing photograph resolves to but touches no adjustment and rewrites no sidecar, that a render writes the sidecar only when it settles a pending decision, and that a missing or mismatched profile still refuses the open and now offers an explicit recovery to the built-in uncalibrated profile, is `docs/decisions/0021-user-capture-profile-library.md`.
 
 That the infrared white balance is a canonical **user adjustment** recorded as the neutral region a person picked rather than as the gains it produced, that the workspace retains the normalised mosaic so a new patch costs no decode, that the heavy re-preparation and the fast render are separate coalescing slots whose landing order is resolved in favour of the newest complete state, that the export resolves the same intent from the file rather than from any workspace cache, that the coordinate road from a click to a sensor coordinate depends on the layout and the orientation and on nothing else, that `isIdentity` is retired in favour of `isDefault`, and that the sidecar schema is at version 4 with tested version 1, 2 and 3 migrations to the historical centred patch, is `docs/decisions/0019-interactive-white-balance.md`.
 
@@ -1576,6 +1582,23 @@ Pause and reconsider when code begins to show any of these patterns:
 - a capture-processing decision that is a static constant inside a processing type rather than a resolved profile's choice
 - a schema version, or any persistence metadata, living on `ImageAdjustments` rather than on the record the sidecar holds
 - a sidecar record with two authorities for one field — adjustments both nested and at the top level
+- persisting a user capture-profile definition into every photograph sidecar instead of a stable reference
+- allowing user profiles to claim or overwrite `builtin.*` identities
+- making `IRCaptureProcessingBasis` `Codable` wholesale, and thereby giving `explicitMatrix` a file format by accident
+- silently downgrading an unpersistable processing basis to `uncalibratedSensorRGB` instead of refusing it
+- labelling a user-created profile calibrated because a person named a filter, a wavelength, a camera or a conversion vendor
+- deriving a stable profile identifier from a mutable display name, a file path, or anything else a rename can change
+- silently choosing one definition when two profile files claim the same identity, or discarding a whole library because one file is corrupt
+- reporting a corrupt or unreadable profile file as nothing at all, so a profile a person created vanishes without a word
+- silently falling back to `builtin.uncalibrated` when a photograph references a missing user profile, rather than refusing and offering an explicit recovery
+- editing a reusable profile and copying its metadata into `ImageAdjustments`, or letting any profile operation change a white balance, orientation, mix or exposure
+- rewriting a photograph's sidecar because a profile's *definition* changed, when its canonical state did not
+- reading the profile directory from `DocumentState`, or holding more than one registry per process
+- replacing the in-memory registry before the write that caused it has returned, so memory and disk disagree after a reported success
+- using the real Application Support directory from tests, or resolving it by building a path from the home directory
+- writing a profile file non-atomically, or creating the profile directory merely to read an empty library
+- a profile filename and payload that may disagree, so one definition can be stored at another profile's address
+- a "Calibrated" checkbox, a matrix field, or any control by which a user asserts a validation the project has not performed
 - every feature depending directly on LibRaw
 - direct Metal shader calls from UI views
 - tests requiring the entire app to run

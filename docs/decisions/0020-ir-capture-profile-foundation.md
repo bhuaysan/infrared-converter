@@ -222,10 +222,40 @@ both — and the domain model assumes nothing about the set being fixed. When
 user profiles are persisted they get their **own** schema version, independent
 of the photograph sidecar's.
 
+> **Amended by [ADR 0021](0021-user-capture-profile-library.md) (2026-09-14).**
+> The registry is no longer built-in only. It is now a **composition**:
+>
+> ```text
+> IRCaptureProfileRegistry(builtins: …, userProfiles: …)
+> ```
+>
+> of the profiles this build ships and the definitions loaded from a persisted
+> user library, and profile identifiers in sidecars can therefore genuinely
+> reference reusable definitions a person created.
+>
+> Everything above survives unchanged, and is what made the composition cheap:
+> the registry is still an **immutable value** with exact lookup, deterministic
+> listing by identity, and duplicate identities refused at construction rather
+> than resolved by load order. It is replaced, never mutated, through one owner
+> (`IRCaptureProfileLibrary`), so nothing resolves against a definition that
+> changed underneath it.
+>
+> The user library gets its own schema version — profile schema **1**, beside
+> the photograph sidecar's **5** — exactly as this decision anticipated, and
+> only the `uncalibratedSensorRGB` processing basis has a wire format at all:
+> `.explicitMatrix` remains runtime-only, and attempting to persist one is a
+> typed refusal rather than a silent downgrade.
+
 One simplification follows and is recorded rather than relied on: the set of
 profiles cannot change while an export runs. The export defends anyway, by
 carrying the resolved profile rather than an identifier to look up later, which
 is the behaviour a mutable registry would require.
+
+> **Amended by [ADR 0021](0021-user-capture-profile-library.md).** The
+> simplification is gone and the defence is now load-bearing: a person can edit
+> a profile while an export runs. Because the export carries the **resolved**
+> `IRCaptureProfile`, an edit affects the next export and not the running one,
+> and no registry lookup happens while an export is in flight.
 
 ### 7. The sidecar schema becomes version 5, and it nests
 
@@ -376,7 +406,15 @@ constant. Today it is `false` everywhere.
 
 Production ships one profile. A menu with a single item is not a choice; it is
 a control implying the application has capture configurations to offer when it
-has not. So the selection machinery exists in production —
+has not.
+
+> **Amended by [ADR 0021](0021-user-capture-profile-library.md).** There is now
+> more than one profile to offer, so the control is a menu: every profile, the
+> built-in ones first and then user profiles by display name, with a way into
+> the library. The reasoning is preserved rather than reversed — a profile that
+> does not describe this camera is listed and **disabled**, with the reason in
+> its help text, and there is still no free-text profile field and nothing that
+> picks a profile for the user. So the selection machinery exists in production —
 `DocumentState.setCaptureProfile`, the registry, the invalidation rule — and the
 control shows the current profile honestly until there is a second. Tests
 exercise selection with injected profiles rather than production growing fake
@@ -440,15 +478,25 @@ user's next decision renders and is saved.
 
 ## Known limitations
 
+> Two of these were lifted by [ADR 0021](0021-user-capture-profile-library.md),
+> and are marked below. The rest still stand.
+
 - **No calibration.** Every profile this build ships renders through the
   identity false-colour axis assignment. A named filter is context, not colour
-  science.
+  science. *(Still true. ADR 0021 persists user profiles and does not measure
+  anything: a user-defined profile is not a calibrated one.)*
 - **One production profile.** User-created profile definitions are not
   persisted, so the registry is built-in only and the picker shows one entry.
+  *(Lifted by ADR 0021: profiles are persisted, one JSON file each, under
+  Application Support.)*
 - **A camera mismatch is a dead end in the UI.** The document refuses to open,
   and the profile can only be changed by editing the sidecar. It is unreachable
   in production, where the only profile matches everything, and a deliberate
-  override is left to the milestone that ships user profiles.
+  override is left to the milestone that ships user profiles. *(Lifted by
+  ADR 0021: the refusal screen offers an explicit "Use Uncalibrated / Generic
+  Instead", for a mismatch as well as for a missing profile. It reopens the
+  photograph with every adjustment intact and is still an explicit user edit,
+  never a fallback.)*
 - **No recommendations, no "Apply Profile Recommendations" action.**
 - **No suggestion, no detection.** Nothing proposes a profile from a filename,
   a camera model or EXIF.

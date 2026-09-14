@@ -730,13 +730,24 @@ The two bases that exist:
 | Basis | Transform | What it is |
 | --- | --- | --- |
 | `.uncalibratedSensorRGB` | `.sensorRGBIdentityFalseColor` | What `builtin.uncalibrated` uses, and what every build before capture profiles applied. |
-| `.explicitMatrix(_:)` | `.explicit(matrix:)` | A matrix a profile's author supplied. No calibration claim, no UI, no persisted profile format that could carry it. |
+| `.explicitMatrix(_:)` | `.explicit(matrix:)` | A matrix a profile's author supplied. No calibration claim, no UI, and **no wire format**: it cannot be written to a profile file at all. |
 
 Neither is a validated infrared calibration, and
 `isValidatedInfraredCalibration` is derived from the transform's own provenance
 rather than asserted by the profile. A profile's camera name, conversion vendor
 and nominal filter wavelength are metadata and change none of that. See
 `docs/decisions/0020-ir-capture-profile-foundation.md`.
+
+Profiles are now persisted, so the second row needs stating rather than
+implying: `IRCaptureProcessingBasis` is deliberately **not** `Codable`, and the
+conversion to its persisted counterpart throws for `.explicitMatrix` rather than
+downgrading it. A saved user profile can only carry `.uncalibratedSensorRGB`.
+The reason is that the alternative is worse than an inconvenience — an internal
+escape hatch whose whole contract is "the coefficients are finite" would become
+a file format that photographers exchange as though it were characterisation
+data. A measured calibration would arrive as a third basis, with its evidence,
+under a new profile schema version. See
+`docs/decisions/0021-user-capture-profile-library.md`.
 
 Because the basis is the only route from a profile to a pixel, the workspace
 can answer "does selecting this profile need the photograph re-prepared?" from

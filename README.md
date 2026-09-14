@@ -249,7 +249,95 @@ Selecting a profile is always a person's decision. See
 
 If a sidecar names a profile this machine does not have, or one made for a
 different camera, the photograph does not open and says why. It is never
-rendered under some other profile that happens to be installed.
+rendered under some other profile that happens to be installed — and the screen
+that says so offers one explicit way out, described under
+[Your own capture profiles](#your-own-capture-profiles) below.
+
+### Your own capture profiles
+
+You can describe a real camera, conversion and filter once and use it for as
+many photographs as you like. **Capture Profiles…** in the profile menu opens
+the library:
+
+```text
+Capture Profile
+  My Olympus E-PL3 — R72
+
+  Camera       Olympus E-PL3
+  Conversion   Full Spectrum (Some Converter)
+  Filter       720 nm nominal long-pass
+  Processing   Uncalibrated sensor RGB
+  Calibration  No
+```
+
+Assign that profile to a hundred photographs and all hundred resolve the same
+definition. What stays **per photograph** is everything you decided about that
+frame:
+
+```text
+shared by every photograph using the profile   camera, conversion, filter, processing
+kept per photograph                            white balance patch, orientation,
+                                               channel mix, exposure
+```
+
+Two photographs under one profile can have completely different neutral patches,
+and editing the profile changes neither of them.
+
+> **A user-defined profile is descriptive capture context, not a measured
+> infrared colour calibration.**
+>
+> Writing "720 nm" in a profile records what the box your filter came in said.
+> It is not a spectral measurement, it does not characterise your converted
+> sensor, and it changes no pixel: every profile you can create uses the same
+> uncalibrated sensor-RGB processing the built-in one does. The editor has no
+> matrix field and no "Calibrated" checkbox, because validation is something
+> this project would have to perform and report — never something you can assert.
+
+Profiles are stored one JSON file each, under an application-owned folder:
+
+```text
+~/Library/Application Support/Infrared Converter/Profiles/
+  user.550e8400-e29b-41d4-a716-446655440000.irprofile.json
+```
+
+```json
+{
+  "schemaVersion" : 1,
+  "id" : "user.550e8400-e29b-41d4-a716-446655440000",
+  "name" : "My Olympus E-PL3 — R72",
+  "cameraMatch" : { "kind" : "camera", "make" : "OLYMPUS IMAGING CORP.", "model" : "E-PL3" },
+  "sensorConversion" : { "kind" : "fullSpectrum", "vendor" : "Some Converter" },
+  "filter" : { "kind" : "longPass", "nominalCutoffNanometers" : 720 },
+  "processingBasis" : { "kind" : "uncalibratedSensorRGB" }
+}
+```
+
+The identifier is generated and is **not** the name, so renaming a profile
+breaks no photograph: rename "E-PL3 R72" to "My Olympus 720" and every sidecar
+still resolves, and none of them is rewritten. A profile's own schema version is
+its own — `1` here, beside the photograph sidecar's `5` — because the two
+artefacts change for different reasons.
+
+A few things the library deliberately refuses:
+
+- **The built-in profile cannot be renamed, edited or deleted**, and a stored
+  profile may not claim a `builtin.` identifier.
+- **One corrupt profile file costs one profile.** The rest of the library loads,
+  the built-in profile is always there, and the library sheet says how many
+  files would not load and why. Nothing is repaired or deleted.
+- **Two files claiming one identifier are both refused**, rather than one being
+  picked by whichever the folder listing happened to return first.
+- **Deleting a profile is warned about and never repaired.** Photographs that
+  reference it will refuse to open until you assign them another profile; the
+  application does not go looking for them.
+
+When a photograph does refuse because its profile is missing — or was made for
+another camera — the screen offers **Use Uncalibrated / Generic Instead**. That
+is an explicit edit, not a fallback: the photograph reopens under
+`builtin.uncalibrated` with your white balance, rotation, channel mix and
+exposure exactly as you left them, and the new selection is saved once it has
+actually rendered. See
+[ADR 0021](docs/decisions/0021-user-capture-profile-library.md).
 
 ### One record, four adjustments
 
@@ -721,16 +809,27 @@ See [RAW/README.md](RAW/README.md).
   applies the identity false-colour axis assignment, which is what every
   earlier build did. There are no measured camera matrices, no spectral
   response data and no validated infrared colour anywhere in this project.
-- **There is exactly one capture profile, and no way to create another.**
-  User-defined profile definitions are not persisted, so the registry is
-  built-in only and the control shows the current profile rather than offering
-  a menu of one. A photograph may still name any profile in its sidecar, and an
-  unknown one is refused rather than substituted.
-- **A capture profile made for another camera is a dead end in the UI.** The
-  photograph refuses to open, and the only way to change the profile is to edit
-  the sidecar. It is unreachable in this build, where the one profile matches
-  every camera, and a deliberate override is left to the milestone that ships
-  user-defined profiles.
+- **A user-defined profile is not a calibrated profile.** Every profile you can
+  create renders through the same identity false-colour axis assignment the
+  built-in one does. Naming an E-PL3, a full-spectrum conversion, a converter
+  and a 720 nm filter records your capture configuration in your own words; it
+  measures nothing, and the inspector says `Calibration — No`.
+- **A filter is a nominal cutoff or a product name, not both.** "Hoya R72" and
+  "720 nm nominal" cannot be recorded at once. The workaround is to put the
+  product name in the profile's own name, as the example above does.
+- **No profile import, export, sharing or sync.** Profiles are small JSON files
+  you can copy by hand; nothing in the application helps you, and there is no
+  package format, no drag and drop and no iCloud.
+- **Nothing watches the profile folder.** The library is read once at launch and
+  refreshed by its own writes, so a profile added by another process appears at
+  the next launch. Creating, editing or deleting one inside the app needs no
+  restart.
+- **A profile cannot be deleted while the open photograph is using it.**
+  Reassign the photograph first. It is the simpler policy, and it makes the
+  consequence visible while you are still thinking about it.
+- **Deleting a profile leaves references behind, by design.** Photographs that
+  name it will refuse to open until you reassign them. Nothing scans your disks,
+  nothing is rewritten, and the refusal offers the recovery above.
 - **No profile recommendations.** A profile carries no suggested channel mix or
   white-balance strategy, and nothing is ever copied into your adjustments by
   selecting one.
