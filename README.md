@@ -339,6 +339,58 @@ exposure exactly as you left them, and the new selection is saved once it has
 actually rendered. See
 [ADR 0021](docs/decisions/0021-user-capture-profile-library.md).
 
+### Calibration — what exists, and what it deliberately does not
+
+No capture profile in this build is calibrated, and this milestone did not
+change that. What it built is the thing that has to exist *before* a calibration
+can: a way to record what was measured, under what conditions, against what
+reference, and how well the resulting transform fitted.
+
+```text
+IRCalibrationMeasurementSet    what the camera produced       immutable evidence
+IRCalibrationReferenceDataset  what it should have produced   identified, versioned
+IRCalibrationFitResult         the transform and its error    derived from both
+IRCalibration                  all three, checked together    one JSON file
+```
+
+A calibration artefact carries per-patch, per-colour-plane means measured from
+the **normalised mosaic** — before white balance, before demosaicing, before any
+colour transform — together with the target, the illuminant, the camera, the
+sensor conversion and the filter **as they were at the moment of measurement**,
+the clipping policy, the session's own neutral reference, the author, and every
+patch's signed residual. RMSE and the maximum residual are computed from those
+residuals rather than stored beside them, so they cannot disagree.
+
+Three things it will not do:
+
+- **It will not call anything validated.** Status is derived —
+  `experimental` / `measured` / `validated` — and this project establishes no
+  acceptance criteria, because there is no justified threshold for an infrared
+  false-colour calibration and inventing one would turn a residual you could
+  judge for yourself into a verdict the software appears to have justified. The
+  best any calibration reaches is `measured`, and
+  `isValidatedInfraredCalibration` is `false` everywhere.
+- **It will not fit from bad data.** A patch containing any clipped sample is
+  excluded; collinear, under-sampled, zero-channel and non-finite data are
+  refused with reasons rather than turned into coefficients. There is no
+  regularisation, no offset term and no weighting — a fit stabilised by an
+  undocumented prior is not a measurement.
+- **It will not let a photograph's white balance become a camera's.** The
+  measurement path never reads a sidecar. A calibration session has its own
+  neutral reference, taken from a patch of the target, and the gains are
+  re-derived from the stored evidence on every fit.
+
+Calibrations persist as one file each, `calibration.<uuid>.ircalibration.json`,
+in `Application Support/Infrared Converter/Calibrations/`, at a schema version
+independent of both the profile schema and the photograph sidecar schema.
+
+There is **no user interface for any of this**, no bundled reference dataset,
+and no way for a capture profile to reference a calibration. See
+[ADR 0022](docs/decisions/0022-calibration-evidence-and-measurement-protocol.md)
+for why each of those is deliberate, and
+[the measurement protocol](docs/calibration-protocol.md) for what a person would
+actually have to do.
+
 ### One record, four adjustments
 
 All four are fields of one record, and every request is that whole record —
@@ -809,6 +861,27 @@ See [RAW/README.md](RAW/README.md).
   applies the identity false-colour axis assignment, which is what every
   earlier build did. There are no measured camera matrices, no spectral
   response data and no validated infrared colour anywhere in this project.
+- **Nothing has been measured.** The calibration evidence model, the measurement
+  path, the solver and the persistence format all exist and are tested against
+  synthetic data. No real measurement of any camera, conversion or filter has
+  been made, no reference dataset is bundled, and no acceptance criteria are
+  established — so no calibration can reach `validated`, by design.
+- **Calibration has no user interface.** Measurement is an API taking a RAW file,
+  a manually marked chart outline and a session description. There is no
+  chart-marking view, no calibration inspector and no library window; a
+  read-only inspector would currently have nothing to inspect.
+- **No capture profile can reference a calibration.** `IRCaptureProcessingBasis`
+  is unchanged, the profile schema is still version 1, and `.explicitMatrix`
+  remains runtime-only and unvalidated. Preview and export are untouched and
+  neither resolves a calibration.
+- **Chart registration is manual and bilinear.** Four corners are marked by
+  hand — there is no automatic chart detection, and none is planned. The mapping
+  is exact for an affine arrangement and approximate for a perspective one, so a
+  chart photographed at a steep angle is approximated and a steep enough one is
+  refused. Photograph the chart square-on.
+- **One calibration target and one measurement domain.** ColorChecker Classic 24,
+  measured as CFA plane means. Body serial numbers are not read from RAW files,
+  so a specific-body claim is an evidence gap until a caller supplies one.
 - **A user-defined profile is not a calibrated profile.** Every profile you can
   create renders through the same identity false-colour axis assignment the
   built-in one does. Naming an E-PL3, a full-spectrum conversion, a converter

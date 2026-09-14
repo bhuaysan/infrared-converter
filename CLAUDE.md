@@ -298,6 +298,7 @@ InfraredConverter/
 │   ├── CameraProfile.swift
 │   └── CaptureConfiguration.swift
 ├── Infrared/
+│   ├── Calibration/
 │   ├── InfraredWhiteBalance.swift
 │   ├── InfraredFilterProfile.swift
 │   ├── InfraredColorTransform.swift
@@ -393,6 +394,8 @@ Visible-light camera transforms and IR-specific calibration transforms are separ
 Do not use a standard camera matrix merely because LibRaw or metadata exposes one. Its calibration domain must be understood before applying it to IR data.
 
 A capture profile naming a camera, a conversion vendor and a nominal filter wavelength is **not** a calibration either. Those fields are context that lets a person tell two configurations apart and lets the application refuse a profile applied to the wrong body. Only measured, documented data makes a transform calibrated, and none exists in this project.
+
+What such data has to consist of is now defined. A calibration is an artefact carrying three things together — the measurement evidence, the reference dataset it was fitted against, and the fitted transform with its per-patch residuals — plus the capture context it was measured against, **by value**, so that editing a profile afterwards cannot falsify it. Validation status is derived from that evidence and from acceptance criteria; it is never a stored flag. This project establishes no acceptance criteria, so nothing reaches `validated` and `isValidatedInfraredCalibration` is `false` everywhere. The objective is a **defined infrared false-colour calibration**, never a recovery of human-visible scene colour from infrared photons. See `docs/decisions/0022-calibration-evidence-and-measurement-protocol.md` and `docs/calibration-protocol.md`.
 
 When adding any color matrix or transform, document:
 
@@ -1119,6 +1122,7 @@ docs/
 ├── color-management.md
 ├── camera-profiles.md
 ├── filter-profiles.md
+├── calibration-protocol.md
 ├── testing.md
 └── decisions/
 ```
@@ -1130,7 +1134,7 @@ Examples:
 ```text
 docs/decisions/0001-use-libraw.md
 docs/decisions/0006-working-color-space.md
-docs/decisions/0022-metal-render-pipeline.md
+docs/decisions/0023-metal-render-pipeline.md
 ```
 
 The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`. The creative channel-mix stage that depends on it is `docs/decisions/0007-infrared-channel-mixing.md`, the display boundary that turns its result into pixels is `docs/decisions/0008-display-preview-rendering.md`, the geometry stage between them is `docs/decisions/0009-application-owned-orientation.md`, and the user-owned orientation adjustment composed onto that is `docs/decisions/0010-user-owned-orientation-adjustment.md`.
@@ -1152,6 +1156,8 @@ That a reusable capture profile is a different kind of state from a photograph-l
 That those definitions are now persisted — one JSON file per profile, named by its validated identifier, under an application-owned Application Support folder, at a profile schema version of its own that is independent of the sidecar's — that the registry became a composition of built-in and user profiles which refuses a duplicate identity rather than resolving it, that it is replaced rather than mutated through one owner (`IRCaptureProfileLibrary`) which is the only thing that reads that folder, that only `uncalibratedSensorRGB` has a wire format so `.explicitMatrix` stays runtime-only and a persistence attempt is a typed refusal rather than a silent downgrade, that identity is generated and never derived from the display name while `builtin.` is reserved in both directions, that a corrupt profile costs one profile and is reported rather than swallowed, that editing a definition is an immutable replacement which changes what every referencing photograph resolves to but touches no adjustment and rewrites no sidecar, that a render writes the sidecar only when it settles a pending decision, and that a missing or mismatched profile still refuses the open and now offers an explicit recovery to the built-in uncalibrated profile, is `docs/decisions/0021-user-capture-profile-library.md`.
 
 That the infrared white balance is a canonical **user adjustment** recorded as the neutral region a person picked rather than as the gains it produced, that the workspace retains the normalised mosaic so a new patch costs no decode, that the heavy re-preparation and the fast render are separate coalescing slots whose landing order is resolved in favour of the newest complete state, that the export resolves the same intent from the file rather than from any workspace cache, that the coordinate road from a click to a sensor coordinate depends on the layout and the orientation and on nothing else, that `isIdentity` is retired in favour of `isDefault`, and that the sidecar schema is at version 4 with tested version 1, 2 and 3 migrations to the historical centred patch, is `docs/decisions/0019-interactive-white-balance.md`.
+
+That calibration evidence is a first-class artefact rather than a matrix, that measurement evidence and the fitted result are separate things with separate identities so a refit rewrites no history, that the camera, conversion and filter a calibration was measured against are snapshotted by value rather than referenced through a mutable profile, that responses are measured as per-colour-plane means of the normalised mosaic before demosaicing and the two green planes are collapsed by a named reversible rule, that a calibration session has its own neutral reference which is never a photograph's white balance, that clipped patches are excluded rather than averaged in, that the solver refuses degenerate data instead of emitting coefficients and applies no offset, no regularisation and no weighting, that per-patch residuals are stored while every other metric is derived from them, that validation status is derived and this project establishes no acceptance criteria so nothing is validated, that calibrations persist as one file each in their own folder at a schema version independent of the profile and sidecar schemas, and that no capture profile becomes calibrated and `.explicitMatrix` is not promoted, is `docs/decisions/0022-calibration-evidence-and-measurement-protocol.md`. Its human-executable companion is `docs/calibration-protocol.md`.
 
 ADR numbers are assigned in the order decisions are actually made; do not reuse a number that is already taken.
 
@@ -1599,6 +1605,22 @@ Pause and reconsider when code begins to show any of these patterns:
 - writing a profile file non-atomically, or creating the profile directory merely to read an empty library
 - a profile filename and payload that may disagree, so one definition can be stored at another profile's address
 - a "Calibrated" checkbox, a matrix field, or any control by which a user asserts a validation the project has not performed
+- calling a 3×3 matrix a validated calibration without stored measurement evidence
+- making `explicitMatrix` the persisted calibrated case, or giving it a wire format so that a measured transform has somewhere to go
+- storing only a matrix and discarding the target, the illuminant and the residuals
+- using 8-bit, sRGB-encoded, clipped or preview pixels for calibration fitting
+- fitting from clipped calibration patches, or tolerating a clipped sample because re-photographing the chart was inconvenient
+- baking a photograph-local neutral patch into a reusable profile calibration
+- treating a nominal 720 nm label as a measured spectral response, or matching a calibration to a profile by wavelength
+- using mutable profile metadata as the only description of what a calibration was measured against
+- a boolean `isValidated` flag that can disagree with the evidence, or a status stored rather than derived
+- silently falling back to uncalibrated processing when a referenced calibration artefact is missing
+- a calibration whose residual list does not correspond to the patches it claims to have fitted
+- an error metric stored beside the residuals it is derivable from, so the two can disagree
+- a solver that stabilises ill-conditioned data with an undocumented prior instead of refusing it
+- an acceptance threshold invented because it sounded small, rather than justified by measurements and recorded in an ADR
+- automatic chart detection, or any calibration input a person did not deliberately mark
+- calibration evidence written into a photograph sidecar, or a calibration and a profile sharing one schema, one folder or one counter
 - every feature depending directly on LibRaw
 - direct Metal shader calls from UI views
 - tests requiring the entire app to run

@@ -490,6 +490,47 @@ profiles by wavelength.
 - **No recommendations.** A profile describes capture context and suggests no
   white balance, mix, exposure or orientation.
 
+## Amendment — 2026-09-14, after ADR 0022
+
+[ADR 0022](0022-calibration-evidence-and-measurement-protocol.md) built the
+calibration evidence model, and two things this decision said need stating more
+precisely now that there is something to be precise about.
+
+**`.explicitMatrix` remains runtime-only and unvalidated.** It was not promoted
+to the calibrated case, it did not gain a wire format, and it did not become the
+persisted basis for a measured transform. Decision 5 said a measured calibration
+"would arrive as a second persisted case, carrying its evidence, under a new
+schema version"; ADR 0022 built the evidence and deliberately did **not** add
+that case, because validation requires acceptance criteria that do not yet
+exist.
+
+**The first persistable calibrated basis must be backed by calibration
+evidence, not by making `explicitMatrix` `Codable`.** That is the whole point of
+the refusal in `PersistedIRCaptureProcessingBasis`. A persisted calibrated basis
+must reference an `IRCalibration` — a measurement set, the reference dataset it
+was fitted against, the fitted transform, and its residuals — so that the
+question "why is this transform valid?" has an answer that is not the transform
+itself. Nine coefficients given a file format are nine coefficients; they do not
+become a calibration by being saved.
+
+Two smaller corrections, both made in the same milestone and both folded into
+the text above rather than left to this note:
+
+- Decision 7's claim that an ambiguous pair on disk is "both excluded and
+  reported" described a branch this store cannot actually reach. A profile's
+  filename is its identity and a payload that disagrees with its name is
+  refused, so one identity has exactly one address on disk. The duplicate scan
+  stays as defence in depth; the reachable refusal is the registry's.
+- Decision 8's scan rule split into three outcomes. A file wearing
+  `.irprofile.json` whose name does not spell a valid identifier is now reported
+  as `invalidProfileFilename` rather than ignored as though it were somebody's
+  note.
+
+Also, and for the same reason ADR 0022's store repeats every judgement made
+here: the calibration store is a **second** store, in a second folder, at a
+schema version of its own. Profiles and calibrations are not merged, and a
+calibration is never written into a profile file or a photograph sidecar.
+
 ## Non-goals
 
 Calibration matrices, a matrix editor, measured-calibration schemas, spectral

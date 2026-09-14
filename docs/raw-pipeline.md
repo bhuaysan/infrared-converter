@@ -2216,8 +2216,13 @@ of *those*, plus image quality:
   transform for a given camera, conversion and filter, and how that is
   persisted and versioned.
 - Whether a **visible-light matrix is ever appropriate for infrared capture**.
-  The adapter exists as an opt-in diagnostic; that is not an endorsement, and
-  no IR calibration methodology has been decided.
+  The adapter exists as an opt-in diagnostic; that is not an endorsement. The
+  IR calibration *methodology* is no longer open — ADR 0022 and
+  `docs/calibration-protocol.md` define what a calibration is, how its evidence
+  is measured, how a transform is fitted from it and what it may claim — but
+  nothing has been measured, no reference dataset exists, no acceptance criteria
+  are established, and no capture profile can reference a calibration. See
+  below.
 - **A real tone pipeline.** ADR 0008 decided a clip and an encode, and
   explicitly not Reinhard, filmic curves, shoulder/toe curves, local operators,
   highlight reconstruction or automatic exposure. Those remain open, and the
@@ -2269,6 +2274,17 @@ of *those*, plus image quality:
   region. ADR 0003 records how gains are applied and ADR 0004 how they are
   estimated from a selected patch; automatic estimation, robust statistics and
   filter profiles remain open.
+- **The first real calibration.** The evidence model, the measurement path, the
+  least-squares solver and the persistence format exist and are tested against
+  synthetic data (ADR 0022). What does not exist is a measurement: no reference
+  dataset is bundled, no chart has been photographed, no acceptance criteria are
+  established, `IRCaptureProcessingBasis` gained no calibrated case, the profile
+  schema is unchanged, and `isValidatedInfraredCalibration` is `false` for every
+  profile this build can hold. Calibration measurements are taken from the
+  **normalised mosaic**, before white balance and before demosaicing, so they do
+  not depend on the demosaic algorithm; the transform a calibration would
+  eventually supply belongs at the camera-to-working stage, where the capture
+  profile's basis already sits.
 - Whether the mosaic path should ever expose the masked border, e.g. for
   measuring the black level from the optical-black region instead of trusting
   LibRaw's own estimate (see "Masked pixels and who owns black estimation").
