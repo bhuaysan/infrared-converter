@@ -29,6 +29,23 @@ public enum IRCalibrationRecordError: Error, Equatable {
     /// depends on.
     case unsupportedSchemaVersion(found: Int, supported: Int)
 
+    /// The record declares a schema version this build knows and can no
+    /// longer treat as evidence.
+    ///
+    /// Distinct from ``unsupportedSchemaVersion``, which is a record from the
+    /// *future*. This one is from the past: its shape is understood
+    /// completely, and it lacks something the current integrity contract
+    /// requires — today, the sensor colour-plane signature a fit must be
+    /// checkable against.
+    ///
+    /// Refused rather than migrated. A migration would have to supply the
+    /// missing value, and the only sources available are the measurements
+    /// themselves — the inference the field was added to remove — or an
+    /// assumption about the sensor. Reading an old calibration as though it
+    /// carried evidence it does not is worse than refusing it, because the
+    /// refusal is visible and the invention is not.
+    case insufficientSchemaVersion(found: Int, missing: String, reason: String)
+
     /// A field the record's version requires is absent, or explicitly `null`.
     ///
     /// Never defaulted. A calibration with no fit is not a calibration with a
@@ -73,6 +90,8 @@ extension IRCalibrationRecordError: LocalizedError {
         switch self {
         case .unsupportedSchemaVersion:
             return "This calibration was written by a newer version."
+        case .insufficientSchemaVersion:
+            return "This calibration was written before it recorded everything it must."
         case .missingField:
             return "This calibration is missing a required value."
         case .unexpectedField:
@@ -91,6 +110,11 @@ extension IRCalibrationRecordError: LocalizedError {
                 The file says schema version \(found); this version reads up to \(supported). \
                 It was not read as an older record: a newer one may carry evidence or a fit \
                 shape this build does not model, and guessing would silently drop it.
+                """
+        case .insufficientSchemaVersion(let found, let missing, let reason):
+            return """
+                The file says schema version \(found), which this version reads but no longer \
+                accepts as evidence: it carries no "\(missing)". \(reason)
                 """
         case .missingField(let field, let version):
             return """

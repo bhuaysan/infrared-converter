@@ -7,7 +7,7 @@ import Foundation
 /// ```text
 /// <RAW name>.iradjustments.json   one photograph's state   schema version 5
 /// <profile id>.irprofile.json     one reusable profile     schema version 1
-/// <calibration id>.ircalibration.json   one measured artefact   schema version 1
+/// <calibration id>.ircalibration.json   one measured artefact   schema version 2
 /// ```
 ///
 /// A calibration's schema is its own counter, sharing nothing with the
@@ -41,12 +41,32 @@ extension IRCalibration {
     public enum PersistedSchemaVersion: Int, CaseIterable, Sendable {
         /// Identity, name, one measurement set, one reference dataset and one
         /// fit result, each carrying its own full evidence.
+        ///
+        /// **Known, and no longer sufficient.** A version 1 record's evidence
+        /// carries the colour planes each patch *contained* and no statement
+        /// of which planes the sensor layout produced, so a systematically
+        /// absent plane is indistinguishable in it from a layout that never
+        /// had one. This build refuses such a file rather than reading it: the
+        /// signature cannot be reconstructed from the patches without making
+        /// exactly the inference it exists to remove, and assuming that four
+        /// planes mean RGGB would be inventing evidence to preserve
+        /// compatibility. See ``IRCalibrationColorPlaneSignature``.
         case initial = 1
+
+        /// Adds `measurements.colorPlaneSignature`: the colour planes the
+        /// sensor layout produced at the moment of measurement, and which RGB
+        /// channel each one is.
+        ///
+        /// A new version rather than an optional field on version 1, because
+        /// its absence and its presence mean different things about the fit
+        /// that was performed, and a reader that defaulted it would be
+        /// deciding what somebody else's evidence said.
+        case withColorPlaneSignature = 2
 
         /// The version this build writes. Named explicitly, so adding a case
         /// does not by itself change what is written; a test asserts that it
         /// is the highest case.
-        public static let current = PersistedSchemaVersion.initial
+        public static let current = PersistedSchemaVersion.withColorPlaneSignature
 
         /// The first version any build of this project wrote.
         public static let first = PersistedSchemaVersion.initial
@@ -109,10 +129,28 @@ public struct IRCalibrationRecord: Codable, Sendable {
         let schema = try Self.schemaVersion(in: container)
         let version = schema.rawValue
 
-        // Exhaustive, with no `default`: a version 2 added later is a compile
-        // error here rather than a silent reading of it as version 1.
+        // Exhaustive, with no `default`: a version 3 added later is a compile
+        // error here rather than a silent reading of it as version 2.
         switch schema {
         case .initial:
+            // Readable as a document, and not usable as evidence. See
+            // `PersistedSchemaVersion.initial`.
+            throw IRCalibrationRecordError.insufficientSchemaVersion(
+                found: schema.rawValue,
+                missing: "measurements.colorPlaneSignature",
+                reason: """
+                    A version \(schema.rawValue) calibration records the colour planes each \
+                    patch contained and never states which planes the sensor layout produced. \
+                    A plane absent from every patch is therefore invisible in it, and the fit \
+                    it carries cannot be shown to have used every plane the sensor has. The \
+                    signature is not reconstructed from the patches, because that inference is \
+                    exactly what this version added the field to remove, and it is not assumed \
+                    to be RGGB, because that would be inventing evidence. Re-measure the chart \
+                    and re-fit; the RAW file and the reference dataset are unchanged.
+                    """
+            )
+
+        case .withColorPlaneSignature:
             let id = try Self.require(
                 IRCalibrationID.self, .id, in: container, schemaVersion: version
             )
@@ -796,6 +834,57 @@ private enum PersistedLinearRGBChannelToken: String {
     }
 }
 
+/// `IRCalibrationColorPlaneSignature`, on the wire: an ordered array of
+/// `{colorPlane, channel}`, written ascending by plane so that two records of
+/// the same layout are byte-identical.
+///
+/// Reconstructed through the signature's own validating initialiser, so a file
+/// whose signature names one plane twice, or has no blue plane, is refused
+/// rather than accepted and discovered later by a fit.
+private struct PersistedColorPlaneSignature: Codable, CalibrationRecordField {
+    static let fieldName = "measurements.colorPlaneSignature"
+
+    let value: IRCalibrationColorPlaneSignature
+
+    init(_ value: IRCalibrationColorPlaneSignature) { self.value = value }
+
+    private struct PersistedEntry: Codable {
+        let colorPlane: Int
+        let channel: String
+    }
+
+    init(from decoder: Decoder) throws {
+        let entries = try decoder.singleValueContainer().decode([PersistedEntry].self)
+        var decoded: [IRCalibrationColorPlaneSignature.Entry] = []
+        decoded.reserveCapacity(entries.count)
+        for entry in entries {
+            guard let token = PersistedLinearRGBChannelToken(rawValue: entry.channel) else {
+                throw IRCalibrationRecordError.unknownToken(
+                    field: "\(Self.fieldName).channel", token: entry.channel
+                )
+            }
+            decoded.append(
+                IRCalibrationColorPlaneSignature.Entry(
+                    colorPlane: entry.colorPlane, channel: token.channel
+                )
+            )
+        }
+        value = try IRCalibrationColorPlaneSignature(decoded)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(
+            value.entries.map {
+                PersistedEntry(
+                    colorPlane: $0.colorPlane,
+                    channel: PersistedLinearRGBChannelToken($0.channel).rawValue
+                )
+            }
+        )
+    }
+}
+
 /// `IRCalibrationPlaneMeasurement`, on the wire.
 private struct PersistedPlaneMeasurement: Codable, CalibrationRecordField {
     static let fieldName = "measurements.patches.planes"
@@ -1007,8 +1096,9 @@ private struct PersistedMeasurementSet: Codable, CalibrationRecordField {
     init(_ value: IRCalibrationMeasurementSet) { self.value = value }
 
     private enum CodingKeys: String, CodingKey {
-        case id, measuredAt, target, illuminant, captureContext, domain,
-             normalization, clippingPolicy, whiteBalancePolicy, patches, provenance, sourceFileName
+        case id, measuredAt, target, illuminant, captureContext, colorPlaneSignature,
+             domain, normalization, clippingPolicy, whiteBalancePolicy, patches,
+             provenance, sourceFileName
     }
 
     init(from decoder: Decoder) throws {
@@ -1036,6 +1126,9 @@ private struct PersistedMeasurementSet: Codable, CalibrationRecordField {
         let captureContext = try Self.require(
             PersistedCaptureContext.self, CodingKeys.captureContext, in: container
         ).value
+        let colorPlaneSignature = try Self.require(
+            PersistedColorPlaneSignature.self, CodingKeys.colorPlaneSignature, in: container
+        ).value
         let domain = try Self.require(
             PersistedMeasurementDomain.self, CodingKeys.domain, in: container
         ).value
@@ -1062,6 +1155,7 @@ private struct PersistedMeasurementSet: Codable, CalibrationRecordField {
             target: target,
             illuminant: illuminant,
             captureContext: captureContext,
+            colorPlaneSignature: colorPlaneSignature,
             domain: domain,
             normalization: normalization,
             clippingPolicy: clippingPolicy,
@@ -1081,6 +1175,9 @@ private struct PersistedMeasurementSet: Codable, CalibrationRecordField {
         try container.encode(value.target.rawValue, forKey: .target)
         try container.encode(PersistedIlluminant(value.illuminant), forKey: .illuminant)
         try container.encode(PersistedCaptureContext(value.captureContext), forKey: .captureContext)
+        try container.encode(
+            PersistedColorPlaneSignature(value.colorPlaneSignature), forKey: .colorPlaneSignature
+        )
         try container.encode(PersistedMeasurementDomain(value.domain), forKey: .domain)
         try container.encode(
             PersistedNormalizationProvenance(value.normalization), forKey: .normalization
