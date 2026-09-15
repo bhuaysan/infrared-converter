@@ -935,3 +935,203 @@ authenticity.
   untouched, and nothing resolves a calibration.
 - The illuminant model, the chart geometry, the lens scope and the solver are
   unchanged.
+
+---
+
+## Amendment (2026-09-15, third) — a fit may not cross illuminants, and a reference dataset has one identity
+
+Section 14 records the illuminant on both artefacts and says why it is most of
+the experiment. It never said that the two have to agree, and nothing checked
+it. Section 13 gives a reference dataset the identity `identifier@version` and
+never constrained either part, so two different pairs could produce one
+identity.
+
+Both are closed here. Neither changes the calibration schema, the wire format,
+the solver, the status rules or anything downstream of a calibration.
+
+### 1. Reference values are defined *under* an illuminant
+
+A reference dataset is not a table of numbers that is true in general. It is
+the rendering somebody decided a chart's patches should produce **under a
+stated illuminant** — as section 13 already says, a defined false-colour
+objective rather than colour accuracy. The illuminant is part of the
+definition, not an annotation beside it.
+
+Evidence is the same in the other direction: a measurement set records what a
+camera produced under a stated illuminant, and outside that statement the
+numbers describe nothing in particular.
+
+So a fit pairs two illuminant statements, and until now nothing compared them.
+`IRCalibrationFitter.fit` checked only that the two artefacts described the
+same *target*. It would happily fit measurements recorded under
+`measuredSPD("lamp-a.spd")` against values defined for `.d65`, or tungsten
+evidence against an LED panel's reference, and report small residuals about it.
+
+### 2. The rule: same recorded identity, and nothing more clever
+
+> Two calibration illuminants are compatible only when their recorded identity
+> is exactly the same.
+
+```text
+.d65              ↔ .d65                      compatible
+.d50              ↔ .d50                      compatible
+.namedOther("X")  ↔ .namedOther("X")          compatible
+.measuredSPD("X") ↔ .measuredSPD("X")         compatible
+.unknown          ↔ .unknown                  compatible, structurally
+
+.d65              ↔ .d50                      refused
+.d65              ↔ .measuredSPD("d65.spd")   refused
+.namedOther("A")  ↔ .namedOther("B")          refused
+.measuredSPD("A") ↔ .measuredSPD("B")         refused
+.unknown          ↔ anything recorded         refused
+```
+
+The rule is conservative because the project's knowledge is. It reads no
+spectral power distributions and compares none, so it cannot show that a
+measured SPD is D65, that two differently named lamps match, or that one
+standard illuminant approximates another in the infrared. A file called
+`d65-measurement.csv` is a file name. A lamp called "Daylight LED" is a name.
+Fuzzy matching, case folding and substring rules are all inventions of a
+spectral comparison that has not been performed.
+
+**"Same recorded identity" is not "proven identical spectrum."** Two records
+saying "LED Panel A" are two people's words, and nothing here can check them.
+What the rule guarantees is narrower and worth exactly what it says: nothing
+pairs evidence with reference values that *state* different illumination.
+
+### 3. `.unknown ↔ .unknown` stays constructible
+
+Not because two unrecorded illuminants are known to match — they are not known
+to be anything, and nothing derives a standard illuminant from `.unknown` in
+either direction. It is allowed because the arithmetic is well defined on it
+and refusing would stop somebody fitting data they already have.
+
+What such a calibration may *claim* was already answered, in section 11 and by
+the completeness rules: `.unknown` produces the `illuminantUnknown` evidence
+gap, so the artefact's status is `experimental` and stays there. Structural
+constructibility and evidential standing are separate questions, and this
+amendment changes neither `experimental`, `measured` nor `validated`. A
+compatible but merely *asserted* illuminant — matched `.d65` on both sides —
+is still `illuminantNotMeasured`, exactly as before.
+
+### 4. One authority, three enforcement points
+
+The rule lives in `IRCalibrationIlluminantCompatibility`, which owns both the
+comparison and the explanation a person reads. Three layers ask it:
+
+```text
+IRCalibrationFitter.fit        before the solver runs
+IRCalibration.init             an artefact assembled in memory or read from a file
+IRCalibrationFitVerifier       defensive second line
+```
+
+Each throws its own typed refusal — `IRCalibrationFitError.illuminantMismatch`,
+`IRCalibrationError.illuminantMismatch`,
+`IRCalibrationFitVerificationFailure.illuminantMismatch` — and all three
+`failureReason`s come from the one shared text. Three layers, one definition.
+
+`IRCalibrationFitter.derive` deliberately does **not** check it, for the same
+reason it does not compare targets: that is a rule about the record, not a
+property of the arithmetic, and `derive` is the one place the arithmetic lives.
+
+The verifier's check is redundant against valid input, because `IRCalibration`
+refuses an incompatible pair before verification runs. It is stated anyway: the
+verifier is also called directly, and it must not depend on having been handed
+a pair somebody else already checked.
+
+### 5. Why the matrix self-verification could never have caught this
+
+The second amendment made a calibration re-derive its own transform. That
+catches an edited matrix, an edited residual, edited evidence and edited
+reference values. It cannot catch this one, by construction:
+
+> An illuminant mismatch moves no number. The same responses fitted against the
+> same reference values produce the same coefficients, the same residuals and
+> the same conditioning, whatever the two artefacts record about the light.
+
+So changing one illuminant in a persisted file — the measurement's or the
+reference's — leaves every arithmetic check satisfied and every identity string
+matching. It is a defect in what the calibration *claims*, and it needs a
+semantic rule. The suite demonstrates exactly that: a calibration that verifies
+perfectly, with only its reference dataset's illuminant changed, is refused.
+
+### 6. An illuminant identity has to say something
+
+`.namedOther("")`, `.namedOther("   ")` and `.measuredSPD(reference: "")` were
+all constructible, and an empty `.measuredSPD` still reported `isMeasured ==
+true` — the strongest claim the type can make, pointing at no measurement at
+all, and the one illuminant condition `IRCalibrationAcceptanceCriteria` is able
+to require.
+
+The two cases carrying text carry the *entire* identity of the illuminant in
+that text. So:
+
+- outer whitespace is trimmed, the same convention `identifier`, `version`,
+  `source` and provenance already use;
+- after trimming, an empty identity is refused;
+- after trimming, the identity is **exact and case-sensitive**. `"LED Panel A"`
+  and `"led panel a"` are two different records. These are evidence
+  identifiers, not search terms, and case folding them would be a matching rule
+  with nothing behind it — the person who wrote one of them meant what they
+  wrote.
+
+The enum shape is unchanged; there is no second illuminant representation. The
+invariant lives in `IRCalibrationIlluminant.validated(field:)`, called by the
+two domain boundaries that create calibration evidence —
+`IRCalibrationMeasurementSet.init` and `IRCalibrationReferenceDataset.init`.
+Decoding a persisted record goes through those same initialisers, so there is
+no separate validation on the wire that could drift out of step, and an invalid
+illuminant cannot reach a valid artefact from any direction.
+
+Normalisation is idempotent, so re-validating an already-validated value —
+which `IRCalibrationMeasurementSet.excluding(_:because:)` does — changes
+nothing.
+
+### 7. A reference dataset identity is produced by one pair only
+
+`identity` is `identifier@version`, and a fit result stores that one string as
+its entire record of what it aimed at. `IRCalibration` accepts an artefact when
+the stored string matches the reference dataset beside it — a check worth
+something only if one string can come from one pair. While `@` was permitted
+inside either part it could not:
+
+```text
+identifier "a@b", version "c"    ->  a@b@c
+identifier "a",   version "b@c"  ->  a@b@c
+```
+
+Two different revisions of two different tables of numbers, indistinguishable
+to every identity check — exactly the confusion `version` exists to prevent.
+
+The fix is the small one: the separator is declared once, as
+`IRCalibrationReferenceDataset.identitySeparator`, and refused inside both
+`identifier` and `version` by the initialiser, with the typed
+`IRCalibrationError.ambiguousReferenceDatasetIdentity(field:token:)` naming
+which field and why.
+
+Refused rather than escaped or rewritten. A dataset identifier is a person's
+own label for their evidence, and an artefact that silently names something
+they did not write is worse than one that refuses. Trimming happens first, so
+the rule sees the identifier that will actually be stored.
+
+No typed identity object, and no wire-shape change: `identifier` and `version`
+remain two separate fields, `identity` remains derived and is never persisted,
+and the grammar remains `identifier@version`. **The calibration schema stays at
+version 2.** A stronger redesign would have bought nothing this rule does not
+already guarantee, and would have cost a migration.
+
+### What did not change
+
+- The calibration schema is still version 2; the wire format is byte-identical
+  for every artefact that was valid before.
+- `experimental`, `measured` and `validated` mean exactly what they meant.
+  `IRCalibrationAcceptanceCriteria.project` is still `nil`, nothing reaches
+  `validated`, and `isValidatedInfraredCalibration` is still `false` everywhere.
+- The solver, its conditioning floor, the green collapse, the session
+  white-balance rule, the clipping policy, the colour-plane signature and the
+  agreement tolerance are untouched.
+- No spectral data is read, stored or compared, and no SPD is consumed.
+- Lens identity and lens scope, calibration applicability, profile→calibration
+  references, chart homography, X-Trans geometry, acceptance thresholds and the
+  measurement UI are all untouched, and no calibration reaches preview, export
+  or a capture profile.

@@ -96,6 +96,26 @@ decided those patches should produce*. It is recorded as its own artefact with
 an identifier, a version, a stated source and an illuminant, and a calibration
 names the exact revision it was fitted against.
 
+### How a reference dataset is named
+
+A calibration records the dataset it was fitted against as one string:
+
+```text
+identifier@version        e.g.  foliage-falsecolour@3
+```
+
+Because that one string is the whole record, the grammar has to be
+unambiguous, so **neither the identifier nor the version may contain `@`**. Were
+they allowed to, identifier `a@b` at version `c` and identifier `a` at version
+`b@c` would both produce `a@b@c` — two different tables of numbers that every
+identity check would read as one. An identifier or version containing the
+separator is refused, naming the field and the reason; it is never escaped and
+never silently rewritten, because the label is yours and an artefact should not
+name something you did not write. Pick a different separator of your own.
+
+Everything else is free text: use a name you will recognise in a year, and bump
+the version whenever any value in the table changes.
+
 **This project bundles no reference dataset.** Producing one, and writing down
 the reasoning behind every value in it, is part of the work this protocol
 precedes.
@@ -121,6 +141,60 @@ For infrared work the illuminant matters more than it does in the visible:
 tungsten emits copiously above 700 nm, many LED panels emit almost nothing
 there, and a transform fitted under one and applied under the other is a
 coincidence rather than a calibration.
+
+### The measurement and the reference must name the same illuminant
+
+Reference values are defined **under** an illuminant; they are not true in
+general. Your measurements were likewise recorded under one. A fit pairs the
+two, and the application refuses the pair unless the **recorded identity** is
+exactly the same on both sides:
+
+```text
+.d65              ↔ .d65                      allowed
+.d50              ↔ .d50                      allowed
+.namedOther("X")  ↔ .namedOther("X")          allowed
+.measuredSPD("X") ↔ .measuredSPD("X")         allowed
+.unknown          ↔ .unknown                  allowed, and stays experimental
+
+.d65              ↔ .d50                      refused
+.d65              ↔ .measuredSPD("d65.spd")   refused
+.namedOther("A")  ↔ .namedOther("B")          refused
+.measuredSPD("A") ↔ .measuredSPD("B")         refused
+.unknown          ↔ anything recorded         refused
+```
+
+Three things this rule does and does not mean:
+
+- **A measured SPD is an identifier, not the spectrum.** This project stores a
+  reference to your measurement — a file name, an instrument reading, a
+  document — and reads no spectral data at all. So it cannot tell that
+  `d65-measurement.csv` is or is not D65, and it will not pretend to: a
+  measured SPD never matches an asserted `.d65`, however the file is named.
+- **No equivalence is inferred between differently named sources.** There is no
+  fuzzy matching, no case folding, no substring rule. `"LED Panel A"` and
+  `"led panel a"` are two different records, because these are evidence
+  identifiers rather than search terms. Outer whitespace is trimmed and nothing
+  else is touched.
+- **Same recorded identity is not proven identical spectrum.** Two records
+  saying "LED Panel A" are two people's words, and nothing here can check them.
+  The rule guarantees only that nothing pairs evidence with reference values
+  that *state* different illumination — which is worth having, and is all it
+  claims.
+
+Practically: when you produce a reference dataset, record the illuminant you
+intend it to be used under, and record the *same* identity in the session that
+measures against it. If you later measure that lamp's SPD, that is a new
+illuminant identity and therefore a new dataset revision.
+
+### An illuminant identity has to say something
+
+`namedOther` and `measuredSPD` carry the entire identity of the illuminant in
+their text, so an empty or whitespace-only one is refused rather than stored. An
+empty measured-SPD reference is refused especially firmly: it would report
+itself as *measured* illumination — the strongest claim available — while
+pointing at no measurement at all. If you cannot name the source, record
+`unknown`. That is an honest answer the status rules already account for, and it
+is better than a name that says nothing.
 
 Practical requirements:
 
@@ -433,6 +507,7 @@ The fit refuses rather than producing coefficients when:
 | fewer than 4 included patches | 3 is the algebraic minimum and leaves no residual to report |
 | every patch excluded | usually a clipped capture; the answer is a new capture |
 | a patch with no reference value | fitting towards an invented value is the failure this prevents |
+| the measurement and reference illuminants differ | reference values are defined under an illuminant, and no spectral equivalence is inferred |
 | a channel zero across every patch | nothing can be learned about that column |
 | normalised Gram determinant < 1e-9 | the responses are too collinear to determine a unique map |
 | a non-finite measured or reference value | one propagates into all nine coefficients |
@@ -612,6 +687,9 @@ Before
   [ ] filter manufacturer, product, nominal cutoff, batch
   [ ] single illuminant, warmed up, no mixing
   [ ] reference dataset chosen, with identifier, version and stated source
+  [ ] identifier and version contain no "@"
+  [ ] the reference dataset's illuminant identity is the one you will record
+      for the session — character for character
 
 Capture
   [ ] chart flat, square-on, filling most of the frame, away from the corners
@@ -635,7 +713,8 @@ Fit
 
 Record
   [ ] author, tool and version
-  [ ] illuminant recorded as what it was, not as what would be convenient
+  [ ] illuminant recorded as what it was, not as what would be convenient, and
+      named rather than left as an empty string
   [ ] status read from the artefact, not asserted
 ```
 
@@ -643,8 +722,9 @@ Record
 
 ## 15. What this protocol does not cover
 
-Automatic target detection, spectral sensor reconstruction, arbitrary spectral
-response fitting, ICC profile generation, DNG colour matrices, multi-illuminant
+Automatic target detection, comparison of spectral power distributions or any
+other proof that two differently named sources are the same light, spectral
+sensor reconstruction, arbitrary spectral response fitting, ICC profile generation, DNG colour matrices, multi-illuminant
 calibration, multi-body model-level calibration, temperature/tint, tone curves,
 sharing or exchanging calibrations between photographers, and any means by which
 a user can assert that a calibration is validated.
