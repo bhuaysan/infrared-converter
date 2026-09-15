@@ -59,6 +59,29 @@ public enum IRFilterDescriptor: Equatable, Sendable {
     /// reasonable. Filters are sold from roughly 550 nm well past 1000 nm.
     public static let supportedNominalCutoffNanometers: ClosedRange<Double> = 200...2000
 
+    /// Nominal cutoffs that are commonly sold, offered as **typing shortcuts**
+    /// and nothing else.
+    ///
+    /// ```text
+    /// 590 nm   665 nm   720 nm   830 nm
+    /// ```
+    ///
+    /// These four are the families a person is most likely to own, so a form
+    /// can offer them beside a free-text field instead of making somebody type
+    /// `720` every time. Three things they are deliberately not:
+    ///
+    /// ```text
+    /// not a closed set    any cutoff in the supported range is equally valid,
+    ///                     and `.named` covers products with no single number
+    /// not a calibration   there is no "720 nm matrix" in this project, and
+    ///                     nothing here maps a number to any processing
+    /// not a match key     nothing selects a profile, a preset or a transform
+    ///                     by comparing wavelengths
+    /// ```
+    ///
+    /// Ordered ascending, so a menu built from it is deterministic.
+    public static let commonNominalCutoffsNanometers: [Double] = [590, 665, 720, 830]
+
     /// A long-pass filter, refusing a nominal cutoff that cannot describe one.
     ///
     /// Deliberately labelled differently from the case it builds. An overload

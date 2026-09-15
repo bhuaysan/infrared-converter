@@ -81,115 +81,12 @@ public struct IRCaptureProfileDraft: Equatable, Sendable {
 
     /// A filter being described: the kind, and the fields that kind uses.
     ///
-    /// Used twice — for the filter on the lens and for one fitted inside a
+    /// Used twice here — for the filter on the lens and for one fitted inside a
     /// converted body — because those are two facts and the model keeps them
-    /// apart.
-    public struct FilterDraft: Equatable, Sendable {
-
-        public enum Kind: String, CaseIterable, Sendable, Identifiable {
-            case unknown, longPass, named
-
-            public var id: String { rawValue }
-
-            public var shortDescription: String {
-                switch self {
-                case .unknown: return "Unknown"
-                case .longPass: return "Long-pass (nominal nm)"
-                case .named: return "Named product"
-                }
-            }
-        }
-
-        public var kind: Kind
-        /// The nominal cutoff as typed. A string, because a form holds one.
-        public var nominalCutoffNanometers: String
-        /// The product name as typed.
-        public var name: String
-
-        public init(
-            kind: Kind = .unknown,
-            nominalCutoffNanometers: String = "",
-            name: String = ""
-        ) {
-            self.kind = kind
-            self.nominalCutoffNanometers = nominalCutoffNanometers
-            self.name = name
-        }
-
-        /// The draft for an existing descriptor, for editing.
-        public init(_ descriptor: IRFilterDescriptor) {
-            switch descriptor {
-            case .unknown:
-                self.init(kind: .unknown)
-            case .longPass(let nanometers):
-                self.init(
-                    kind: .longPass,
-                    nominalCutoffNanometers: Self.format(nanometers)
-                )
-            case .named(let name):
-                self.init(kind: .named, name: name)
-            }
-        }
-
-        /// The descriptor this draft describes.
-        ///
-        /// - Parameter field: which filter this is, so a refusal can say so.
-        /// - Throws: `IRCaptureProfileDraftError`.
-        public func resolved(
-            field: IRCaptureProfileDraftError.Field
-        ) throws(IRCaptureProfileDraftError) -> IRFilterDescriptor {
-            switch kind {
-            case .unknown:
-                return .unknown
-
-            case .longPass:
-                let token = nominalCutoffNanometers.trimmingCharacters(
-                    in: .whitespacesAndNewlines
-                )
-                guard !token.isEmpty else {
-                    throw .missingNominalCutoff(field: field)
-                }
-                // Locale-independent on purpose. A profile file written on one
-                // machine is read on another, and a decimal comma that parsed
-                // here and not there would make a profile load in one place
-                // and refuse in the other.
-                guard let nanometers = Double(token) else {
-                    throw .invalidNominalCutoff(
-                        field: field,
-                        token: token,
-                        reason: "A nominal cutoff must be a number of nanometres."
-                    )
-                }
-                do {
-                    return try IRFilterDescriptor.longPass(nominalNanometers: nanometers)
-                } catch let error as IRCaptureProfileDescriptorError {
-                    // The descriptor type owns what a usable cutoff is, and its
-                    // own wording is carried through rather than restated here.
-                    switch error {
-                    case .invalidNominalCutoff(_, let reason):
-                        throw .invalidNominalCutoff(
-                            field: field, token: token, reason: reason
-                        )
-                    }
-                } catch {
-                    throw .invalidNominalCutoff(
-                        field: field, token: token, reason: error.localizedDescription
-                    )
-                }
-
-            case .named:
-                let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty else { throw .emptyFilterName(field: field) }
-                return .named(trimmed)
-            }
-        }
-
-        private static func format(_ nanometers: Double) -> String {
-            nanometers == nanometers.rounded()
-                ? String(Int(nanometers))
-                : String(nanometers)
-        }
-    }
+    /// apart. The type itself is `IRFilterDraft`, shared with the creative
+    /// preset editor, so that "text into a nominal cutoff" has one
+    /// implementation and `720 nm` cannot come to mean two things.
+    public typealias FilterDraft = IRFilterDraft
 
     /// What a person calls this profile. Never its identity.
     public var name: String
@@ -471,6 +368,41 @@ extension IRCaptureProfileDraftError: LocalizedError {
                 "\(id)" is in the "\(namespace)." namespace, which belongs to the profiles \
                 this application ships.
                 """
+        }
+    }
+}
+
+// MARK: - Describing a filter, with the profile's own field labels
+
+extension IRFilterDraft {
+
+    /// The descriptor this draft describes, refused in the capture profile's
+    /// own vocabulary.
+    ///
+    /// The parsing and the validation are `IRFilterDraft`'s — there is one of
+    /// each — and this adds the only thing the shared type cannot know: which
+    /// of a profile's two filters is being described, so that a refusal says
+    /// "external filter" or "internal filter" rather than "a filter".
+    ///
+    /// - Parameter field: which filter this is, so a refusal can say so.
+    /// - Throws: `IRCaptureProfileDraftError`.
+    public func resolved(
+        field: IRCaptureProfileDraftError.Field
+    ) throws(IRCaptureProfileDraftError) -> IRFilterDescriptor {
+        do {
+            return try resolved()
+        } catch {
+            // Switched rather than caught per case, so that a refusal added to
+            // `IRFilterDraftError` is a compile error here instead of one that
+            // silently loses its field label.
+            switch error {
+            case .emptyFilterName:
+                throw .emptyFilterName(field: field)
+            case .missingNominalCutoff:
+                throw .missingNominalCutoff(field: field)
+            case .invalidNominalCutoff(let token, let reason):
+                throw .invalidNominalCutoff(field: field, token: token, reason: reason)
+            }
         }
     }
 }
