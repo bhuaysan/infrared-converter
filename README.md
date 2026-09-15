@@ -125,9 +125,13 @@ records what it did and explicitly did not do.
   the displayed orientation into sensor coordinates, and the patch is drawn on
   the image from the canonical region every time it is laid out. A file with no
   saved decision gets the deterministic centred square this project has always
-  measured, which is a placeholder and not an automatic white balance. There is
-  no temperature, no tint and no manual gain entry. See
-  [ADR 0019](docs/decisions/0019-interactive-white-balance.md).
+  measured, which is a placeholder and not an automatic white balance. The
+  resulting multipliers are shown one per CFA colour plane, labelled from the
+  sensor's own layout — `Gain P0 R ×1.000`, `Gain P2 B ×4.827` — with both
+  greens of an `RGBG` sensor kept separate. There is no temperature, no tint
+  and no manual gain entry. See
+  [ADR 0019](docs/decisions/0019-interactive-white-balance.md) and
+  [ADR 0023](docs/decisions/0023-authoring-a-creative-channel-mix.md).
 - **Demosaicing** is `bilinearBayer` — the current **correctness / reference
   algorithm**, not an image-quality answer. X-Trans is recognised and
   explicitly refused.
@@ -138,8 +142,10 @@ records what it did and explicitly did not do.
   first one a user drives: a linear 3×3 remix inside the working colour space,
   with identity, red/blue swap and explicit-matrix mixes. It changes no colour
   space and is recorded as creative intent, never as a calibration. The
-  workspace offers Identity and Red/Blue Swap; a saved explicit matrix renders,
-  and there is no matrix editor.
+  workspace offers Identity, Red/Blue Swap and a labelled 3×3 editor for any
+  finite matrix of your own — nothing clamps a coefficient, normalises a row or
+  refuses a singular matrix. See
+  [ADR 0023](docs/decisions/0023-authoring-a-creative-channel-mix.md).
 - **Preview reduction** caps the longest edge of the unoriented image at 2048
   pixels by exact area-weighted averaging of scene-linear `Float32`, per
   channel, in `Double`. No nearest-neighbour, no 8-bit round trip, no implicit
@@ -926,10 +932,10 @@ See [RAW/README.md](RAW/README.md).
   mosaic is retained so a new patch costs no decode — about 49 MB on the E-PL3
   fixture — beside the 36 MB reduced preview. During a file switch made
   mid-render, two documents briefly hold one pair each.
-- **The mix control offers two choices.** Identity and Red/Blue Swap. An
-  explicit 3×3 matrix is a persistable, renderable state and there is no editor
-  for one, so a saved matrix is shown and kept but cannot be authored in the
-  app.
+- **The mix editor is nine numeric cells.** Identity, Red/Blue Swap and a
+  custom 3×3 matrix, committed on Apply. There are no per-channel sliders, no
+  named presets to save a matrix under, no determinant readout and no
+  before/after; a decimal separator is `.`, and `1,5` is not a number.
 - **Nothing detects infrared.** A file with no saved decision opens with the
   identity mix. There is no filter metadata, no conversion database and no
   heuristic that would choose the red/blue swap for a photograph.

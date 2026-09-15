@@ -425,3 +425,42 @@ built-in's own included; ignoring them and trusting them are both guesses. Only
 the `matrix` key is policed inside `channelMix`, because it is the one that
 contradicts the token. Unknown keys elsewhere in the record remain subject to
 the forward-compatibility rule, unchanged.
+
+---
+
+## Amendment (ADR 0023) — `.explicit` now has an editor
+
+Decision 3 above says:
+
+> `.explicit` exists in the model and has no editor.
+
+and the non-goals say there is no user interface that produces one. Both were
+accurate for this milestone and are no longer true:
+[ADR 0023](0023-authoring-a-creative-channel-mix.md) adds a labelled 3×3 editor
+that authors `UserChannelMixAdjustment.explicit`.
+
+Nothing in this document changed to make that possible, which was the point of
+having built the state first:
+
+- `UserChannelMixAdjustment` is still the canonical user state, with the same
+  three cases and the same derived `mix`;
+- `IRChannelMix` is still the processing value and `IRChannelMixer` still the
+  one implementation;
+- the mix is still applied to the retained **pre-mix** reduced preview, so
+  `new output = NewMix × pre-mix image` and two authored matrices never
+  compose;
+- a render request is still one complete `ImageAdjustments`, through the same
+  coalescing slot;
+- the wire format is unchanged and the photograph sidecar is still at schema
+  version 5 — the `matrix` kind already carried nine coefficients.
+
+The one rule this document states that the editor had to inherit rather than
+relax: an authored matrix is `.explicit` **whatever its numbers are**. A typed
+identity is not `.identity`. The decoder already refuses a built-in token
+carrying a matrix, in either direction and whatever the coefficients are; an
+editor that collapsed nine typed numbers into a built-in because they happened
+to match would be the same error from the other side.
+
+`selectableCases` is also unchanged, and still `[.identity, .redBlueSwap]`. It
+is the list of mixes a menu can offer by name; a matrix is authored, and the
+"Custom Matrix…" item opens the editor rather than selecting a state.

@@ -307,6 +307,15 @@ nothing full-resolution may be reachable from what a document retains — so the
 is the pre-mix type, the output is not, and nothing accepts the output back.
 See `docs/decisions/0016-interactive-channel-mixer.md`.
 
+The mix is also **authorable**: a labelled 3×3 editor produces
+`UserChannelMixAdjustment.explicit` and hands it to the same `setChannelMix`
+the two built-in choices use, so an authored matrix is an ordinary complete
+render state. It is applied to the retained pre-mix preview like any other, so
+authoring a second matrix replaces the first rather than composing with it; no
+coefficient is clamped, no row is normalised, a singular matrix is applied as
+typed, and the only numeric requirement remains `RAWColorMatrix3x3`'s — every
+coefficient finite. See `docs/decisions/0023-authoring-a-creative-channel-mix.md`.
+
 Exposure joined the render half the same way. The display stage's
 `exposureEV` was always `0 EV` in the workspace; it is now the user's
 `ImageAdjustments.exposure`, passed unchanged, so the `× 2^EV` described under
@@ -410,6 +419,15 @@ would apply red's gain to every second green sample. The two green gains are
 independently representable and are never forced to agree; a plane index
 outside `0...3` raises `RAWProcessingError.missingWhiteBalanceGain` rather than
 being folded onto an existing slot.
+
+For display, `RAWWhiteBalanceGainListing` pairs each gain with its plane and
+with the letter the layout's `colorDescription` gives that plane — `P0 R`,
+`P1 G`, `P2 B`, `P3 G` on the reference camera. The planes it describes are
+exactly the ones `RAWWhiteBalanceEstimator.colorPlanes(in:)` found, so a
+listing cannot describe a different set than the estimate measured, and a
+layout that never reaches plane 3 has three entries rather than a fourth at
+`×1.000`. It is derived presentation: no stage reads it, and it multiplies
+nothing. See `docs/decisions/0023-authoring-a-creative-channel-mix.md`.
 
 Gains must be finite and strictly greater than zero. There is no upper bound:
 infrared capture legitimately needs extreme multipliers, and `0.01`, `20` and

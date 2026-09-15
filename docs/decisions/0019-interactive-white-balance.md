@@ -617,3 +617,53 @@ The export's behaviour under a pending decision is unchanged and now covers
 both halves: an export started after a new patch or a new profile has been
 chosen, but before its preview has rendered, renders the **new** one. The
 canonical state is what is exported.
+
+---
+
+## Amendment (ADR 0023) — the gains are labelled by colour plane
+
+Nothing about the white balance itself changed. `RAWWhiteBalanceEstimator` is
+still the one estimator and `RAWWhiteBalancer` the one application of gains;
+the neutral region is still what the sidecar records; preview and export still
+derive the gains from that region, from the RAW file, through one resolver; the
+scale policy is still `preserveStrongestMeasuredPlane`; and no gain is clamped,
+limited or converted to a temperature.
+
+What changed is that the numbers can be **read**. Decision 11's coordinate road
+made the patch a place a person chose; the gains it produced were still shown
+as four bare numbers in colour-plane order:
+
+```text
+Gains    1.000  2.143  4.827  2.097
+```
+
+`RAWWhiteBalanceGainListing` pairs each gain with its colour plane and with
+what the layout says that plane is, so the inspector reads:
+
+```text
+Gain P0 R    ×1.000
+Gain P1 G    ×2.143
+Gain P2 B    ×4.827
+Gain P3 G    ×2.097
+```
+
+The planes described are exactly the planes the estimator measured, because the
+listing asks `RAWWhiteBalanceEstimator.colorPlanes(in:)` rather than walking the
+CFA cell a second time; their identities come from the layout's
+`colorDescription`, so nothing assumes RGGB, a three-plane layout lists three
+rows rather than a fourth at `×1.000`, and a letter that names no linear RGB
+channel keeps its letter instead of being mapped onto the nearest one. The two
+greens of an `RGBG` sensor remain two rows, which is the comparison Decision 1
+exists to preserve through the pipeline.
+
+One mechanical change supports it: `WorkspacePreview` carries the
+`sensorColorLayout` its gains are indexed by, read from the preparation's own
+metadata. The inspector's rule is that every line of the owned-preview panel is
+read back from that preview's provenance, and sourcing the labels from the open
+document instead would have taken them from whichever path read the file — in
+some cases the LibRaw diagnostic reference (ADR 0012). See
+[ADR 0023](0023-authoring-a-creative-channel-mix.md), Decisions 8 and 9.
+
+Still deliberately absent, as Non-goals says: Kelvin, tint, manual gain entry,
+and any automatic infrared white balance. The caption under the rows states the
+scale policy rather than implying a correction was chosen for anyone.
