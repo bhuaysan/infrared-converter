@@ -127,7 +127,19 @@ struct IRCaptureProfileLibraryTests {
 
             #expect(first.id != second.id)
             #expect(first.id.namespace == IRCaptureProfileID.userNamespace)
-            #expect(!first.id.rawValue.contains("720"))
+            // Generated, and therefore incapable of carrying the name: what
+            // follows the namespace is a UUID.
+            //
+            // Asserting merely that the identifier does not *contain* "720"
+            // was both weaker and unsound — a random UUID's hex spells those
+            // three digits roughly one run in a hundred, which says nothing
+            // at all about where the identity came from.
+            for id in [first.id, second.id] {
+                let generated = id.rawValue.dropFirst(
+                    IRCaptureProfileID.userNamespace.count + 1
+                )
+                #expect(UUID(uuidString: String(generated)) != nil, "\(id.rawValue)")
+            }
             #expect(library.userProfiles.count == 2)
         }
     }
