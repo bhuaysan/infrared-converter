@@ -593,7 +593,7 @@ private struct RAWInspectorView: View {
                 row("Orientation applied", Self.orientationDescription(preview))
                 row("White balance", Self.whiteBalanceDescription(preview))
                 row("Measured patch", Self.regionDescription(preview.neutralPatch))
-                row("Gains", Self.gainsDescription(preview.whiteBalanceGains))
+                gainRows(preview)
                 row("Camera → working", Self.transformDescription(
                     processing.cameraToWorkingTransformSource
                 ))
@@ -701,15 +701,57 @@ private struct RAWInspectorView: View {
         }
     }
 
-    /// The multipliers the estimator produced, in CFA colour-plane order.
+    /// The multipliers the estimator produced: one row per CFA colour plane,
+    /// each naming the plane it belongs to.
     ///
-    /// Four, not three: an RGBG layout has two independent green planes, and
-    /// collapsing them here would hide the one number most likely to be
-    /// interesting on a converted camera.
-    private static func gainsDescription(_ gains: RAWWhiteBalanceGains) -> String {
-        gains.gainsByColorPlane
-            .map { String(format: "%.3f", $0) }
-            .joined(separator: "  ")
+    /// One row each rather than one run-together line, and labelled rather
+    /// than positional, because a reader of `1.000  2.143  4.827  2.097` has
+    /// no way to tell which number is the blue plane — and on a converted
+    /// camera that is the number they came to look at.
+    ///
+    /// Four rows, not three, wherever the layout has four planes: an `RGBG`
+    /// sensor has two greens, the pipeline balanced them independently, and
+    /// showing one would hide a real difference between them. The plane
+    /// identities come from the preview's own sensor layout; nothing here
+    /// assumes RGGB, and a plane the layout names with a letter that is not
+    /// `R`, `G` or `B` keeps that letter rather than being mapped onto a
+    /// channel it is not.
+    ///
+    /// The caption states the scale policy, read from the estimate, so the
+    /// `×1.000` reads as "the strongest measured plane" rather than as "no
+    /// correction on this plane".
+    @ViewBuilder
+    private func gainRows(_ preview: WorkspacePreview) -> some View {
+        if let listing = try? preview.whiteBalanceGainListing() {
+            ForEach(listing.entries, id: \.colorPlane) { entry in
+                row("Gain \(entry.label)", entry.gainDescription)
+            }
+            Text(Self.scalePolicyDescription(preview.estimate.scalePolicy))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else {
+            // A layout with no CFA colour planes, which cannot have produced
+            // these gains through the neutral-patch estimator. The numbers are
+            // still shown, unlabelled, rather than the row disappearing.
+            row(
+                "Gains",
+                preview.whiteBalanceGains.gainsByColorPlane
+                    .map { String(format: "%.3f", $0) }
+                    .joined(separator: "  ")
+            )
+        }
+    }
+
+    /// What the `×1.000` means, in the estimator's own terms.
+    private static func scalePolicyDescription(
+        _ policy: RAWWhiteBalanceEstimationScalePolicy
+    ) -> String {
+        switch policy {
+        case .preserveStrongestMeasuredPlane:
+            return "Per CFA colour plane, measured before demosaicing. The strongest "
+                + "measured plane keeps ×1.000 and the others scale up to it; infrared "
+                + "gains are not limited to a visible-light range."
+        }
     }
 
     private static func transformDescription(

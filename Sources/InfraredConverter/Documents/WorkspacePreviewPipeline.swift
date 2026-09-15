@@ -469,6 +469,7 @@ struct WorkspacePreviewPipeline {
             captureProfile: captureProfile,
             whiteBalanceAdjustment: source.whiteBalance,
             estimate: source.estimate,
+            sensorColorLayout: source.metadata.sensor,
             orientationProvenance: OrientationProvenance(
                 orientation: orientation, stage: oriented.processing
             ),
@@ -674,12 +675,36 @@ struct WorkspacePreview {
     let whiteBalanceAdjustment: UserWhiteBalanceAdjustment
     /// What the estimator measured and produced for this rendering.
     let estimate: RAWWhiteBalanceEstimate
+    /// The CFA colour layout the gains below are indexed by.
+    ///
+    /// Carried because the gains are four numbers addressed by colour-plane
+    /// index, and nothing else in a finished preview says what any of those
+    /// planes is. Read from the preparation's own metadata — the same layout
+    /// the estimator walked — rather than looked up from a document or from a
+    /// second decode, so a reader of this preview cannot be shown plane labels
+    /// that belong to a different file or a different read of it.
+    ///
+    /// It says nothing about the *rendering*: the pixels here are demosaiced,
+    /// mixed and oriented, and no CFA plane survives into them. It describes
+    /// where the gains came from.
+    let sensorColorLayout: RAWMetadata.SensorColorLayout
 
     /// The region the white balance was estimated from, in **sensor**
     /// (pre-orientation) active-area coordinates.
     var neutralPatch: RAWActiveAreaRegion { estimate.region }
     /// The multipliers the estimate produced, indexed by CFA colour plane.
     var whiteBalanceGains: RAWWhiteBalanceGains { estimate.gains }
+    /// The same multipliers, each paired with what the sensor layout says its
+    /// colour plane is. What the inspector shows.
+    ///
+    /// Throws only for a layout with no CFA colour planes, which could not
+    /// have produced these gains through the neutral-patch estimator. See
+    /// `RAWWhiteBalanceGainListing`.
+    func whiteBalanceGainListing() throws -> RAWWhiteBalanceGainListing {
+        try RAWWhiteBalanceGainListing(
+            gains: whiteBalanceGains, sensorColorLayout: sensorColorLayout
+        )
+    }
     /// Why the image has the geometry it has: what the file recorded, what
     /// the user asked for, and what `ImageOrienter` actually applied.
     let orientationProvenance: OrientationProvenance
