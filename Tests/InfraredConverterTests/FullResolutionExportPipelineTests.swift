@@ -235,6 +235,116 @@ struct FullResolutionExportPipelineTests {
         #expect(export.processing.orientation == preview.effectiveOrientation)
     }
 
+
+    /// An **authored** matrix, now that one can be authored, resolved by both
+    /// paths from the same canonical adjustment.
+    ///
+    /// The mix reaches the export the way every adjustment does — inside one
+    /// `ImageAdjustments`, from the RAW file — so there is no second place a
+    /// creative matrix could be resolved, defaulted, or quietly turned into a
+    /// built-in. Deliberately asymmetric and partly negative, so a
+    /// transposition or a dropped coefficient shows up in the pixels.
+    @Test("Preview and export resolve the same authored creative matrix")
+    func previewAndExportResolveTheSameAuthoredMatrix() throws {
+        let coefficients: [Double] = [
+            1.8, -0.4, -0.4,
+            -0.2, 1.4, -0.2,
+            2.5, 0, -1.5,
+        ]
+        let authored = try UserChannelMixAdjustment.explicit(persistedMatrix: coefficients)
+        let adjustments = ImageAdjustments(
+            orientation: .quarterTurnRight,
+            channelMix: authored,
+            exposure: try UserExposureAdjustment(ev: 0.75),
+            whiteBalance: .neutralPatch(
+                try NormalizedActiveAreaRegion(
+                    originX: 0.25, originY: 0.25, width: 0.5, height: 0.5
+                )
+            )
+        )
+
+        // Small enough that the preview policy does not reduce it, so the only
+        // remaining difference is the deliberate one: 8 bits against 16.
+        let decoder = Self.decoder(width: 8, height: 6)
+        let preview = try WorkspacePreviewPipeline().render(
+            decoding: Self.url, using: decoder, adjustments: adjustments
+        )
+        #expect(!preview.resolution.isReduced)
+
+        let pipeline = FullResolutionExportPipeline()
+        let rendered = try pipeline.render(
+            ExportRequest(rawURL: Self.url, adjustments: adjustments), using: decoder
+        )
+        let export = try pipeline.encode(rendered)
+
+        // Both paths applied the authored matrix, with its own coefficients and
+        // its own provenance — not a built-in that happens to look like it.
+        #expect(preview.channelMixAdjustment == authored)
+        #expect(rendered.request.adjustments.channelMix == authored)
+        #expect(preview.channelMix == rendered.mix)
+        #expect(rendered.mix.source == .explicit)
+        #expect(rendered.mix.matrix.rows.flatMap { $0 } == coefficients)
+        #expect(export.processing.mix == preview.channelMix)
+
+        // And the pixels agree, to one 8-bit step.
+        #expect(export.width == preview.pixelWidth)
+        #expect(export.height == preview.pixelHeight)
+        let previewBytes = try #require(WorkspaceStubs.pixelBytes(preview.image))
+        #expect(previewBytes.count == export.width * export.height * 3)
+        var worst = 0.0
+        for index in 0..<export.samples.count {
+            let fromPreview = Double(previewBytes[previewBytes.startIndex + index]) / 255
+            let fromExport = Double(export.samples[index]) / 65535
+            worst = max(worst, abs(fromPreview - fromExport))
+        }
+        #expect(worst <= 1.0 / 255)
+        // The same clipping, which two different matrices could not produce.
+        #expect(
+            export.processing.clippedLowSampleCount
+                == preview.processing.clippedLowSampleCount
+        )
+        #expect(
+            export.processing.clippedHighSampleCount
+                == preview.processing.clippedHighSampleCount
+        )
+        #expect(export.processing.orientation == preview.effectiveOrientation)
+        #expect(export.processing.exposureEV == preview.renderedExposureEV)
+        // The same white balance, resolved from the file by each path.
+        #expect(rendered.estimate.gains == preview.whiteBalanceGains)
+        #expect(rendered.estimate.region == preview.neutralPatch)
+    }
+
+    /// Two different authored matrices export differently, which is what makes
+    /// the agreement above a statement about this matrix rather than about any
+    /// matrix.
+    @Test("A different authored matrix exports different pixels")
+    func adifferentAuthoredMatrixExportsDifferently() throws {
+        func samples(_ coefficients: [Double]) throws -> [UInt16] {
+            let mix = try UserChannelMixAdjustment.explicit(persistedMatrix: coefficients)
+            let pipeline = FullResolutionExportPipeline()
+            return try pipeline.encode(
+                try pipeline.render(
+                    ExportRequest(
+                        rawURL: Self.url,
+                        adjustments: ImageAdjustments(channelMix: mix)
+                    ),
+                    using: Self.decoder()
+                )
+            ).samples
+        }
+
+        let one = try samples([1.8, -0.4, -0.4, -0.2, 1.4, -0.2, 2.5, 0, -1.5])
+        let other = try samples([0.5, 0.25, 0.25, 0.25, 0.5, 0.25, 0.25, 0.25, 0.5])
+        #expect(one != other)
+
+        // And an authored identity is the identity's own rendering: the same
+        // pixels, from a different provenance.
+        let authoredIdentity = try samples([1, 0, 0, 0, 1, 0, 0, 0, 1])
+        let builtInIdentity = try FullResolutionExportPipeline()
+            .encode(try Self.render(.none)).samples
+        #expect(authoredIdentity == builtInIdentity)
+    }
+
     // MARK: - The white balance
 
     /// The export resolves the user's patch through the same resolver the

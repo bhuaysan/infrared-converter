@@ -284,6 +284,134 @@ struct WorkspaceChannelMixAdjustmentTests {
         #expect(!retained.preview.processing.channelMixApplied)
     }
 
+
+    /// The interactive form of the non-composition rule, now that a person can
+    /// author a matrix and then author another one.
+    ///
+    /// Two authored matrices in a row cost no decode, no demosaic and no
+    /// reduction; the newer one replaces the older as canonical state; and the
+    /// pixels are one pass of the newer matrix over the retained pre-mix
+    /// buffer rather than the product of the two.
+    @Test("A second authored matrix replaces the first, from the retained source")
+    func asecondAuthoredMatrixReplacesTheFirst() async throws {
+        let store = StubPhotographProcessingStore()
+        let (state, decoder) = WorkspaceStubs.countingDocumentState(
+            url: Self.url, store: store
+        )
+        state.open(Self.url)
+        _ = try #require(await WorkspaceStubs.waitForPreview(state, adjustments: .none))
+        #expect(decoder.mosaicDecodeCount == 1)
+
+        let first = try UserChannelMixAdjustment.explicit(
+            persistedMatrix: [0, 1, 0, 0, 0, 1, 1, 0, 0]
+        )
+        let second = try UserChannelMixAdjustment.explicit(
+            persistedMatrix: [1.5, -0.25, 0, 0, 0.5, 0.25, -0.5, 0, 2]
+        )
+        // M2 · M1: what a composing pipeline would have rendered.
+        let composed = try UserChannelMixAdjustment.explicit(
+            persistedMatrix: [0, 1.5, -0.25, 0.25, 0, 0.5, 2, -0.5, 0]
+        )
+
+        state.setChannelMix(first)
+        let afterFirst = try #require(
+            await WorkspaceStubs.waitForPreview(
+                state, adjustments: ImageAdjustments(channelMix: first)
+            )
+        )
+        state.setChannelMix(second)
+        let afterSecond = try #require(
+            await WorkspaceStubs.waitForPreview(
+                state, adjustments: ImageAdjustments(channelMix: second)
+            )
+        )
+
+        // Canonical state, provenance and the durable record are all the newer
+        // matrix, and the coefficients are the ones authored.
+        #expect(state.channelMixAdjustment == second)
+        #expect(afterSecond.channelMixAdjustment == second)
+        #expect(afterSecond.channelMix.source == .explicit)
+        #expect(afterSecond.channelMix.matrix.rows.flatMap { $0 }
+            == [1.5, -0.25, 0, 0, 0.5, 0.25, -0.5, 0, 2])
+        try await Self.waitUntil("the second matrix is saved") {
+            store.saved(for: Self.url) == ImageAdjustments(channelMix: second)
+        }
+
+        // Two mixes, still one read of the file: the pre-mix source is where
+        // both renders came from.
+        #expect(decoder.mosaicDecodeCount == 1)
+        #expect(decoder.processedDecodeCount == 1)
+
+        guard case .decoded(let loaded) = state.status, let source = loaded.source else {
+            Issue.record("Expected a retained source")
+            return
+        }
+        #expect(!source.preview.processing.channelMixApplied)
+
+        // The pixels are one pass of the second matrix over that buffer —
+        // neither the first matrix's result nor the product of the two.
+        let byHand = try WorkspacePreviewPipeline().render(
+            source, adjustments: ImageAdjustments(channelMix: second)
+        )
+        #expect(
+            WorkspaceStubs.pixelBytes(afterSecond.image)
+                == WorkspaceStubs.pixelBytes(byHand.image)
+        )
+        #expect(
+            WorkspaceStubs.pixelBytes(afterSecond.image)
+                != WorkspaceStubs.pixelBytes(afterFirst.image)
+        )
+        let asIfComposed = try WorkspacePreviewPipeline().render(
+            source, adjustments: ImageAdjustments(channelMix: composed)
+        )
+        #expect(
+            WorkspaceStubs.pixelBytes(afterSecond.image)
+                != WorkspaceStubs.pixelBytes(asIfComposed.image)
+        )
+    }
+
+    /// An authored matrix survives the round trip a person actually makes: it
+    /// is saved, the file is reopened, and the first thing rendered is that
+    /// matrix — as `.explicit`, with its own coefficients, even when the
+    /// workspace has no control that could have selected it by name.
+    @Test("An authored matrix reopens as the same explicit matrix")
+    func anAuthoredMatrixReopens() async throws {
+        let log = WorkspaceEventLog()
+        let store = StubPhotographProcessingStore(log: log)
+        let authored = try UserChannelMixAdjustment.explicit(
+            persistedMatrix: [1.8, -0.4, -0.4, -0.2, 1.4, -0.2, 2.5, 0, -1.5]
+        )
+
+        let state = Self.state(store: store, log: log)
+        state.open(Self.url)
+        try await Self.waitUntilSettled(state)
+        state.setChannelMix(authored)
+        let reached = try #require(
+            await WorkspaceStubs.waitForPreview(
+                state, adjustments: ImageAdjustments(channelMix: authored)
+            )
+        )
+        try await Self.waitUntil("the authored matrix is saved") {
+            store.saved(for: Self.url) == ImageAdjustments(channelMix: authored)
+        }
+
+        // A second document, reading the sidecar the first one wrote.
+        let reopened = Self.state(store: store, log: log)
+        reopened.open(Self.url)
+        try await Self.waitUntilSettled(reopened)
+
+        let restored = try Self.preview(reopened)
+        #expect(restored.channelMixAdjustment == authored)
+        #expect(restored.channelMix.source == .explicit)
+        #expect(restored.channelMix.matrix == authored.matrix)
+        #expect(reopened.channelMixAdjustment == authored)
+        // And the restored image is the image that matrix produces.
+        #expect(
+            WorkspaceStubs.pixelBytes(restored.image)
+                == WorkspaceStubs.pixelBytes(reached.image)
+        )
+    }
+
     // MARK: - Coalescing over the complete state
 
     /// A burst across **both** controls. Nothing can be delivered between the

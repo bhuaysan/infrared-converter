@@ -184,6 +184,117 @@ struct WorkspaceChannelMixPipelineTests {
         #expect(!source.preview.processing.channelMixApplied)
     }
 
+
+    // MARK: - An authored matrix replaces the previous one
+
+    /// Two authored matrices in a row, which is what an editable mixer makes
+    /// possible and what the retained pre-mix source exists for.
+    ///
+    /// The requirement is:
+    ///
+    /// ```text
+    /// new output = NewMix × pre-mix working image
+    /// never        NewMix × OldMix × image
+    /// ```
+    ///
+    /// Chosen so that the distinction is visible: `M1` and `M2` do not commute
+    /// and neither `M2 · M1` nor `M1 · M2` equals `M2`, so a composed pipeline
+    /// cannot accidentally agree with a replacing one.
+    @Test("A second authored matrix replaces the first, and is not composed with it")
+    func asecondAuthoredMatrixReplacesTheFirst() throws {
+        let source = try Self.prepared()
+        let pipeline = WorkspacePreviewPipeline()
+
+        let first = try UserChannelMixAdjustment.explicit(
+            persistedMatrix: [
+                0, 1, 0,
+                0, 0, 1,
+                1, 0, 0,
+            ]
+        )
+        let second = try UserChannelMixAdjustment.explicit(
+            persistedMatrix: [
+                1.5, -0.25, 0,
+                0, 0.5, 0.25,
+                -0.5, 0, 2,
+            ]
+        )
+        // M2 · M1, worked out by hand. This is what a pipeline that composed
+        // the two would render, and it is the thing that must not appear.
+        let composed = try UserChannelMixAdjustment.explicit(
+            persistedMatrix: [
+                0, 1.5, -0.25,
+                0.25, 0, 0.5,
+                2, -0.5, 0,
+            ]
+        )
+
+        func render(_ mix: UserChannelMixAdjustment) throws -> Data? {
+            WorkspaceStubs.pixelBytes(
+                try pipeline.render(source, adjustments: ImageAdjustments(channelMix: mix)).image
+            )
+        }
+
+        // Render the first, then the second, from the same retained source.
+        let afterFirst = try render(first)
+        let afterSecond = try render(second)
+
+        // The second rendering is one pass of the second matrix over the
+        // retained pre-mix buffer — computed here from that buffer directly.
+        let byHand = try DisplayPreviewRenderer().render(
+            try ImageOrienter().apply(
+                to: try IRChannelMixer().apply(to: source.preview, mix: second.mix),
+                orientation: .upright
+            ),
+            settings: WorkspacePreviewPipeline.displaySettings(
+                for: ImageAdjustments(channelMix: second)
+            )
+        )
+        #expect(
+            afterSecond
+                == WorkspaceStubs.pixelBytes(
+                    try DisplayPreviewCGImageAdapter.makeCGImage(from: byHand)
+                )
+        )
+
+        // And it is not the composition, nor a leftover of the first.
+        #expect(afterSecond != afterFirst)
+        let asIfComposed = try render(composed)
+        #expect(afterSecond != asIfComposed)
+
+        // Rendering the second again gives the same pixels: a mix is a state,
+        // so asking for it twice is not two applications of it.
+        let secondAgain = try render(second)
+        #expect(secondAgain == afterSecond)
+
+        // The retained buffer is still pre-mix after all of it.
+        #expect(!source.preview.processing.channelMixApplied)
+        #expect(source.preview.processing.reducedForPreview)
+    }
+
+    /// The matrix the stage applied is the matrix the user authored, coefficient
+    /// for coefficient, and its provenance stays creative.
+    @Test("An authored matrix is recorded as explicit, with its own coefficients")
+    func anAuthoredMatrixIsRecordedAsExplicit() throws {
+        let coefficients: [Double] = [
+            1.8, -0.4, -0.4,
+            -0.2, 1.4, -0.2,
+            2.5, 0, -1.5,
+        ]
+        let authored = try UserChannelMixAdjustment.explicit(persistedMatrix: coefficients)
+        let rendered = try WorkspacePreviewPipeline().render(
+            try Self.prepared(), adjustments: ImageAdjustments(channelMix: authored)
+        )
+
+        #expect(rendered.channelMixAdjustment == authored)
+        #expect(rendered.channelMix.matrix.rows.flatMap { $0 } == coefficients)
+        #expect(rendered.channelMix.source == .explicit)
+        #expect(rendered.channelMix.workingColorSpace == .extendedLinearSRGB)
+        #expect(rendered.processing.channelMixApplied)
+        // Creative, and making no calibration claim.
+        #expect(!rendered.isValidatedInfraredCalibration)
+    }
+
     // MARK: - Pixel correctness, on a field a reader can check by hand
 
     /// Three clearly distinguishable channels, so "the mix moved the channels"
