@@ -2231,8 +2231,14 @@ of *those*, plus image quality:
   mapping, hue remapping, LUT-based finishing. Channel mixing is decided; these
   are separate operations that ADR 0007 does not cover.
 - **Filter and capture profiles, and recipes** — what would decide a mix and a
-  transform for a given camera, conversion and filter, and how that is
-  persisted and versioned.
+  transform for a given camera, conversion and filter. Two halves of this are
+  now settled and the rest is not. A capture profile is a persisted, versioned,
+  reusable description of the capture (ADR 0020, ADR 0021), and a creative
+  channel mix is a persisted, versioned, reusable **preset** (ADR 0024). What
+  is still open is anything that would *decide* either one for a photograph: no
+  profile or preset is selected automatically, nothing matches by nominal
+  wavelength, and no preset carries a transform, a white balance, an exposure or
+  an orientation.
 - Whether a **visible-light matrix is ever appropriate for infrared capture**.
   The adapter exists as an opt-in diagnostic; that is not an endorsement. The
   IR calibration *methodology* is no longer open — ADR 0022 and
@@ -2252,17 +2258,24 @@ of *those*, plus image quality:
   implemented (ADR 0009, ADR 0010), but only as the eight discrete
   arrangements — whether a file names one or a person does; the continuous
   editing operations are a different problem and need interpolation.
-- **Anything about persistence beyond one photograph's own state.** The
-  complete adjustment record is saved in a JSON sidecar beside the RAW file and
-  restored before the first render (ADR 0013). What does not exist: recipes and
-  presets, any reuse of a record across images, a document format, watching a
-  sidecar for external edits, and undo/redo.
+- **Anything about persistence beyond one photograph's own state, except a
+  reusable creative mix.** The complete adjustment record is saved in a JSON
+  sidecar beside the RAW file and restored before the first render (ADR 0013).
+  One part of it is reusable: a channel mix can be saved as a named preset in an
+  application-owned library and applied to another photograph (ADR 0024). The
+  photograph still stores the **resolved** mix rather than a reference, so
+  nothing about a sidecar changed and a preset cannot reach back into an image
+  already developed. What does not exist: a recipe format carrying a whole
+  processing state, reuse of a white balance, an exposure or an orientation
+  across images, a document format, watching a sidecar for external edits, and
+  undo/redo.
 - **Any adjustment beyond the four that exist.** The infrared white balance
   (ADR 0019), orientation (ADR 0010), the creative channel mix (ADR 0016) and
   exposure (ADR 0017) are user decisions with controls and a sidecar. The
   camera-to-working transform and the demosaic algorithm are still fixed
   application-layer choices with no controls, and the recipe format that would
-  hold any of it is deliberately undefined.
+  hold all four at once is deliberately undefined — a creative preset carries
+  the mix alone, and deliberately not the other three.
 - **Every white-balance mode except a picked neutral patch.** Temperature and
   tint, manual per-plane gains, grey-world or any other automatic estimate, and
   per-camera or per-filter white-balance profiles (ADR 0019).

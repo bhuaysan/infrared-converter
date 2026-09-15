@@ -297,3 +297,44 @@ hotspot correction, tone curves, histograms, Kelvin/tint white balance, manual
 white-balance gain entry, automatic scene analysis, and any automatic detection
 that a photograph is infrared. A creative matrix remains creative: none of this
 makes any transform in the project a validated infrared calibration.
+
+## Amendment (ADR 0024) — an authored matrix is now saveable as a preset
+
+The limitations above say:
+
+> **No presets.** An authored matrix is not saveable as a named recipe. That is
+> the recipe feature, which references profiles by stable identity and does not
+> exist yet.
+
+and the non-goals list "Filter-family presets (590/665/720/830 nm)". Both were
+accurate for this milestone. The first is now superseded:
+[ADR 0024](0024-reusable-creative-presets.md) adds `IRCreativePreset`, a named
+reusable `UserChannelMixAdjustment` with an optional filter note, stored in an
+application-owned library of its own.
+
+The second is **not** superseded, and the distinction is the substance of ADR
+0024. What exists is the mechanism; what still does not exist is any
+wavelength-specific matrix. No preset ships with this build, because no
+measured or otherwise established basis for a "590 nm matrix" or a "720 nm
+matrix" exists in this repository, and a preset carrying a wavelength label is
+a note about what its author used the look with rather than a calibration for
+that filter.
+
+Nothing in this document changed to make presets possible, which is the same
+point ADR 0023 made about ADR 0016 having built the state first:
+
+- `ChannelMixMatrixDraft`, `RAWColorMatrix3x3`, `UserChannelMixAdjustment`,
+  `IRChannelMix` and `IRChannelMixer` are untouched;
+- `DocumentState.setChannelMix` is still the one entry point, and a preset
+  reaches it with an ordinary adjustment;
+- the editor is still the only matrix editor — inspecting a preset opens this
+  one, seeded with its coefficients;
+- `IRChannelMixSource` gains no case, because where a person got a matrix from
+  is not a property of the matrix;
+- the photograph sidecar is unchanged at schema version 5, and stores the
+  resolved mix rather than a reference to a preset — so renaming or deleting a
+  preset cannot change a photograph developed with it.
+
+The one thing this document's own editor gained is a caller: the preset library
+hands it a stored mix to display, and its Apply still sets the **photograph's**
+mix rather than editing the preset.

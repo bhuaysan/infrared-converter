@@ -543,9 +543,10 @@ is useful while the owned one is young.
 
 Still absent: any tone control — contrast, curves, highlight recovery,
 saturation, automatic exposure, a histogram; a white-balance control; a channel-mix matrix editor;
-arbitrary rotation, straightening and crop; undo/redo; filter and capture
-profiles, recipes and presets beyond the two built-in mixes, so a saved record
-belongs to one photograph and cannot be reused; every export format but one —
+arbitrary rotation, straightening and crop; undo/redo; a recipe format that
+would carry a whole processing state between photographs — a creative channel
+mix is reusable as a named preset, and the white balance, exposure and
+orientation are not; every export format but one —
 JPEG, PNG, DNG, OpenEXR, floating-point TIFF, batch export and export presets;
 a cache across opens; zoom or 1:1 inspection; Metal.
 
@@ -853,8 +854,13 @@ See [RAW/README.md](RAW/README.md).
   *different* photograph never waits. Reopening the one you just left waits for
   its own render to finish writing, because both generations share one sidecar;
   the reopen then starts from the state that was just saved.
-- **Saved state is one photograph's own.** There is no recipe format, no
-  preset, and no way to apply one file's record to another.
+- **Saved state is one photograph's own, apart from the creative mix.** A
+  channel mix can be saved as a named preset and applied to another photograph;
+  the white balance, the exposure and the orientation cannot, and there is no
+  recipe format that carries a whole processing state between files. A
+  photograph stores the **resolved** mix, never a reference to a preset, so
+  renaming or deleting a preset changes nothing about an image developed with
+  it. See [ADR 0024](docs/decisions/0024-reusable-creative-presets.md).
 - **Orientation has no automatic correction.** A file is oriented by what it
   records, and departing from that is a manual act. There is no camera-model
   table, no filename heuristic and no automatic straightening — the E-PL3
@@ -934,8 +940,16 @@ See [RAW/README.md](RAW/README.md).
   mid-render, two documents briefly hold one pair each.
 - **The mix editor is nine numeric cells.** Identity, Red/Blue Swap and a
   custom 3×3 matrix, committed on Apply. There are no per-channel sliders, no
-  named presets to save a matrix under, no determinant readout and no
-  before/after; a decimal separator is `.`, and `1,5` is not a number.
+  determinant readout and no before/after; a decimal separator is `.`, and
+  `1,5` is not a number.
+- **Presets reuse a mix, and ship empty.** A mix can be saved under a name,
+  with an optional filter note, and applied to another photograph. This build
+  ships **no** presets: there is no measured basis anywhere in this project for
+  a "590 nm", "665 nm", "720 nm" or "830 nm" matrix, and inventing nine
+  plausible coefficients and labelling them with a wavelength would be exactly
+  the false filter science the project refuses. A filter note on a preset is
+  context — a family label, not a measured spectral response — and nothing is
+  ever applied because a wavelength matches.
 - **Nothing detects infrared.** A file with no saved decision opens with the
   identity mix. There is no filter metadata, no conversion database and no
   heuristic that would choose the red/blue swap for a photograph.
@@ -978,10 +992,10 @@ See [RAW/README.md](RAW/README.md).
   every open — the reduction is the last step of that, not a way to avoid it —
   and there is no cache across opens. Each adjustment re-mixes, re-orients and
   re-encodes the reduced frame only.
-- Infrared white balance, an interactive channel mixer and a display boundary
-  exist; no
-  false-colour mapping, hue remapping, filter profiles or recipes, no develop
-  controls, no export.
+- Infrared white balance, an interactive channel mixer, reusable creative
+  presets and a display boundary exist; no false-colour mapping, no hue
+  remapping, no calibrated filter profiles, no recipe format, no develop
+  controls.
 - The workspace's white-balance patch is a centred rectangle, not a scene
   analysis. Nothing verifies that what is in the middle of the frame is
   neutral, and there is no picker yet.
