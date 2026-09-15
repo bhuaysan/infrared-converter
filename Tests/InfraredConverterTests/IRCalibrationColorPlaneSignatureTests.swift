@@ -258,9 +258,12 @@ struct IRCalibrationColorPlaneSignatureTests {
         #expect(measurements.includedPatchCount == 0)
         #expect(measurements.excludedPatchCount == 8)
 
+        // Built under this suite's own illuminant, so that the fit refuses for
+        // the reason under test rather than for pairing two illuminants.
         let reference = CalibrationTestData.referenceDataset(
             for: CalibrationTestData.measurementSet(),
-            matrix: CalibrationTestData.syntheticMatrix
+            matrix: CalibrationTestData.syntheticMatrix,
+            illuminant: .d65
         )
         #expect(throws: IRCalibrationFitError.noIncludedPatches) {
             _ = try IRCalibrationFitter().fit(

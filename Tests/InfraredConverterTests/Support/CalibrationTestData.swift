@@ -261,7 +261,7 @@ enum CalibrationTestData {
         noise: [IRCalibrationTargetPatchID: (Double, Double, Double)] = [:],
         identifier: String = "synthetic.exact",
         version: String = "1",
-        illuminant: IRCalibrationIlluminant = .measuredSPD(reference: "synthetic-spd-1")
+        illuminant: IRCalibrationIlluminant? = nil
     ) -> IRCalibrationReferenceDataset {
         let gains = try! IRCalibrationFitter.sessionGains(for: measurements)
         var values: [IRCalibrationTargetPatchID: IRCalibrationReferenceRGB] = [:]
@@ -289,7 +289,13 @@ enum CalibrationTestData {
             identifier: identifier,
             version: version,
             source: "Synthesised inside the test suite; not a measurement of anything.",
-            illuminant: illuminant,
+            // Reference values are defined *under* an illuminant, and a fit may
+            // not cross two. So a synthetic dataset built for a given
+            // measurement set defaults to that set's own illuminant rather than
+            // to a constant, and a test that wants a mismatch has to ask for
+            // one explicitly — which is the shape a test of the rule should
+            // have.
+            illuminant: illuminant ?? measurements.illuminant,
             target: measurements.target,
             values: values
         )
