@@ -38,7 +38,7 @@ import Foundation
 /// a mirrored result on a symmetrical subject.
 @Suite(
     "ImageOrienter integration",
-    .enabled(if: RAWFixtures.isAvailable, "\(RAWFixtures.unavailableReason)")
+    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)")
 )
 struct ImageOrienterFixtureTests {
 

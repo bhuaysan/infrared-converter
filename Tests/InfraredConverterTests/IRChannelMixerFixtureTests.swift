@@ -36,7 +36,7 @@ import Foundation
 /// it.
 @Suite(
     "IRChannelMixer integration",
-    .enabled(if: RAWFixtures.isAvailable, "\(RAWFixtures.unavailableReason)")
+    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)")
 )
 struct IRChannelMixerFixtureTests {
 

@@ -21,7 +21,7 @@ import Foundation
 /// it.
 @Suite(
     "RAWWhiteBalanceEstimator integration",
-    .enabled(if: RAWFixtures.isAvailable, "\(RAWFixtures.unavailableReason)")
+    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)")
 )
 struct RAWWhiteBalanceEstimatorFixtureTests {
     /// A 64×64 patch at the centre of the 4056×3040 active area.

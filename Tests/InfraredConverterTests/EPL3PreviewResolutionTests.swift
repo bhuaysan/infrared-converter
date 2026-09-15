@@ -13,7 +13,7 @@ import Foundation
 /// disk is not touched.
 @Suite(
     "E-PL3 preview resolution",
-    .enabled(if: RAWFixtures.isAvailable, "\(RAWFixtures.unavailableReason)")
+    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)")
 )
 struct EPL3PreviewResolutionTests {
 

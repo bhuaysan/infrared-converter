@@ -32,7 +32,7 @@ import Foundation
 /// it.
 @Suite(
     "RAWWorkingColorConverter integration",
-    .enabled(if: RAWFixtures.isAvailable, "\(RAWFixtures.unavailableReason)")
+    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)")
 )
 struct RAWWorkingColorConverterFixtureTests {
 

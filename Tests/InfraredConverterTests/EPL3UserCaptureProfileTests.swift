@@ -23,7 +23,7 @@ import Foundation
 /// It is explicitly uncalibrated, and the tests assert that it says so.
 @Suite(
     "E-PL3 user capture profile",
-    .enabled(if: RAWFixtures.isAvailable, "\(RAWFixtures.unavailableReason)"),
+    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)"),
     .serialized
 )
 @MainActor

@@ -10,7 +10,7 @@ import Foundation
 /// without it.
 @Suite(
     "RAWMosaicNormalizer integration",
-    .enabled(if: RAWFixtures.isAvailable, "\(RAWFixtures.unavailableReason)")
+    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)")
 )
 struct RAWMosaicNormalizerFixtureTests {
     private static func processFixture() throws -> ProcessedRAWMosaic {
