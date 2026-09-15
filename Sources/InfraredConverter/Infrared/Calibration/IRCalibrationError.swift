@@ -24,6 +24,12 @@ public enum IRCalibrationError: Error, Equatable {
 
     case emptyReferenceDataset
 
+    /// A reference dataset identifier or version containing the character that
+    /// joins the two, so that two different pairs could name one identity.
+    ///
+    /// See ``IRCalibrationReferenceDataset/identity``.
+    case ambiguousReferenceDatasetIdentity(field: String, token: String)
+
     /// A field whose value a person can see and correct, left empty.
     case missingRequiredField(field: String, reason: String)
 
@@ -119,6 +125,8 @@ extension IRCalibrationError: LocalizedError {
             return "A calibration measurement set contains no patches."
         case .emptyReferenceDataset:
             return "A calibration reference dataset contains no values."
+        case .ambiguousReferenceDatasetIdentity:
+            return "That reference dataset identifier and version could name another dataset."
         case .missingRequiredField:
             return "This calibration record is missing something it must record."
         case .nonFiniteValue:
@@ -184,6 +192,20 @@ extension IRCalibrationError: LocalizedError {
             return """
                 A reference dataset is what a fit aims at. With no values in it there is \
                 nothing to fit towards.
+                """
+
+        case .ambiguousReferenceDatasetIdentity(let field, let token):
+            let separator = IRCalibrationReferenceDataset.identitySeparator
+            return """
+                "\(field)" is "\(token)", which contains "\(separator)". A reference \
+                dataset is named by "identifier\(separator)version", and a fit result stores \
+                that one string as the whole record of what it was fitted against. With \
+                "\(separator)" allowed inside either part, identifier "a\(separator)b" at \
+                version "c" and identifier "a" at version "b\(separator)c" produce the same \
+                identity — two different tables of numbers that every identity check would \
+                read as one. Refused rather than escaped or quietly rewritten: this is your \
+                own label for your evidence, and an artefact should not name something you \
+                did not write. Use a separator of your own choosing instead.
                 """
 
         case .missingRequiredField(let field, let reason):

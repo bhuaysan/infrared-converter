@@ -123,6 +123,16 @@ public struct IRCalibrationReferenceDataset: Equatable, Sendable {
                     """
             )
         }
+        guard !identifier.contains(Self.identitySeparator) else {
+            throw .ambiguousReferenceDatasetIdentity(
+                field: "referenceDataset.identifier", token: identifier
+            )
+        }
+        guard !version.contains(Self.identitySeparator) else {
+            throw .ambiguousReferenceDatasetIdentity(
+                field: "referenceDataset.version", token: version
+            )
+        }
         guard !source.isEmpty else {
             throw .missingRequiredField(
                 field: "referenceDataset.source",
@@ -156,7 +166,41 @@ public struct IRCalibrationReferenceDataset: Equatable, Sendable {
         self.values = values
     }
 
-    public var identity: String { "\(identifier)@\(version)" }
+    /// The character that joins an identifier to a version in ``identity``,
+    /// and which therefore neither of them may contain.
+    ///
+    /// Declared here, beside the two rules that depend on it: the grammar and
+    /// the refusal that keeps the grammar unambiguous.
+    public static let identitySeparator: Character = "@"
+
+    /// `identifier@version` — how a fit result names the dataset it was
+    /// computed against, so the two can be checked against each other without
+    /// comparing every value.
+    ///
+    /// ## Why the two parts may not contain `@`
+    ///
+    /// A fit result stores this string and nothing else about the dataset it
+    /// aimed at, and ``IRCalibration`` accepts the artefact when the stored
+    /// string matches the identity of the reference dataset beside it. That
+    /// check is only worth anything if one string can be produced by one pair.
+    ///
+    /// With `@` permitted inside either part it cannot be:
+    ///
+    /// ```text
+    /// identifier "a@b", version "c"    ->  a@b@c
+    /// identifier "a",   version "b@c"  ->  a@b@c
+    /// ```
+    ///
+    /// Two genuinely different reference datasets — different revisions of
+    /// different tables of numbers — would then be indistinguishable to every
+    /// check that compares identities, which is exactly the confusion `version`
+    /// exists to prevent. So the separator is refused in both parts, by
+    /// ``init(identifier:version:source:colorSpace:illuminant:target:values:)``,
+    /// rather than escaped or rewritten: a dataset identifier is a person's
+    /// own label for their evidence, and silently changing it would mean the
+    /// artefact names something they did not write. The grammar stays
+    /// `identifier@version`, so nothing about the wire format changes.
+    public var identity: String { "\(identifier)\(Self.identitySeparator)\(version)" }
 
     public func value(
         for patch: IRCalibrationTargetPatchID
