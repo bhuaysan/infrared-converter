@@ -15,13 +15,28 @@ struct ContentView: View {
     /// `docs/decisions/0021-user-capture-profile-library.md`.
     let profileLibrary: IRCaptureProfileLibrary
 
+    /// The application's one owner of creative-preset definitions.
+    ///
+    /// Passed in for the same reason the profile library is: one library per
+    /// process, so a preset saved in one window is offered in the next.
+    /// Deliberately a **separate** library from the profile one — a capture
+    /// profile records how a photograph was made, a preset is a reusable
+    /// creative starting point, and merging them would make a person's taste
+    /// into a claim about their equipment. See
+    /// `docs/decisions/0024-reusable-creative-presets.md`.
+    let presetLibrary: IRCreativePresetLibrary
+
     @State private var documentState: DocumentState
 
     /// Whether the capture-profile library sheet is open.
     @State private var isShowingProfileLibrary = false
 
-    init(profileLibrary: IRCaptureProfileLibrary) {
+    init(
+        profileLibrary: IRCaptureProfileLibrary,
+        presetLibrary: IRCreativePresetLibrary
+    ) {
         self.profileLibrary = profileLibrary
+        self.presetLibrary = presetLibrary
         // The document is given the registry that exists now, rather than being
         // built on the built-in one and corrected afterwards: a photograph
         // opened immediately must resolve a user profile on its first attempt.
@@ -65,7 +80,9 @@ struct ContentView: View {
                     documentState: documentState, isPicking: $isPickingNeutralPatch
                 )
                 Divider().frame(height: 18)
-                ChannelMixControl(documentState: documentState)
+                ChannelMixControl(
+                    documentState: documentState, presetLibrary: presetLibrary
+                )
                 Divider().frame(height: 18)
                 ExposureControl(documentState: documentState)
                 Divider().frame(height: 18)
@@ -1069,12 +1086,40 @@ private struct CaptureProfileControl: View {
 /// that list is the mixes a menu can offer by name, and a matrix is authored
 /// rather than chosen. It reaches the document through the same
 /// `setChannelMix` the built-ins use.
+///
+/// ## Reusable presets
+///
+/// A saved preset is a fourth way to arrive at one of those same three states,
+/// and not a fourth state:
+///
+/// ```text
+/// Presets ▸ <name>              preset.channelMix → setChannelMix
+/// Save Current Mix as Preset…   the mix on screen → the preset library
+/// Manage Presets…               rename, inspect, delete
+/// ```
+///
+/// Every preset entry resolves to an ordinary `UserChannelMixAdjustment` and
+/// goes through the same `setChannelMix` as everything else in this menu, so a
+/// photograph's sidecar records the decision and never a reference to a preset.
+/// Nothing is applied automatically — not on open, not because a capture
+/// profile names the same nominal wavelength as a preset's filter note. See
+/// `docs/decisions/0024-reusable-creative-presets.md`.
 private struct ChannelMixControl: View {
     let documentState: DocumentState
+
+    /// The presets a person has saved. Offered; never consulted for anything
+    /// else.
+    let presetLibrary: IRCreativePresetLibrary
 
     /// Whether the matrix editor is open. Transient view state: being about to
     /// author a matrix is not an editing decision and persists nothing.
     @State private var isEditingMatrix = false
+
+    /// Whether the "save this mix as a preset" sheet is open.
+    @State private var isSavingPreset = false
+
+    /// Whether the preset library sheet is open.
+    @State private var isShowingPresets = false
 
     var body: some View {
         Menu {
@@ -1092,6 +1137,33 @@ private struct ChannelMixControl: View {
                     }
                 }
             }
+
+            Divider()
+
+            Menu("Presets") {
+                if presetLibrary.isEmpty {
+                    // A disabled line rather than an absent submenu: a person
+                    // looking for presets should find out that they have none
+                    // rather than find nothing at all.
+                    Button("No Presets Saved") {}.disabled(true)
+                } else {
+                    ForEach(presetLibrary.presets) { preset in
+                        Button {
+                            // The whole of "applying a preset": one existing
+                            // adjustment, through the one existing entry
+                            // point. Not composed with the mix in force, and
+                            // nothing else about the photograph is touched.
+                            documentState.setChannelMix(preset.channelMix)
+                        } label: {
+                            Text(presetLabel(preset))
+                        }
+                    }
+                }
+            }
+
+            Button("Save Current Mix as Preset…") { isSavingPreset = true }
+
+            Button("Manage Presets…") { isShowingPresets = true }
 
             Divider()
 
@@ -1127,12 +1199,69 @@ private struct ChannelMixControl: View {
                 apply: documentState.setChannelMix
             )
         }
+        .sheet(isPresented: $isSavingPreset) {
+            CreativePresetSaveView(
+                mode: .create,
+                draft: newPresetDraft(),
+                // The mix as it is at the moment the sheet opens. A preset
+                // records the decision the person was looking at, not whatever
+                // the photograph has become by the time they finish typing.
+                channelMix: documentState.channelMixAdjustment,
+                prefilledFrom: prefillSource,
+                save: { draft in
+                    try presetLibrary.create(
+                        draft, channelMix: documentState.channelMixAdjustment
+                    )
+                }
+            )
+        }
+        .sheet(isPresented: $isShowingPresets) {
+            CreativePresetLibraryView(
+                library: presetLibrary, documentState: documentState
+            )
+        }
         .onChange(of: documentState.canAdjust) { _, canAdjust in
             // A photograph that cannot be adjusted cannot be mixed either, and
             // an editor left open over that transition would offer an Apply
             // that does nothing.
-            if !canAdjust { isEditingMatrix = false }
+            if !canAdjust {
+                isEditingMatrix = false
+                isSavingPreset = false
+            }
         }
+    }
+
+    /// A preset's menu entry: its name, and its filter note where it has one.
+    ///
+    /// The note is shown because it is why a person gave the preset that name,
+    /// and worded — by `IRFilterDescriptor` itself — so that "720 nm nominal
+    /// long-pass" cannot be read as a measurement.
+    private func presetLabel(_ preset: IRCreativePreset) -> String {
+        guard let filter = preset.filterLabel else { return preset.name }
+        return "\(preset.name) — \(filter)"
+    }
+
+    /// A draft for a new preset, with the filter hint prefilled from the
+    /// photograph's capture profile when that profile records one.
+    ///
+    /// A copy taken once, when the sheet opens. The capture profile says which
+    /// filter was on the lens, which is a reasonable first guess at which
+    /// family the author would suggest the look for — and it stops being
+    /// connected to that profile the instant it is copied.
+    private func newPresetDraft() -> IRCreativePresetDraft {
+        var draft = IRCreativePresetDraft()
+        if documentState.canAdjust, documentState.captureProfile.filter.isKnown {
+            draft.useFilter(from: documentState.captureProfile)
+        }
+        return draft
+    }
+
+    /// What the prefill came from, for the sheet to say so, or `nil` when
+    /// nothing was prefilled.
+    private var prefillSource: String? {
+        guard documentState.canAdjust, documentState.captureProfile.filter.isKnown
+        else { return nil }
+        return "the capture profile “\(documentState.captureProfile.name)”"
     }
 }
 

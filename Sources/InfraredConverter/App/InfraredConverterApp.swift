@@ -58,9 +58,20 @@ struct InfraredConverterApp: App {
     /// rather than a file it reads.
     @State private var profileLibrary = IRCaptureProfileLibrary.applicationSupport()
 
+    /// The one creative-preset library this process has.
+    ///
+    /// Loaded once, from its own folder under Application Support, when the
+    /// application starts. Separate from the profile library in every respect —
+    /// a different folder, a different schema, a different kind of thing — and
+    /// a location that cannot be determined leaves an application whose channel
+    /// mixer works in full: a preset is a shortcut for reusing a mix, never
+    /// something a rendering depends on. See
+    /// `docs/decisions/0024-reusable-creative-presets.md`.
+    @State private var presetLibrary = IRCreativePresetLibrary.applicationSupport()
+
     var body: some Scene {
         WindowGroup("Infrared Converter") {
-            ContentView(profileLibrary: profileLibrary)
+            ContentView(profileLibrary: profileLibrary, presetLibrary: presetLibrary)
                 // Brings the window to the front on launch. Without a bundle,
                 // nothing else does: `open` is what normally activates an
                 // application, and a binary started from a shell inherits no
