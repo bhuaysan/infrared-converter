@@ -28,6 +28,20 @@ swift run InfraredConverter
 There is no external setup step: LibRaw is vendored into the package and built
 from source.
 
+### Testing
+
+`swift test` is the fast suite, and it stays fast whether or not a RAW fixture
+is on your disk. Real-camera integration tests are opt-in:
+
+```bash
+swift test                                      # Tier 1 — seconds
+INFRARED_RUN_RAW_FIXTURES=1 swift test --filter EPL3WhiteBalanceTests
+                                                # Tier 2 — one suite
+INFRARED_RUN_RAW_FIXTURES=1 swift test          # Tier 3 — minutes
+```
+
+See [docs/testing.md](docs/testing.md) for which tier a given change needs.
+
 ### Running it is not the same as shipping it
 
 `swift run` produces a bare executable, not an `.app` bundle, and macOS decides
@@ -45,8 +59,9 @@ types, an icon, code signing and entitlements, and none of those exist yet.
 ### Continuous integration
 
 `.github/workflows/ci.yml` runs `swift build` and `swift test` on macOS for
-pushes to `main` and pull requests targeting it. The RAW fixture is not
-committed, so the fixture-backed suites skip themselves there.
+pushes to `main` and pull requests targeting it. That is the Tier 1 suite: the
+RAW fixture is not committed and `INFRARED_RUN_RAW_FIXTURES` is not set, so the
+fixture-backed suites skip themselves there.
 
 ## Current status
 
@@ -819,15 +834,27 @@ that apply before distributing a binary.
 ## Test fixtures
 
 RAW files are large and usually not redistributable, so none is committed.
-Fixture-dependent tests skip cleanly when no file is present.
 
-To run them, drop an Olympus `.ORF` at `RAW/OLYMPUS.ORF`, or:
+Two separate settings control the real-RAW tests, and neither implies the
+other:
 
-```bash
-INFRARED_TEST_ORF=/path/to/your.ORF swift test
+```text
+INFRARED_TEST_ORF            where the fixture is
+INFRARED_RUN_RAW_FIXTURES    whether the expensive suites run
 ```
 
-See [RAW/README.md](RAW/README.md).
+Drop an Olympus `.ORF` at `RAW/OLYMPUS.ORF`, or point `INFRARED_TEST_ORF` at
+one anywhere on disk. **Having the file is not consent to decode it on every
+`swift test`**; ask for the expensive suites explicitly:
+
+```bash
+INFRARED_RUN_RAW_FIXTURES=1 swift test
+```
+
+Asking with no fixture to be found is a failure, not a skip — silent skips must
+never add up to a passing extended run.
+
+See [RAW/README.md](RAW/README.md) and [docs/testing.md](docs/testing.md).
 
 ## Known limitations
 

@@ -945,6 +945,40 @@ Be cautious with potentially sensitive file paths.
 
 Image-processing code must be testable independently of the UI.
 
+## Verification tiers
+
+Two settings, answering two questions that do not imply each other:
+
+```text
+INFRARED_TEST_ORF            where the RAW fixture is
+INFRARED_RUN_RAW_FIXTURES    whether the expensive real-RAW suites run
+```
+
+**The presence of a RAW fixture is not consent to decode it.** A file sitting
+at `RAW/OLYMPUS.ORF` must never change what `swift test` costs or what it runs.
+That rule lives in exactly one place, `RAWFixtureMode`, and every fixture-backed
+suite gates on it.
+
+```text
+Tier 1   swift test                                    seconds
+Tier 2   INFRARED_RUN_RAW_FIXTURES=1 swift test --filter <suite>
+Tier 3   INFRARED_RUN_RAW_FIXTURES=1 swift test        minutes
+```
+
+Tier 1 is the standard milestone verification command. Reach for Tier 2 only
+when the change touched RAW decoding, normalisation, white balance,
+demosaicing, working-colour conversion, channel mixing, orientation, display
+encoding or export — and then run the one suite that covers it. Tier 3 is for
+major pipeline work and release validation.
+
+Do not spend fifteen minutes decoding an ORF to verify a change that cannot
+reach the RAW path.
+
+Requesting Tier 2 or 3 with no fixture to be found is a **failure**, not a
+skip: silent skips must never add up to a passing extended run.
+
+See `docs/testing.md`.
+
 ## Unit tests
 
 Important examples:
@@ -1175,6 +1209,9 @@ That calibration evidence is a first-class artefact rather than a matrix, that m
 That a person can now author the creative 3×3 mix, that the editor produces `UserChannelMixAdjustment.explicit` through `RAWColorMatrix3x3` and hands it to the same `setChannelMix` the built-ins use so there is no second matrix type, no second persisted representation and no second mixer, that the editing state is nine strings in `ChannelMixMatrixDraft` because half-typed text is not a coefficient and a field bound to a `Double` would write a zero over the canonical mix, that non-finiteness is refused by the matrix primitive's own typed error rather than by a rule restated in the editor, that nothing clamps a coefficient, normalises a row, preserves luminance or refuses a singular matrix, that rows stay output channels and columns stay input channels with the three equations printed rather than transposed for convenience, that an authored matrix stays `.explicit` even when its nine numbers equal a built-in's because provenance is what the person did, that no schema version, pipeline order or scheduling changed and a second authored matrix replaces the first from the retained pre-mix preview, and that the white-balance gains are now labelled per colour plane by `RAWWhiteBalanceGainListing` — planes from `RAWWhiteBalanceEstimator.colorPlanes(in:)` so a listing cannot describe a set the estimate did not measure, identities from the layout's `colorDescription` so nothing assumes RGGB, both greens of an `RGBG` sensor kept separate, and the layout carried on `WorkspacePreview` as the provenance the labels are read from — is `docs/decisions/0023-authoring-a-creative-channel-mix.md`.
 
 That a creative channel mix authored for one photograph is now reusable, that a preset is a named `UserChannelMixAdjustment` and never a second mixer, matrix type or persisted mix representation, that applying one is a single assignment into the existing `DocumentState.setChannelMix` so no code below the menu is preset-aware, that `IRChannelMixSource` gains no `.preset` case because where a person found a matrix is not a property of the matrix, that the photograph sidecar is unchanged at schema version 5 and stores the **resolved** decision rather than a reference — so renaming, editing or deleting a preset cannot change an image already developed with it, and an unreadable preset library leaves every photograph rendering exactly as it was — that applying is always explicit and nothing is ever applied because a capture profile names the same nominal wavelength as a preset's filter note, that the filter note is the same `IRFilterDescriptor` used for capture context and takes part in no arithmetic or selection, that this build ships **no** presets because no measured basis for a 590/665/720/830 nm matrix exists here while `builtin.` is reserved against one appearing dishonestly, that presets live in their own Application Support folder under their own schema version with the capture-profile library's file rules — one file per preset, the filename is the identity, a corrupt file costs one preset and is reported, and a duplicate identity is refused rather than resolved by load order — that there is no registry type because nothing resolves a preset reference, that a capture profile's filter is a save-form **prefill** copied once and never a binding, and that a preset carries the mix alone because a neutral patch, an exposure and an orientation are photograph-local, is `docs/decisions/0024-reusable-creative-presets.md`.
+
+The verification tiers, the two fixture environment variables and why having a
+RAW file is not consent to decode it are in `docs/testing.md`.
 
 ADR numbers are assigned in the order decisions are actually made; do not reuse a number that is already taken.
 
@@ -1452,7 +1489,17 @@ Instead:
 
 ## Before declaring work complete
 
-Run the relevant build and tests.
+Run the relevant build and tests:
+
+```text
+1. swift build
+2. focused tests for the components changed
+3. swift test                                     (Tier 1)
+4. if RAW-sensitive code changed, the relevant targeted real-RAW suite:
+   INFRARED_RUN_RAW_FIXTURES=1 swift test --filter <suite>
+5. the extended real-RAW suite only for major pipeline work or release
+   validation
+```
 
 Report:
 
@@ -1464,7 +1511,9 @@ Known limitations:
 Files changed:
 ```
 
-Do not claim tests pass unless they were actually executed.
+Do not claim tests pass unless they were actually executed. Say which tier was
+run: a Tier 1 result is not evidence about real-camera integration, and
+reporting it as though it were is the failure mode the tiers exist to prevent.
 
 ---
 
@@ -1685,6 +1734,15 @@ Pause and reconsider when code begins to show any of these patterns:
 - a gain listing that walks the CFA cell itself, so it can describe a different set of planes than the estimator measured
 - an unused gain slot shown as `×1.000`, so a plane the sensor never fills reads as a measured plane needing no correction
 - plane labels read from the open document's metadata rather than from the preview whose gains they describe
+- an expensive real-RAW suite enabling itself because a fixture happens to exist, so `swift test` costs minutes on one machine and seconds on another
+- fixture *location* and fixture *execution* decided by one setting, or by seventeen independent `ProcessInfo` lookups instead of one authority
+- an explicit request for the real-RAW suites answered with silent skips and a green run, so a misconfiguration reads as successful integration coverage
+- an unrecognised value for the fixture-mode flag folded into "off" rather than reported
+- a Tier 1 result reported as evidence about real-camera integration
+- raising an asynchronous test's timeout to absorb contention caused by fixture work running beside it
+- the same twelve-megapixel frame decoded once per test in a suite whose tests all consume the identical immutable value
+- a shared fixture cache that a test can mutate, or one that replaces isolation in a suite whose claim is about the filesystem
+- the binary RAW fixture committed to Git, or CI made dependent on private local fixture data
 - every feature depending directly on LibRaw
 - direct Metal shader calls from UI views
 - tests requiring the entire app to run
