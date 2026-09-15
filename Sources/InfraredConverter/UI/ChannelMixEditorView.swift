@@ -169,8 +169,13 @@ struct ChannelMixEditorView: View {
     private var grid: some View {
         Grid(alignment: .trailing, horizontalSpacing: 10, verticalSpacing: 8) {
             GridRow {
+                // The corner cell carries the column's alignment for the whole
+                // grid: `gridColumnAlignment` belongs to one cell per column,
+                // and setting it on every row's label would state it three
+                // times.
                 Text("")
                     .gridCellUnsizedAxes([.horizontal, .vertical])
+                    .gridColumnAlignment(.leading)
                 ForEach(Self.channels, id: \.storageOffset) { input in
                     Text("input \(ChannelMixMatrixDraft.label(for: input))")
                         .font(.caption)
@@ -182,7 +187,6 @@ struct ChannelMixEditorView: View {
                     Text("output \(ChannelMixMatrixDraft.label(for: output))")
                         .font(.callout)
                         .foregroundStyle(.secondary)
-                        .gridColumnAlignment(.leading)
                     ForEach(Self.channels, id: \.storageOffset) { input in
                         coefficientField(output: output, input: input)
                     }
