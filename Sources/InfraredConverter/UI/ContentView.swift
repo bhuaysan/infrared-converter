@@ -1115,8 +1115,14 @@ private struct ChannelMixControl: View {
     /// author a matrix is not an editing decision and persists nothing.
     @State private var isEditingMatrix = false
 
-    /// Whether the "save this mix as a preset" sheet is open.
-    @State private var isSavingPreset = false
+    /// The save-as-preset sheet's request, when one is open.
+    ///
+    /// A value rather than a `Bool`, and that is the fix rather than a
+    /// preference: it carries the mix as it was when the button was tapped, so
+    /// the sheet shows and the library stores the same matrix even if the
+    /// photograph's mix changes while a name is being typed. See
+    /// `CreativePresetSaveRequest`.
+    @State private var presetSaveRequest: CreativePresetSaveRequest?
 
     /// Whether the preset library sheet is open.
     @State private var isShowingPresets = false
@@ -1161,7 +1167,10 @@ private struct ChannelMixControl: View {
                 }
             }
 
-            Button("Save Current Mix as Preset…") { isSavingPreset = true }
+            Button("Save Current Mix as Preset…") {
+                // The single read of the document in this flow.
+                presetSaveRequest = CreativePresetSaveRequest(snapshotOf: documentState)
+            }
 
             Button("Manage Presets…") { isShowingPresets = true }
 
@@ -1199,21 +1208,13 @@ private struct ChannelMixControl: View {
                 apply: documentState.setChannelMix
             )
         }
-        .sheet(isPresented: $isSavingPreset) {
-            CreativePresetSaveView(
-                mode: .create,
-                draft: newPresetDraft(),
-                // The mix as it is at the moment the sheet opens. A preset
-                // records the decision the person was looking at, not whatever
-                // the photograph has become by the time they finish typing.
-                channelMix: documentState.channelMixAdjustment,
-                prefilledFrom: prefillSource,
-                save: { draft in
-                    try presetLibrary.create(
-                        draft, channelMix: documentState.channelMixAdjustment
-                    )
-                }
-            )
+        .sheet(item: $presetSaveRequest) { request in
+            // The whole sheet from the captured request; `documentState` is
+            // not in this expression at all, and the initialiser offers
+            // nowhere to put it. A preset records the decision the person was
+            // looking at, not whatever the photograph has become by the time
+            // they finish typing a name.
+            CreativePresetSaveView(request: request, library: presetLibrary)
         }
         .sheet(isPresented: $isShowingPresets) {
             CreativePresetLibraryView(
@@ -1226,7 +1227,7 @@ private struct ChannelMixControl: View {
             // that does nothing.
             if !canAdjust {
                 isEditingMatrix = false
-                isSavingPreset = false
+                presetSaveRequest = nil
             }
         }
     }
@@ -1241,28 +1242,6 @@ private struct ChannelMixControl: View {
         return "\(preset.name) — \(filter)"
     }
 
-    /// A draft for a new preset, with the filter hint prefilled from the
-    /// photograph's capture profile when that profile records one.
-    ///
-    /// A copy taken once, when the sheet opens. The capture profile says which
-    /// filter was on the lens, which is a reasonable first guess at which
-    /// family the author would suggest the look for — and it stops being
-    /// connected to that profile the instant it is copied.
-    private func newPresetDraft() -> IRCreativePresetDraft {
-        var draft = IRCreativePresetDraft()
-        if documentState.canAdjust, documentState.captureProfile.filter.isKnown {
-            draft.useFilter(from: documentState.captureProfile)
-        }
-        return draft
-    }
-
-    /// What the prefill came from, for the sheet to say so, or `nil` when
-    /// nothing was prefilled.
-    private var prefillSource: String? {
-        guard documentState.canAdjust, documentState.captureProfile.filter.isKnown
-        else { return nil }
-        return "the capture profile “\(documentState.captureProfile.name)”"
-    }
 }
 
 

@@ -83,6 +83,32 @@ struct CreativePresetSaveView: View {
     @State private var refusal: String?
     @Environment(\.dismiss) private var dismiss
 
+    /// The sheet for saving a photograph's current mix, built from the
+    /// snapshot taken when the person asked.
+    ///
+    /// **The create path has this initialiser and no other, deliberately.** The
+    /// designated one below takes the displayed mix and the save action as two
+    /// separate arguments, which is exactly the shape that allowed them to
+    /// disagree: the sheet showed the snapshot while the save re-read the
+    /// document, so a mix changed during typing was shown and not stored. Here
+    /// there is one argument, and the displayed value and the committed value
+    /// are the same field of it. They cannot drift apart because there is
+    /// nothing to drift.
+    ///
+    /// The designated initialiser remains for renaming, where the mix is the
+    /// stored preset's and the action replaces a definition rather than
+    /// creating one.
+    @MainActor
+    init(request: CreativePresetSaveRequest, library: IRCreativePresetLibrary) {
+        self.init(
+            mode: .create,
+            draft: request.draft,
+            channelMix: request.channelMix,
+            prefilledFrom: request.prefilledFrom,
+            save: { edited in try request.commit(edited, to: library) }
+        )
+    }
+
     init(
         mode: Mode,
         draft: IRCreativePresetDraft,
