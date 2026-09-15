@@ -1051,33 +1051,30 @@ private struct CaptureProfileControl: View {
     }
 }
 
-/// The creative infrared channel-mix control.
+
+/// The creative channel-mix control: the two built-in choices, and the way
+/// into the matrix editor.
 ///
-/// Two choices, because there are two the project can honestly offer: traverse
-/// the creative stage and remap nothing, or perform the canonical infrared
-/// operation and exchange red with blue. Neither is a calibration and the
-/// control does not suggest otherwise.
+/// Three things a person can pick, and they are three states of one canonical
+/// adjustment rather than three operations — asking for one replaces whatever
+/// was asked for before, and no mix is ever composed onto another:
 ///
-/// It changes one field of `DocumentState`'s canonical adjustment record and
-/// nothing else. No view here multiplies a matrix, touches a pixel buffer or
-/// knows that `IRChannelMix` exists: the workspace re-renders the retained
-/// pre-mix preview with whatever state it now holds.
+/// ```text
+/// Identity          .identity        remap nothing
+/// Red/Blue Swap     .redBlueSwap     the classic infrared exchange
+/// Custom Matrix…    .explicit(m)     nine coefficients the user authored
+/// ```
 ///
-/// ## Why a menu rather than a segmented picker
-///
-/// Because the adjustment has a third state the workspace can load and this
-/// milestone deliberately cannot author: an explicit 3x3 matrix, which a
-/// sidecar may carry. A menu shows the current state in its label whatever it
-/// is, where a segmented control with no matching segment would simply render
-/// nothing selected and say the file has no mix.
-///
-/// Deliberately absent: a matrix editor, per-channel percentage sliders,
-/// presets, filter profiles, and anything that would pick a mix for the user.
-/// A freshly opened file with no saved decision is `.identity`, and it stays
-/// that way until a person chooses otherwise — nothing here inspects the
-/// photograph to guess whether it is infrared.
+/// `.explicit` is deliberately not in `UserChannelMixAdjustment.selectableCases`:
+/// that list is the mixes a menu can offer by name, and a matrix is authored
+/// rather than chosen. It reaches the document through the same
+/// `setChannelMix` the built-ins use.
 private struct ChannelMixControl: View {
     let documentState: DocumentState
+
+    /// Whether the matrix editor is open. Transient view state: being about to
+    /// author a matrix is not an editing decision and persists nothing.
+    @State private var isEditingMatrix = false
 
     var body: some View {
         Menu {
@@ -1095,6 +1092,20 @@ private struct ChannelMixControl: View {
                     }
                 }
             }
+
+            Divider()
+
+            Button {
+                isEditingMatrix = true
+            } label: {
+                // Marked when an authored matrix is what is in force, for the
+                // same reason the built-ins are.
+                if documentState.channelMixAdjustment.kind == .matrix {
+                    Label("Custom Matrix…", systemImage: "checkmark")
+                } else {
+                    Text("Custom Matrix…")
+                }
+            }
         } label: {
             Label(
                 documentState.channelMixAdjustment.shortDescription,
@@ -1108,6 +1119,20 @@ private struct ChannelMixControl: View {
             "Channel mix: \(documentState.channelMixAdjustment.diagnosticDescription)"
         )
         .disabled(!documentState.canAdjust)
+        .sheet(isPresented: $isEditingMatrix) {
+            // Seeded from the mix in force, so the editor opens on the matrix
+            // on screen rather than on an unrelated identity.
+            ChannelMixEditorView(
+                current: documentState.channelMixAdjustment,
+                apply: documentState.setChannelMix
+            )
+        }
+        .onChange(of: documentState.canAdjust) { _, canAdjust in
+            // A photograph that cannot be adjusted cannot be mixed either, and
+            // an editor left open over that transition would offer an Apply
+            // that does nothing.
+            if !canAdjust { isEditingMatrix = false }
+        }
     }
 }
 
