@@ -22,10 +22,28 @@ struct RAWWhiteBalancerFixtureTests {
     /// particular so that plane 3 and plane 1 cannot be confused.
     static let testGains = RAWWhiteBalanceGains(plane0: 2, plane1: 3, plane2: 4, plane3: 5)
 
-    private static func processFixture() throws -> ProcessedRAWMosaic {
-        let url = try #require(RAWFixtures.olympusORF)
+    /// Prepared **once** for the whole suite.
+    ///
+    /// Every test here consumed a freshly decoded frame, so the same
+    /// twelve-megapixel chain ran once per test to produce bit-identical
+    /// results. The value is a `Sendable` struct over immutable buffers and
+    /// nothing in this suite mutates it, so one shared instance is the same
+    /// value each separate run produced — no claim is weakened by sharing it.
+    ///
+    /// A `static let` is initialised exactly once under `swift_once`, even
+    /// with Swift Testing running these tests concurrently. `Result` is what
+    /// lets a throwing preparation live in one: the error is stored and
+    /// rethrown to every caller rather than retried per test.
+    private static let sharedProcessFixture: Result<ProcessedRAWMosaic, any Error> = Result {
+        guard let url = RAWFixtures.olympusORF else {
+            throw RAWFixtures.Unavailable.noFixture
+        }
         let decoded = try LibRawDecoder().decodeMosaic(at: url)
         return try RAWMosaicNormalizer().process(decoded)
+    }
+
+    private static func processFixture() throws -> ProcessedRAWMosaic {
+        try sharedProcessFixture.get()
     }
 
     // MARK: - Identity

@@ -52,9 +52,43 @@ struct EPL3OrientationCorrectionTests {
     static let correction = UserOrientationAdjustment.quarterTurnLeft
 
     /// The expensive half, run once and shared by the whole suite.
+    ///
+    /// ## It used to say that and not do it
+    ///
+    /// This function previously re-ran `prepare` on every call, and eight
+    /// tests call it. That decoded, normalised, white-balanced, demosaiced,
+    /// colour-converted and reduced the same twelve-megapixel frame eight
+    /// times to obtain eight bit-identical results.
+    ///
+    /// ## Why sharing one value is safe here
+    ///
+    /// `WorkspacePreviewPipeline.Source` is a `Sendable` struct of `let`s
+    /// over immutable buffers, and no test in this suite mutates it — the
+    /// closest any comes is `repeatedCorrectionsRestartFromTheSource`, which
+    /// *asserts* the buffer is unchanged. Sharing it is therefore not a
+    /// shortcut that weakens a claim; it is the same value the eight separate
+    /// preparations each produced.
+    ///
+    /// A `static let` is initialised exactly once, under `swift_once`, even
+    /// when Swift Testing runs these tests concurrently. The `Result` is what
+    /// lets a throwing preparation live in one: the error is stored and
+    /// rethrown to every caller rather than being retried per test.
+    ///
+    /// This is deliberately a suite-local value rather than a shared fixture
+    /// cache. Only a handful of suites prepare the same thing repeatedly, and
+    /// a framework for that would be more machinery than the problem.
+    private static let preparedSource: Result<WorkspacePreviewPipeline.Source, any Error> =
+        Result {
+            guard let url = RAWFixtures.olympusORF else {
+                throw RAWFixtures.Unavailable.noFixture
+            }
+            return try WorkspacePreviewPipeline().prepare(
+                decoding: url, using: LibRawDecoder()
+            )
+        }
+
     static func prepared() throws -> WorkspacePreviewPipeline.Source {
-        let url = try #require(RAWFixtures.olympusORF)
-        return try WorkspacePreviewPipeline().prepare(decoding: url, using: LibRawDecoder())
+        try preparedSource.get()
     }
 
     // MARK: - 1. The file loads with its own orientation

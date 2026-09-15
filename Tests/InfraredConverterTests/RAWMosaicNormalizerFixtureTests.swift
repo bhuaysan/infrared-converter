@@ -13,10 +13,28 @@ import Foundation
     .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)")
 )
 struct RAWMosaicNormalizerFixtureTests {
-    private static func processFixture() throws -> ProcessedRAWMosaic {
-        let url = try #require(RAWFixtures.olympusORF)
+    /// Prepared **once** for the whole suite.
+    ///
+    /// Every test here consumed a freshly decoded frame, so the same
+    /// twelve-megapixel chain ran once per test to produce bit-identical
+    /// results. The value is a `Sendable` struct over immutable buffers and
+    /// nothing in this suite mutates it, so one shared instance is the same
+    /// value each separate run produced — no claim is weakened by sharing it.
+    ///
+    /// A `static let` is initialised exactly once under `swift_once`, even
+    /// with Swift Testing running these tests concurrently. `Result` is what
+    /// lets a throwing preparation live in one: the error is stored and
+    /// rethrown to every caller rather than retried per test.
+    private static let sharedProcessFixture: Result<ProcessedRAWMosaic, any Error> = Result {
+        guard let url = RAWFixtures.olympusORF else {
+            throw RAWFixtures.Unavailable.noFixture
+        }
         let decoded = try LibRawDecoder().decodeMosaic(at: url)
         return try RAWMosaicNormalizer().process(decoded)
+    }
+
+    private static func processFixture() throws -> ProcessedRAWMosaic {
+        try sharedProcessFixture.get()
     }
 
     @Test("Geometry and CFA mapping are unchanged by normalisation")

@@ -42,25 +42,46 @@ struct DisplayPreviewRendererFixtureTests {
     /// The same deterministic diagnostic region every fixture suite measures.
     static let diagnosticRegion = RAWWhiteBalanceEstimatorFixtureTests.diagnosticRegion
 
-    /// The whole owned chain up to and including the creative mix, with the
-    /// identity false-colour camera-to-working transform — deliberately, so
-    /// the fixture stays independent of the file's visible-light
-    /// `rgbFromCamera`, whose validity for an infrared capture is exactly the
-    /// open question.
-    static func channelMixedFixture(
-        mix: IRChannelMix
-    ) throws -> IRChannelMixedProcessedRAWImage {
-        let url = try #require(RAWFixtures.olympusORF)
+    /// The owned chain with the identity false-colour camera-to-working
+    /// transform — deliberately, so the fixture stays independent of the
+    /// file's visible-light `rgbFromCamera`, whose validity for an infrared
+    /// capture is exactly the open question.
+    ///
+    /// Everything up to but not including the creative mix, prepared
+    /// **once** for the whole suite.
+    ///
+    /// The mix is the one thing these tests vary, so the shared value stops
+    /// exactly where the variation starts. Applying a mix to it is a single
+    /// per-pixel matrix — cheap beside the decode, demosaic and colour
+    /// conversion that used to be repeated for every mix.
+    ///
+    /// The value is a `Sendable` struct over immutable buffers, the mixer
+    /// returns a new image rather than writing into its input, and a
+    /// `static let` is initialised exactly once under `swift_once`. `Result`
+    /// stores a throwing preparation's error and rethrows it to every caller.
+    private static let sharedWorkingColorFixture:
+        Result<WorkingColorProcessedRAWImage, any Error> = Result {
+        guard let url = RAWFixtures.olympusORF else {
+            throw RAWFixtures.Unavailable.noFixture
+        }
         let decoded = try LibRawDecoder().decodeMosaic(at: url)
         let normalized = try RAWMosaicNormalizer().process(decoded)
         let estimate = try RAWWhiteBalanceEstimator()
-            .estimateNeutralPatch(in: normalized.mosaic, region: diagnosticRegion)
+            .estimateNeutralPatch(
+                in: normalized.mosaic,
+                region: DisplayPreviewRendererFixtureTests.diagnosticRegion
+            )
         let balanced = try RAWWhiteBalancer().apply(to: normalized, estimate: estimate)
         let demosaiced = try RAWDemosaicer().demosaic(balanced)
-        let working = try RAWWorkingColorConverter().convert(
+        return try RAWWorkingColorConverter().convert(
             demosaiced, using: .sensorRGBIdentityFalseColor
         )
-        return try IRChannelMixer().apply(to: working, mix: mix)
+    }
+
+    static func channelMixedFixture(
+        mix: IRChannelMix
+    ) throws -> IRChannelMixedProcessedRAWImage {
+        try IRChannelMixer().apply(to: sharedWorkingColorFixture.get(), mix: mix)
     }
 
     /// The same chain, carried one stage further through `ImageOrienter`:

@@ -47,14 +47,37 @@ struct RAWWorkingColorConverterFixtureTests {
     /// The estimated gains are diagnostic only, exactly as in the upstream
     /// suites. What matters here is that a genuine camera-native RGB image
     /// with real provenance reaches this stage.
-    private static func demosaicedFixture() throws -> DemosaicedProcessedRAWImage {
-        let url = try #require(RAWFixtures.olympusORF)
+    ///
+    /// Prepared **once** for the whole suite.
+    ///
+    /// Every test here consumed a freshly decoded frame, so the same
+    /// twelve-megapixel chain ran once per test to produce bit-identical
+    /// results. The value is a `Sendable` struct over immutable buffers and
+    /// nothing in this suite mutates it, so one shared instance is the same
+    /// value each separate run produced — no claim is weakened by sharing it.
+    ///
+    /// A `static let` is initialised exactly once under `swift_once`, even
+    /// with Swift Testing running these tests concurrently. `Result` is what
+    /// lets a throwing preparation live in one: the error is stored and
+    /// rethrown to every caller rather than retried per test.
+    private static let sharedDemosaicedFixture:
+        Result<DemosaicedProcessedRAWImage, any Error> = Result {
+        guard let url = RAWFixtures.olympusORF else {
+            throw RAWFixtures.Unavailable.noFixture
+        }
         let decoded = try LibRawDecoder().decodeMosaic(at: url)
         let normalized = try RAWMosaicNormalizer().process(decoded)
         let estimate = try RAWWhiteBalanceEstimator()
-            .estimateNeutralPatch(in: normalized.mosaic, region: diagnosticRegion)
+            .estimateNeutralPatch(
+                in: normalized.mosaic,
+                region: RAWWorkingColorConverterFixtureTests.diagnosticRegion
+            )
         let balanced = try RAWWhiteBalancer().apply(to: normalized, estimate: estimate)
         return try RAWDemosaicer().demosaic(balanced)
+    }
+
+    private static func demosaicedFixture() throws -> DemosaicedProcessedRAWImage {
+        try sharedDemosaicedFixture.get()
     }
 
     // MARK: - Identity false colour

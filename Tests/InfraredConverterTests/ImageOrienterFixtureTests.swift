@@ -53,18 +53,41 @@ struct ImageOrienterFixtureTests {
     /// identity false-colour camera-to-working transform — deliberately, so
     /// the fixture stays independent of the file's visible-light
     /// `rgbFromCamera`.
-    static func channelMixedFixture() throws -> IRChannelMixedProcessedRAWImage {
-        let url = try #require(RAWFixtures.olympusORF)
+    ///
+    /// Prepared **once** for the whole suite.
+    ///
+    /// Every test here consumed a freshly decoded frame, so the same
+    /// twelve-megapixel chain ran once per test to produce bit-identical
+    /// results. The value is a `Sendable` struct over immutable buffers and
+    /// nothing in this suite mutates it, so one shared instance is the same
+    /// value each separate run produced — no claim is weakened by sharing it.
+    ///
+    /// A `static let` is initialised exactly once under `swift_once`, even
+    /// with Swift Testing running these tests concurrently. `Result` is what
+    /// lets a throwing preparation live in one: the error is stored and
+    /// rethrown to every caller rather than retried per test.
+    private static let sharedChannelMixedFixture:
+        Result<IRChannelMixedProcessedRAWImage, any Error> = Result {
+        guard let url = RAWFixtures.olympusORF else {
+            throw RAWFixtures.Unavailable.noFixture
+        }
         let decoded = try LibRawDecoder().decodeMosaic(at: url)
         let normalized = try RAWMosaicNormalizer().process(decoded)
         let estimate = try RAWWhiteBalanceEstimator()
-            .estimateNeutralPatch(in: normalized.mosaic, region: diagnosticRegion)
+            .estimateNeutralPatch(
+                in: normalized.mosaic,
+                region: ImageOrienterFixtureTests.diagnosticRegion
+            )
         let balanced = try RAWWhiteBalancer().apply(to: normalized, estimate: estimate)
         let demosaiced = try RAWDemosaicer().demosaic(balanced)
         let working = try RAWWorkingColorConverter().convert(
             demosaiced, using: .sensorRGBIdentityFalseColor
         )
         return try IRChannelMixer().apply(to: working, mix: .identity)
+    }
+
+    static func channelMixedFixture() throws -> IRChannelMixedProcessedRAWImage {
+        try sharedChannelMixedFixture.get()
     }
 
     // MARK: - What the file records
