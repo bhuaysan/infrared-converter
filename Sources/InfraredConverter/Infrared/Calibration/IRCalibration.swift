@@ -81,6 +81,23 @@ public struct IRCalibration: Equatable, Sendable, Identifiable {
                 reference: reference.target.displayName
             )
         }
+        // Semantic, and therefore checked here rather than left to the fit
+        // verification below. An illuminant mismatch moves no coefficient and
+        // no residual: the same responses fitted against the same values give
+        // the same transform whatever the two artefacts record about the light,
+        // so recomputing the matrix can never find it. A calibration assembled
+        // in memory from parts that happen to satisfy every arithmetic check is
+        // refused here for what it would be claiming.
+        guard
+            IRCalibrationIlluminantCompatibility.areCompatible(
+                measurement: measurements.illuminant, reference: reference.illuminant
+            )
+        else {
+            throw .illuminantMismatch(
+                measured: measurements.illuminant.identityDescription,
+                reference: reference.illuminant.identityDescription
+            )
+        }
         guard fit.sourceMeasurementID == measurements.id else {
             throw .evidenceMismatch(
                 expected: measurements.id.rawValue,

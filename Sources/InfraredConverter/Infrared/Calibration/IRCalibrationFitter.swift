@@ -51,6 +51,16 @@ public struct IRCalibrationFitter: Sendable {
                 reference: reference.target.displayName
             )
         }
+        guard
+            IRCalibrationIlluminantCompatibility.areCompatible(
+                measurement: measurements.illuminant, reference: reference.illuminant
+            )
+        else {
+            throw IRCalibrationFitError.illuminantMismatch(
+                measured: measurements.illuminant.identityDescription,
+                reference: reference.illuminant.identityDescription
+            )
+        }
 
         let derivation = try Self.derive(measurements: measurements, reference: reference)
 
@@ -112,9 +122,13 @@ public struct IRCalibrationFitter: Sendable {
     /// one green collapse in this project, and everything that needs them goes
     /// through here.
     ///
-    /// It does not compare targets: pairing a chart's measurements with
-    /// another chart's reference values is a rule about the record, enforced
-    /// by `fit` and by ``IRCalibration``, not a property of the arithmetic.
+    /// It compares neither targets nor illuminants: pairing a chart's
+    /// measurements with another chart's reference values, or evidence from one
+    /// illuminant with values defined for another, are rules about the record.
+    /// They are enforced by `fit`, by ``IRCalibration`` and by
+    /// ``IRCalibrationFitVerifier``, not by the arithmetic — which has no
+    /// objection to either and would happily report small residuals about a
+    /// relationship that does not exist.
     static func derive(
         measurements: IRCalibrationMeasurementSet,
         reference: IRCalibrationReferenceDataset

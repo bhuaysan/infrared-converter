@@ -229,6 +229,12 @@ public struct IRCalibrationMeasurementSet: Equatable, Sendable {
     ) throws(IRCalibrationError) {
         guard !patches.isEmpty else { throw .emptyMeasurementSet }
 
+        // One of the two domain boundaries that create calibration evidence,
+        // and therefore one of the two places an illuminant identity is
+        // checked and normalised. Decoding a persisted measurement set arrives
+        // here too, so there is no separate validation on the wire.
+        let illuminant = try illuminant.validated(field: "measurements.illuminant")
+
         var seen = Set<IRCalibrationTargetPatchID>()
         for measurement in patches {
             guard target.contains(measurement.patch) else {

@@ -58,6 +58,24 @@ public enum IRCalibrationIlluminant: Equatable, Sendable {
         return false
     }
 
+    /// The recorded identity, compactly and unambiguously.
+    ///
+    /// Distinct from ``shortDescription``, which is a label: `.d65` and
+    /// `.namedOther("D65")` both read as "D65" there, and the whole point of a
+    /// compatibility refusal is to say which of the two a record carries. Used
+    /// in the typed errors, where a person is holding two artefacts that will
+    /// not go together and the useful question is what each of them actually
+    /// says.
+    public var identityDescription: String {
+        switch self {
+        case .d65: return "D65, asserted"
+        case .d50: return "D50, asserted"
+        case .namedOther(let name): return "the source named \"\(name)\""
+        case .measuredSPD(let reference): return "the measured SPD recorded at \"\(reference)\""
+        case .unknown: return "an illuminant nobody recorded"
+        }
+    }
+
     public var shortDescription: String {
         switch self {
         case .d65: return "D65"
@@ -84,6 +102,87 @@ public enum IRCalibrationIlluminant: Equatable, Sendable {
                 unknown, and no calibration measured under it can claim more than that it \
                 was measured
                 """
+        }
+    }
+}
+
+// MARK: - Validating a recorded identity
+
+extension IRCalibrationIlluminant {
+
+    /// The one place an illuminant's recorded identity is checked and
+    /// normalised, and the only shape in which one enters a calibration
+    /// artefact.
+    ///
+    /// ``IRCalibrationMeasurementSet`` and ``IRCalibrationReferenceDataset``
+    /// are the two domain boundaries that create calibration evidence, and
+    /// both call this in their initialisers. Decoding a persisted record goes
+    /// through those same initialisers, so a file cannot carry an illuminant
+    /// that could not have been constructed in memory — there is no second
+    /// validation on the persistence path, and deliberately so.
+    ///
+    /// ## What it refuses
+    ///
+    /// The two cases carrying text carry the *entire* identity of the
+    /// illuminant in that text. `.namedOther("")` and
+    /// `.measuredSPD(reference: "   ")` are records that say nothing while
+    /// occupying the place where the experiment's illumination is supposed to
+    /// be described, and an empty `.measuredSPD` is worse than merely useless:
+    /// ``isMeasured`` would report `true` for it, so it would satisfy the one
+    /// illuminant condition ``IRCalibrationAcceptanceCriteria`` can require
+    /// while pointing at no measurement at all.
+    ///
+    /// ## What it normalises
+    ///
+    /// Outer whitespace, and nothing else — the same trimming
+    /// ``IRCalibrationReferenceDataset`` and ``IRCalibrationProvenance``
+    /// already apply to the text a person types. After trimming, the identity
+    /// is **exact and case-sensitive**: `"LED Panel A"` and `"led panel a"`
+    /// are two different records. These are evidence identifiers rather than
+    /// search terms, and case folding them would be a matching rule this
+    /// project has no basis for — the person who wrote one of the two meant
+    /// what they wrote.
+    ///
+    /// `.d65`, `.d50` and `.unknown` carry no text and are returned unchanged.
+    /// Normalisation is idempotent, so re-validating an already-validated
+    /// value — which ``IRCalibrationMeasurementSet/excluding(_:because:)``
+    /// does — changes nothing.
+    public func validated(field: String) throws(IRCalibrationError) -> IRCalibrationIlluminant {
+        switch self {
+        case .d65, .d50, .unknown:
+            return self
+
+        case .namedOther(let name):
+            let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else {
+                throw .missingRequiredField(
+                    field: "\(field).name",
+                    reason: """
+                        A named illuminant is named by that text and by nothing else, so an \
+                        empty one records that somebody chose to describe the illumination \
+                        and then described none of it. Either name the source or record it \
+                        as unknown, which is an honest answer the status rules already \
+                        account for.
+                        """
+                )
+            }
+            return .namedOther(name)
+
+        case .measuredSPD(let reference):
+            let reference = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !reference.isEmpty else {
+                throw .missingRequiredField(
+                    field: "\(field).reference",
+                    reason: """
+                        A measured SPD is carried here by reference — a file, an instrument \
+                        reading, a document — because nothing in this project consumes a \
+                        spectrum. An empty reference points at no measurement while still \
+                        reporting itself as measured illumination, which is the strongest \
+                        claim this type can make and the one least able to survive it.
+                        """
+                )
+            }
+            return .measuredSPD(reference: reference)
         }
     }
 }

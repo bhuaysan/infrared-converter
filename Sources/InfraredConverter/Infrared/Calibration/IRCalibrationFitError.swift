@@ -18,6 +18,15 @@ public enum IRCalibrationFitError: Error, Equatable {
     /// Every measured patch was excluded, so there is nothing to fit.
     case noIncludedPatches
 
+    /// The evidence was recorded under one illuminant and the reference values
+    /// are defined for another, so no transform between them means anything.
+    ///
+    /// Refused before the solver runs, because the arithmetic has no objection:
+    /// a fit across incompatible illumination converges and reports residuals
+    /// exactly like any other, and it is describing a relationship that does
+    /// not exist. See ``IRCalibrationIlluminantCompatibility``.
+    case illuminantMismatch(measured: String, reference: String)
+
     /// A patch admitted to the fit has no reference value.
     case missingReferenceValue(patch: String)
 
@@ -111,6 +120,8 @@ extension IRCalibrationFitError: LocalizedError {
             return "There are too few usable patches to fit a calibration."
         case .noIncludedPatches:
             return "Every measured patch was excluded, so there is nothing to fit."
+        case .illuminantMismatch:
+            return "The measurements and the reference values describe different illumination."
         case .missingReferenceValue:
             return "A patch being fitted has no reference value."
         case .missingChannelResponse:
@@ -155,6 +166,11 @@ extension IRCalibrationFitError: LocalizedError {
                 its patches clipped. A calibration cannot be fitted from censored samples, so \
                 the answer is a new capture rather than a relaxed rule.
                 """
+
+        case .illuminantMismatch(let measured, let reference):
+            return IRCalibrationIlluminantCompatibility.refusalReason(
+                measurement: measured, reference: reference
+            )
 
         case .missingReferenceValue(let patch):
             return """

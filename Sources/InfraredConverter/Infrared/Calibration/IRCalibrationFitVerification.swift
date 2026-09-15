@@ -102,6 +102,16 @@ public enum IRCalibrationFitVerificationFailure: Error, Equatable {
     /// patch identifiers do not mean the same thing.
     case targetMismatch(measured: String, reference: String)
 
+    /// The evidence and the reference describe different illumination.
+    ///
+    /// The one check in this verifier that recomputing the matrix could never
+    /// find. An illuminant mismatch changes no number: the same responses fitted
+    /// against the same reference values produce the same coefficients and the
+    /// same residuals whatever the two artefacts say about the light. It is a
+    /// defect in what the calibration *claims*, which is why the rule is
+    /// semantic and lives in ``IRCalibrationIlluminantCompatibility``.
+    case illuminantMismatch(measured: String, reference: String)
+
     /// The fit names other evidence than the evidence it was given.
     case evidenceMismatch(expected: String, found: String)
 
@@ -143,6 +153,8 @@ extension IRCalibrationFitVerificationFailure: LocalizedError {
             return "This calibration was fitted by a method this version cannot reproduce."
         case .targetMismatch:
             return "The measurements and the reference values describe different targets."
+        case .illuminantMismatch:
+            return "The measurements and the reference values describe different illumination."
         case .evidenceMismatch:
             return "This calibration's fit was not computed from the evidence stored with it."
         case .referenceDatasetMismatch:
@@ -177,6 +189,11 @@ extension IRCalibrationFitVerificationFailure: LocalizedError {
                 The measurements are of \(measured) and the reference values are for \
                 \(reference), so no transform could have been fitted between them.
                 """
+
+        case .illuminantMismatch(let measured, let reference):
+            return IRCalibrationIlluminantCompatibility.refusalReason(
+                measurement: measured, reference: reference
+            )
 
         case .evidenceMismatch(let expected, let found):
             return """
@@ -314,6 +331,22 @@ public struct IRCalibrationFitVerifier: Sendable {
             throw .targetMismatch(
                 measured: measurements.target.displayName,
                 reference: reference.target.displayName
+            )
+        }
+        // Defensive second line. `IRCalibration` refuses an incompatible pair
+        // before it reaches here, so valid input cannot fail this — which is
+        // exactly why it is stated rather than assumed: the verifier is also
+        // called directly, and it must not depend on having been handed a pair
+        // somebody else already checked. The rule itself is not restated; it is
+        // asked for.
+        guard
+            IRCalibrationIlluminantCompatibility.areCompatible(
+                measurement: measurements.illuminant, reference: reference.illuminant
+            )
+        else {
+            throw .illuminantMismatch(
+                measured: measurements.illuminant.identityDescription,
+                reference: reference.illuminant.identityDescription
             )
         }
         guard fit.sourceMeasurementID == measurements.id else {

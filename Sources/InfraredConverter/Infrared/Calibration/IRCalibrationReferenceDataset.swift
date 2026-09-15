@@ -134,6 +134,13 @@ public struct IRCalibrationReferenceDataset: Equatable, Sendable {
         }
         guard !values.isEmpty else { throw .emptyReferenceDataset }
 
+        // The other domain boundary that creates calibration evidence — the
+        // reference values are defined *under* an illuminant, and that
+        // statement is as much a part of the dataset as the numbers. Checked
+        // and normalised by the same rule the measurement set uses, so the two
+        // identities a fit compares were produced the same way.
+        let illuminant = try illuminant.validated(field: "referenceDataset.illuminant")
+
         for patch in values.keys.sorted() where !target.contains(patch) {
             throw .unknownTargetPatch(
                 patch: patch.rawValue, target: target.displayName
@@ -149,9 +156,6 @@ public struct IRCalibrationReferenceDataset: Equatable, Sendable {
         self.values = values
     }
 
-    /// `identifier@version` — how a fit result names the dataset it was
-    /// computed against, so the two can be checked against each other without
-    /// comparing every value.
     public var identity: String { "\(identifier)@\(version)" }
 
     public func value(

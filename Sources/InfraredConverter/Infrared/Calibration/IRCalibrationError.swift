@@ -44,6 +44,15 @@ public enum IRCalibrationError: Error, Equatable {
     /// targets, so their patch identifiers do not mean the same thing.
     case targetMismatch(measured: String, reference: String)
 
+    /// The evidence was recorded under one illuminant and the reference values
+    /// are defined for another.
+    ///
+    /// Semantic rather than arithmetic, which is why it needs its own refusal:
+    /// the fit over such a pair converges perfectly well and its residuals look
+    /// like any other, so nothing in the matrix self-verification can find it.
+    /// See ``IRCalibrationIlluminantCompatibility``.
+    case illuminantMismatch(measured: String, reference: String)
+
     /// A fit result whose source evidence is not the evidence it was stored
     /// with.
     case evidenceMismatch(expected: String, found: String)
@@ -120,6 +129,8 @@ extension IRCalibrationError: LocalizedError {
             return "A calibration value is outside the range it may take."
         case .targetMismatch:
             return "The measurements and the reference values describe different targets."
+        case .illuminantMismatch:
+            return "The measurements and the reference values describe different illumination."
         case .evidenceMismatch:
             return "This calibration's fit was not computed from the evidence stored with it."
         case .referenceDatasetMismatch:
@@ -201,6 +212,11 @@ extension IRCalibrationError: LocalizedError {
                 \(reference). Patch "01" means a different colour on each, so pairing them \
                 would fit the transform to the wrong thing.
                 """
+
+        case .illuminantMismatch(let measured, let reference):
+            return IRCalibrationIlluminantCompatibility.refusalReason(
+                measurement: measured, reference: reference
+            )
 
         case .evidenceMismatch(let expected, let found):
             return """
