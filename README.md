@@ -542,7 +542,7 @@ small labelled reference thumbnail, and is kept because comparing the two paths
 is useful while the owned one is young.
 
 Still absent: any tone control — contrast, curves, highlight recovery,
-saturation, automatic exposure, a histogram; a white-balance control; a channel-mix matrix editor;
+saturation, automatic exposure, a histogram;
 arbitrary rotation, straightening and crop; undo/redo; a recipe format that
 would carry a whole processing state between photographs — a creative channel
 mix is reusable as a named preset, and the white balance, exposure and
@@ -996,9 +996,10 @@ See [RAW/README.md](RAW/README.md).
   presets and a display boundary exist; no false-colour mapping, no hue
   remapping, no calibrated filter profiles, no recipe format, no develop
   controls.
-- The workspace's white-balance patch is a centred rectangle, not a scene
-  analysis. Nothing verifies that what is in the middle of the frame is
-  neutral, and there is no picker yet.
+- The white balance is a neutral patch a person picks by clicking the preview.
+  A file with no saved decision starts from a centred rectangle, which is a
+  deterministic placeholder and not a scene analysis: nothing verifies that
+  what is in the middle of the frame is neutral.
 - The preview is 8 bit with no dithering, so a smooth gradient can band.
 - LibRaw's optional back-ends are not enabled: no libjpeg (lossy DNG, JPEG
   thumbnails), no zlib (deflate-compressed DNG), no LittleCMS, no DNG SDK, no

@@ -14,10 +14,24 @@ import Foundation
 ///
 /// ## Exactly three origins
 ///
-/// Camera-profile, filter-profile, preset and recipe cases are absent because
-/// none of those subsystems exists. A provenance case naming a subsystem the
-/// project has not built would be a claim about nothing. When a profile system
-/// arrives it either produces an `.explicit` mix or gains a case of its own.
+/// This enum names the **mathematical origin** of the matrix — what the nine
+/// coefficients are — and not where a person found them.
+///
+/// That distinction is why there is no `.preset` case even though reusable
+/// creative presets now exist. Applying one resolves to `.identity`,
+/// `.redBlueSwap` or `.explicit`, and the resulting rendering is
+/// indistinguishable from a person having chosen or typed the same thing by
+/// hand, in the sidecar and in the pixels. A preset is an authoring and reuse
+/// mechanism, not a new pixel operation; adding a case for it would be a
+/// fourth answer to a question that has three, and would make provenance
+/// record a person's route rather than the transform. See
+/// `docs/decisions/0024-reusable-creative-presets.md`.
+///
+/// Camera-profile, filter-profile and recipe cases are absent for the original
+/// reason: a provenance case naming a subsystem the project has not built
+/// would be a claim about nothing. A measured camera transform is an earlier
+/// stage with its own provenance, and a recipe — like a preset — would
+/// reference a mix rather than be one.
 public enum IRChannelMixSource: Equatable, Sendable {
     /// No creative remapping was requested. The stage was still traversed
     /// deliberately; see `IRChannelMix.identity`.

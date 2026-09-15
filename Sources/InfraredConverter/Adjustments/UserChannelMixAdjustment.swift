@@ -63,11 +63,12 @@ public enum UserChannelMixAdjustment: Equatable, Sendable {
     /// `RAWColorMatrix3x3` documents: rows are output channels, columns are
     /// input channels.
     ///
-    /// There is no user interface for this today and this milestone does not
-    /// build one. It exists because the adjustment model has to be able to
-    /// carry the mix the processing stage can already apply, and because a
-    /// persisted format that cannot express it would need a schema version to
-    /// gain it later.
+    /// Authored in the channel-mix editor, and reusable: a saved creative
+    /// preset carries one of these like any other mix. It was added to the
+    /// model before either existed, because the adjustment model had to be
+    /// able to carry the mix the processing stage could already apply, and a
+    /// persisted format that could not express it would have needed a schema
+    /// version to gain it later.
     case explicit(RAWColorMatrix3x3)
 
     /// Which of the three shapes this is — and the token it persists as.
@@ -92,10 +93,23 @@ public enum UserChannelMixAdjustment: Equatable, Sendable {
         }
     }
 
-    /// The two decisions a user can reach from the workspace's controls.
+    /// The two mixes a control can offer **by name**.
     ///
-    /// `.explicit` is deliberately absent: it is persistable and applicable,
-    /// and there is no matrix editor to produce one.
+    /// `.explicit` is deliberately absent, and its absence no longer means
+    /// what it once did. It is not that a matrix cannot be produced — the
+    /// channel-mix editor authors one, and a saved preset can carry one. It is
+    /// that a matrix is not a named choice:
+    ///
+    /// ```text
+    /// .identity      a fixed decision, offered as a menu item
+    /// .redBlueSwap   a fixed decision, offered as a menu item
+    /// .explicit      nine coefficients, authored — or reused from a preset
+    /// ```
+    ///
+    /// A list of selectable cases has one entry per decision, and there is no
+    /// single `.explicit` to put in it. So the menu offers these two, opens
+    /// the editor for a matrix, and lists saved presets separately; all three
+    /// routes end at the same `setChannelMix`.
     public static let selectableCases: [UserChannelMixAdjustment] = [
         .identity, .redBlueSwap
     ]
