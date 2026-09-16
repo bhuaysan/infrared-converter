@@ -159,8 +159,13 @@ records what it did and explicitly did not do.
   space and is recorded as creative intent, never as a calibration. The
   workspace offers Identity, Red/Blue Swap and a labelled 3×3 editor for any
   finite matrix of your own — nothing clamps a coefficient, normalises a row or
-  refuses a singular matrix. See
-  [ADR 0023](docs/decisions/0023-authoring-a-creative-channel-mix.md).
+  refuses a singular matrix. A **monochrome** editor authors three contribution
+  coefficients and writes them as the identical rows of that same matrix, so
+  black and white is a shape of the existing mix rather than a stage of its
+  own; its `Equal RGB` starting point is the arithmetic mean `(R + G + B) ÷ 3`
+  and is deliberately not a luminance formula. See
+  [ADR 0023](docs/decisions/0023-authoring-a-creative-channel-mix.md) and
+  [ADR 0025](docs/decisions/0025-monochrome-channel-mix-authoring.md).
 - **Preview reduction** caps the longest edge of the unoriented image at 2048
   pixels by exact area-weighted averaging of scene-linear `Float32`, per
   channel, in `Double`. No nearest-neighbour, no 8-bit round trip, no implicit
@@ -965,10 +970,20 @@ See [RAW/README.md](RAW/README.md) and [docs/testing.md](docs/testing.md).
   mosaic is retained so a new patch costs no decode — about 49 MB on the E-PL3
   fixture — beside the 36 MB reduced preview. During a file switch made
   mid-render, two documents briefly hold one pair each.
-- **The mix editor is nine numeric cells.** Identity, Red/Blue Swap and a
-  custom 3×3 matrix, committed on Apply. There are no per-channel sliders, no
-  determinant readout and no before/after; a decimal separator is `.`, and
-  `1,5` is not a number.
+- **The mix editor is nine numeric cells, or three for monochrome.** Identity,
+  Red/Blue Swap, a custom 3×3 matrix and a monochrome editor carrying three
+  contribution coefficients, all committed on Apply. There are no per-channel
+  sliders, no determinant readout and no before/after; a decimal separator is
+  `.`, and `1,5` is not a number.
+- **Monochrome is an ordinary channel mix.** It authors a matrix whose three
+  rows are identical and persists as that matrix, so a monochrome photograph
+  is indistinguishable from one where the same nine coefficients were typed by
+  hand, and a monochrome mix is saveable as a preset with no preset change at
+  all. Opening the monochrome editor on a mix whose rows are *not* exactly
+  identical seeds `Equal RGB` rather than inferring weights from a colour
+  matrix. No wavelength selects a coefficient, and there is no visible-light
+  luminance option — Rec. 709 and Rec. 601 weights describe human response to
+  visible light, which an infrared false-colour channel does not carry.
 - **Presets reuse a mix, and ship empty.** A mix can be saved under a name,
   with an optional filter note, and applied to another photograph. This build
   ships **no** presets: there is no measured basis anywhere in this project for
@@ -1019,10 +1034,10 @@ See [RAW/README.md](RAW/README.md) and [docs/testing.md](docs/testing.md).
   every open — the reduction is the last step of that, not a way to avoid it —
   and there is no cache across opens. Each adjustment re-mixes, re-orients and
   re-encodes the reduced frame only.
-- Infrared white balance, an interactive channel mixer, reusable creative
-  presets and a display boundary exist; no false-colour mapping, no hue
-  remapping, no calibrated filter profiles, no recipe format, no develop
-  controls.
+- Infrared white balance, an interactive channel mixer, monochrome authoring,
+  reusable creative presets and a display boundary exist; no false-colour
+  mapping, no hue remapping, no calibrated filter profiles, no recipe format,
+  no develop controls.
 - The white balance is a neutral patch a person picks by clicking the preview.
   A file with no saved decision starts from a centred rectangle, which is a
   deterministic placeholder and not a scene analysis: nothing verifies that

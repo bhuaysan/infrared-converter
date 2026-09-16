@@ -328,3 +328,29 @@ curves, histograms, Kelvin/tint, manual white-balance gains, batch processing,
 cloud sync, preset sharing or a marketplace, and any calibration work. A preset
 remains creative: nothing here makes any transform in this project a validated
 infrared calibration.
+
+## Amendment (ADR 0025) — monochrome mixes reuse this library unchanged
+
+The non-goals above list "monochrome UI". That is now superseded by
+[ADR 0025](0025-monochrome-channel-mix-authoring.md), and nothing in this
+document changed to make it possible.
+
+A monochrome mix is an `UserChannelMixAdjustment.explicit` whose matrix has
+three identical rows, so it is exactly the kind of decision §1 decided a preset
+carries. Therefore:
+
+- `IRCreativePreset` gains no field, and the preset schema stays at version 1;
+- the workflow "author monochrome → Apply → Save Current Mix as Preset… →
+  reopen another photograph → apply preset" works through the code this
+  document describes, with no preset-side awareness that the matrix is
+  monochrome;
+- a photograph's sidecar still stores the **resolved** mix, so renaming,
+  editing or deleting a monochrome preset cannot change an image developed with
+  it;
+- §4's rule — applying is always explicit, and nothing is applied because a
+  capture profile names the same nominal wavelength as a preset's filter note —
+  holds for monochrome exactly as it does for colour.
+
+§6's reservation of `builtin.` also holds: this build still ships no presets,
+monochrome or otherwise, because no measured basis for a wavelength-specific
+matrix exists here.

@@ -694,6 +694,23 @@ photograph-local. A photograph's sidecar stores the **resolved** mix, never a
 preset reference, so renaming or deleting a preset cannot change an image
 developed with it. See `docs/decisions/0024-reusable-creative-presets.md`.
 
+**Monochrome is a shape of that mix, not a stage.** A 3×3 matrix whose three
+rows are identical writes one weighted sum of the working RGB channels to all
+three output channels, so the result is achromatic by arithmetic rather than by
+a mode. The monochrome editor authors three contribution coefficients through
+`IRMonochromeMix` and produces the same `UserChannelMixAdjustment.explicit`
+every other route produces: no monochrome adjustment, image type, provenance
+case, sidecar field or pipeline stage exists, and a photograph developed this
+way is byte-identical in its sidecar to one where the same nine coefficients
+were typed into the 3×3 editor. Recognition — which lets the editor reopen on
+the mix in force — is exact `Double` equality of the three rows, with no
+tolerance, and a mix that is not monochrome seeds `Equal RGB` rather than
+having weights inferred from it. `Equal RGB` is the arithmetic mean
+`(R + G + B) ÷ 3` and is never called a luminance: infrared false-colour
+channels do not carry the visible-light meanings Rec. 709 or Rec. 601 are
+defined against. See
+`docs/decisions/0025-monochrome-channel-mix-authoring.md`.
+
 Conceptually:
 
 ```swift
@@ -1181,7 +1198,7 @@ Examples:
 ```text
 docs/decisions/0001-use-libraw.md
 docs/decisions/0006-working-color-space.md
-docs/decisions/0025-metal-render-pipeline.md
+docs/decisions/0026-metal-render-pipeline.md
 ```
 
 The working-representation decision must be recorded before production IR color transforms depend on it. It is, in `docs/decisions/0006-working-color-space.md`. The creative channel-mix stage that depends on it is `docs/decisions/0007-infrared-channel-mixing.md`, the display boundary that turns its result into pixels is `docs/decisions/0008-display-preview-rendering.md`, the geometry stage between them is `docs/decisions/0009-application-owned-orientation.md`, and the user-owned orientation adjustment composed onto that is `docs/decisions/0010-user-owned-orientation-adjustment.md`.
@@ -1209,6 +1226,22 @@ That calibration evidence is a first-class artefact rather than a matrix, that m
 That a person can now author the creative 3×3 mix, that the editor produces `UserChannelMixAdjustment.explicit` through `RAWColorMatrix3x3` and hands it to the same `setChannelMix` the built-ins use so there is no second matrix type, no second persisted representation and no second mixer, that the editing state is nine strings in `ChannelMixMatrixDraft` because half-typed text is not a coefficient and a field bound to a `Double` would write a zero over the canonical mix, that non-finiteness is refused by the matrix primitive's own typed error rather than by a rule restated in the editor, that nothing clamps a coefficient, normalises a row, preserves luminance or refuses a singular matrix, that rows stay output channels and columns stay input channels with the three equations printed rather than transposed for convenience, that an authored matrix stays `.explicit` even when its nine numbers equal a built-in's because provenance is what the person did, that no schema version, pipeline order or scheduling changed and a second authored matrix replaces the first from the retained pre-mix preview, and that the white-balance gains are now labelled per colour plane by `RAWWhiteBalanceGainListing` — planes from `RAWWhiteBalanceEstimator.colorPlanes(in:)` so a listing cannot describe a set the estimate did not measure, identities from the layout's `colorDescription` so nothing assumes RGGB, both greens of an `RGBG` sensor kept separate, and the layout carried on `WorkspacePreview` as the provenance the labels are read from — is `docs/decisions/0023-authoring-a-creative-channel-mix.md`.
 
 That a creative channel mix authored for one photograph is now reusable, that a preset is a named `UserChannelMixAdjustment` and never a second mixer, matrix type or persisted mix representation, that applying one is a single assignment into the existing `DocumentState.setChannelMix` so no code below the menu is preset-aware, that `IRChannelMixSource` gains no `.preset` case because where a person found a matrix is not a property of the matrix, that the photograph sidecar is unchanged at schema version 5 and stores the **resolved** decision rather than a reference — so renaming, editing or deleting a preset cannot change an image already developed with it, and an unreadable preset library leaves every photograph rendering exactly as it was — that applying is always explicit and nothing is ever applied because a capture profile names the same nominal wavelength as a preset's filter note, that the filter note is the same `IRFilterDescriptor` used for capture context and takes part in no arithmetic or selection, that this build ships **no** presets because no measured basis for a 590/665/720/830 nm matrix exists here while `builtin.` is reserved against one appearing dishonestly, that presets live in their own Application Support folder under their own schema version with the capture-profile library's file rules — one file per preset, the filename is the identity, a corrupt file costs one preset and is reported, and a duplicate identity is refused rather than resolved by load order — that there is no registry type because nothing resolves a preset reference, that a capture profile's filter is a save-form **prefill** copied once and never a binding, and that a preset carries the mix alone because a neutral patch, an exposure and an orientation are photograph-local, is `docs/decisions/0024-reusable-creative-presets.md`.
+
+That monochrome is authored as an existing explicit channel mix rather than as
+a stage, that three exactly identical matrix rows are this editor's monochrome
+shape and are recognised with no epsilon so a near-monochrome colour transform
+stays a colour transform, that a mix which is not monochrome seeds `Equal RGB`
+rather than having three weights inferred from it, that applying replaces the
+current mix and never composes with it because the retained preview is pre-mix,
+that the editing state is three strings for the reason the matrix editor's is
+nine, that nothing is normalised, clamped or repaired and the only numeric rule
+remains `RAWColorMatrix3x3`'s finiteness, that `Equal RGB` is an arithmetic
+mean and no visible-light luminance weighting is offered under any name, that
+no wavelength determines a coefficient, that `IRChannelMixSource` gains no case
+and neither the photograph sidecar (version 5) nor the creative-preset schema
+(version 1) changed, and that presets, export and the pipeline reuse themselves
+so the milestone adds no code below the menu, is
+`docs/decisions/0025-monochrome-channel-mix-authoring.md`.
 
 The verification tiers, the two fixture environment variables and why having a
 RAW file is not consent to decode it are in `docs/testing.md`.
@@ -1730,6 +1763,14 @@ Pause and reconsider when code begins to show any of these patterns:
 - a preset identity derived from its display name, or a user preset claiming `builtin.`
 - a save form's filter field bound to a capture profile's filter, so that editing the profile later rewrites a saved preset
 - a second matrix editor, or a second filter-draft parser, added for the preset form
+- a monochrome adjustment, image type, rendering stage, provenance case or sidecar field added beside the channel mix that already expresses it
+- a monochrome result produced by desaturating after the mixer, rather than by a mix whose three rows are identical
+- an epsilon in the monochrome recognition rule, so a near-monochrome colour matrix reopens as three coefficients and loses the six that differed
+- three monochrome weights inferred from an arbitrary colour matrix, or a new monochrome mix composed onto the mix in force
+- `0.2126 / 0.7152 / 0.0722`, Rec. 601 weights, or any visible-light luminance formula offered for infrared false-colour channels
+- an equal-contribution mean labelled luminance, perceptual, brightness-corrected or natural monochrome
+- a monochrome coefficient chosen by a filter's nominal wavelength, or a monochrome mix applied automatically on open
+- a schema version bumped because a new editor can author a value the format already expressed
 - a white-balance gain labelled from a hard-coded `R G B G` table, or from any assumption that four planes mean RGGB
 - a gain listing that walks the CFA cell itself, so it can describe a different set of planes than the estimator measured
 - an unused gain slot shown as `×1.000`, so a plane the sensor never fills reads as a measured plane needing no correction

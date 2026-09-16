@@ -338,3 +338,30 @@ point ADR 0023 made about ADR 0016 having built the state first:
 The one thing this document's own editor gained is a caller: the preset library
 hands it a stored mix to display, and its Apply still sets the **photograph's**
 mix rather than editing the preset.
+
+## Amendment (ADR 0025) — monochrome is authored through this same matrix
+
+The non-goals above list "monochrome UI". That is now superseded, and the way
+it is superseded is the reason nothing in this document changed:
+[ADR 0025](0025-monochrome-channel-mix-authoring.md) adds a monochrome editor
+that authors **this** matrix, in three fields instead of nine, whenever the
+three rows are to be identical.
+
+`IRMonochromeMix` builds a `RAWColorMatrix3x3` whose rows repeat and wraps it
+in `UserChannelMixAdjustment.explicit`; `MonochromeMixDraft` holds three
+strings for the reason this document gives for holding nine, and reuses this
+editor's own number formatter so a coefficient round-trips through either. So:
+
+- `ChannelMixMatrixDraft`, `RAWColorMatrix3x3`, `UserChannelMixAdjustment`,
+  `IRChannelMix` and `IRChannelMixer` are untouched;
+- `DocumentState.setChannelMix` is still the one entry point;
+- a monochrome result is an ordinary `.explicit` matrix, so the sidecar bytes
+  are identical to the same nine coefficients typed into this editor, and
+  opening **Custom Matrix…** on a monochrome mix shows those nine numbers.
+
+What is **not** superseded is this document's rule that nothing normalises,
+clamps, preserves luminance or refuses a singular matrix. ADR 0025 keeps every
+one of them — a monochrome collapse is exactly the singular matrix this
+document decided not to refuse — and adds the refusal of a visible-light
+luminance weighting, for the reason this project develops infrared false
+colour rather than visible-light colour.

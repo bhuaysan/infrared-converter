@@ -316,6 +316,28 @@ coefficient is clamped, no row is normalised, a singular matrix is applied as
 typed, and the only numeric requirement remains `RAWColorMatrix3x3`'s — every
 coefficient finite. See `docs/decisions/0023-authoring-a-creative-channel-mix.md`.
 
+**Monochrome is a shape of that same matrix, not a stage.** A 3×3 mix whose
+three rows are identical writes one weighted sum of the working RGB channels to
+all three output channels, so every output channel carries the same
+scene-linear value and the result is achromatic:
+
+```text
+         ⎡ r g b ⎤   ⎡ R ⎤       Rout = r·R + g·G + b·B
+output = ⎢ r g b ⎥ × ⎢ G ⎥  so   Gout = r·R + g·G + b·B
+         ⎣ r g b ⎦   ⎣ B ⎦       Bout = r·R + g·G + b·B
+```
+
+A monochrome editor authors those three coefficients and builds the matrix
+through `IRMonochromeMix`; the result is an ordinary
+`UserChannelMixAdjustment.explicit` reaching the same `setChannelMix`. There is
+no monochrome stage, image type, provenance case or persisted field, and the
+sidecar bytes are identical to the same nine coefficients typed into the 3×3
+editor. Its `Equal RGB` starting point is the arithmetic mean `(R + G + B) ÷ 3`
+and is deliberately **not** a luminance weighting: infrared false-colour
+channels do not carry the visible-light meanings Rec. 709 or Rec. 601 are
+defined against. See
+`docs/decisions/0025-monochrome-channel-mix-authoring.md`.
+
 Exposure joined the render half the same way. The display stage's
 `exposureEV` was always `0 EV` in the workspace; it is now the user's
 `ImageAdjustments.exposure`, passed unchanged, so the `× 2^EV` described under
