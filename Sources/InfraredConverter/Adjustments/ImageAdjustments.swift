@@ -11,9 +11,10 @@ import Foundation
 ///
 /// ## Why a record rather than a property
 ///
-/// There are four adjustments today — the orientation correction, the creative
-/// channel mix, the exposure compensation and the infrared white balance — and
-/// this is why the model was a record from the first one. Every adjustment that
+/// There are five adjustments today — the orientation correction, the creative
+/// channel mix, the exposure compensation, the infrared white balance and the
+/// black and white points — and this is why the model was a record from the
+/// first one. Every adjustment that
 /// follows, tone settings and crop among them, belongs beside them rather than
 /// as another unrelated field, and the set has to be serialisable **as a set**:
 /// a recipe is "all of these together", not one of them at a time.
@@ -22,7 +23,7 @@ import Foundation
 /// retained reduced preview — it is upstream of demosaicing, so changing it
 /// re-prepares that preview from the retained normalised mosaic. That changes
 /// what the workspace *schedules*, and deliberately nothing about this model:
-/// it is a field like the other three, one request is still one complete
+/// it is a field like the others, one request is still one complete
 /// state, and the export still takes the whole record and nothing else. See
 /// `docs/decisions/0019-interactive-white-balance.md`.
 ///
@@ -118,6 +119,20 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// samples and produces real multipliers; see `isDefault`.
     public var whiteBalance: UserWhiteBalanceAdjustment
 
+    /// The black point and white point the user chose. `.neutral` is
+    /// `0 / 1`, which is mathematically the identity.
+    ///
+    /// Applied as `(x − black) × 1/(white − black)` by `LinearLevelsApplier`,
+    /// **after** exposure and **before** whichever destination range policy
+    /// follows — so a value these levels push above `1` is clipped by the
+    /// policy that owns clipping, not here.
+    ///
+    /// It is a user-authored affine transform and nothing more: not tone
+    /// mapping, not a curve, not contrast, not a gamma slider, not highlight or
+    /// shadow recovery, and not automatic. Nothing derives it from the image.
+    /// See `docs/decisions/0026-linear-levels.md`.
+    public var levels: UserLevelsAdjustment
+
     /// Builds a record of the user's decisions at this build's schema version.
     ///
     /// There is deliberately no version parameter. See `schemaVersion`.
@@ -125,12 +140,14 @@ public struct ImageAdjustments: Equatable, Sendable {
         orientation: UserOrientationAdjustment = .identity,
         channelMix: UserChannelMixAdjustment = .identity,
         exposure: UserExposureAdjustment = .neutral,
-        whiteBalance: UserWhiteBalanceAdjustment = .defaultNeutralPatch
+        whiteBalance: UserWhiteBalanceAdjustment = .defaultNeutralPatch,
+        levels: UserLevelsAdjustment = .neutral
     ) {
         self.orientation = orientation
         self.channelMix = channelMix
         self.exposure = exposure
         self.whiteBalance = whiteBalance
+        self.levels = levels
     }
 
     /// A freshly opened file's adjustments: the user has decided nothing.
@@ -149,6 +166,7 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// channelMix     no creative remapping
     /// exposure       exactly 0 EV
     /// whiteBalance   the application's default centred neutral patch
+    /// levels         black 0, white 1
     /// ```
     ///
     /// ## It replaced `isIdentity`, and the difference matters
@@ -201,5 +219,6 @@ public struct ImageAdjustments: Equatable, Sendable {
             && channelMix == .identity
             && exposure == .neutral
             && whiteBalance == .defaultNeutralPatch
+            && levels == .neutral
     }
 }

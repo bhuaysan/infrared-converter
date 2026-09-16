@@ -198,3 +198,61 @@ public struct ExposedSceneLinearRGBImage: Equatable, Sendable {
         )
     }
 }
+
+/// An exposed image paired with the whole oriented state it was produced from.
+///
+/// The link between `OrientedProcessedRAWImage` and `LeveledProcessedRAWImage`
+/// in the chain of processed wrappers: everything upstream — the mosaics, the
+/// camera-native image, the working-colour image, the mix and the orientation
+/// — stays reachable through `source`, so a caller can change any adjustment
+/// and restart from exactly the right stage without decoding again.
+///
+/// Use `SceneLinearExposer`'s bare-image overload instead whenever the result
+/// is going to be **retained**. Holding one of these alive at full resolution
+/// holds every upstream buffer alive with it, which is why the export path
+/// does not use it.
+public struct ExposedProcessedRAWImage: Sendable {
+    /// The oriented, un-exposed state this was produced from, unchanged.
+    public let source: OrientedProcessedRAWImage
+    /// The exposed image.
+    public let image: ExposedSceneLinearRGBImage
+
+    /// Module-internal, deliberately: only `SceneLinearExposer` pairs an
+    /// oriented state with the exposed image it produced from it.
+    init(source: OrientedProcessedRAWImage, image: ExposedSceneLinearRGBImage) {
+        self.source = source
+        self.image = image
+    }
+
+    /// The oriented image the exposure was applied to. Changing the exposure
+    /// must always start here.
+    public var orientedImage: OrientedSceneLinearRGBImage { source.image }
+    /// The unoriented channel-mixed image. Changing the orientation starts
+    /// here.
+    public var channelMixedImage: IRChannelMixedRGBImage { source.channelMixedImage }
+    /// The pre-mix working-colour image. Changing the creative mix starts
+    /// here.
+    public var workingColorImage: WorkingColorRGBImage { source.workingColorImage }
+    /// The linear camera-native RGB image.
+    public var demosaicedImage: DemosaicedRAWRGBImage { source.demosaicedImage }
+    /// The white-balanced mosaic.
+    public var whiteBalancedMosaic: WhiteBalancedRAWMosaic { source.whiteBalancedMosaic }
+    /// The normalised, pre-white-balance mosaic.
+    public var linearMosaic: LinearRAWMosaic { source.linearMosaic }
+    /// Provenance for `image`. Forwarded rather than stored a second time.
+    public var processing: SceneLinearExposureProcessing { image.processing }
+    /// The exposure that produced `image`.
+    public var exposure: SceneLinearExposure { image.processing.exposure }
+    /// The orientation applied upstream.
+    public var orientation: RAWImageOrientation { source.orientation }
+    /// The creative mix applied further upstream.
+    public var mix: IRChannelMix { source.mix }
+    /// The camera-to-working transform the working image was produced by.
+    public var cameraToWorkingTransform: RAWCameraToWorkingColorTransform {
+        source.cameraToWorkingTransform
+    }
+    /// The RAW-state metadata the chain was processed against. This stage
+    /// reads none of it.
+    public var metadata: RAWMetadata { source.metadata }
+    public var url: URL { source.url }
+}

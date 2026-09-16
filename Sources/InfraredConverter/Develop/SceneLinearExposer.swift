@@ -165,6 +165,43 @@ public struct SceneLinearExposer: Sendable {
         )
     }
 
+    /// Exposes an oriented result, keeping that whole oriented state
+    /// reachable on the returned value's `source`.
+    ///
+    /// Use this rather than the bare-image overload whenever the caller may
+    /// want a different exposure later: the result carries everything needed
+    /// to restart from the oriented image, without orienting, mixing,
+    /// converting, demosaicing or decoding again.
+    public func apply(
+        to processed: OrientedProcessedRAWImage,
+        exposure: SceneLinearExposure,
+        cancellation: ProcessingCancellation = .none
+    ) throws -> ExposedProcessedRAWImage {
+        let image = try apply(
+            to: processed.image, exposure: exposure, cancellation: cancellation
+        )
+        return ExposedProcessedRAWImage(source: processed, image: image)
+    }
+
+    /// Replaces the exposure on a previous result, starting again from the
+    /// oriented image it was produced from.
+    ///
+    /// Exposures never compose: replacing `+1 EV` with `+2 EV` yields
+    /// `oriented × 4`, not `oriented × 2 × 4`. That is structural — this
+    /// reaches through `previous.source` and never touches `previous.image`.
+    ///
+    /// Nothing upstream reruns: no orientation, no channel mix, no camera
+    /// conversion, no demosaic, no white balance, no decode.
+    public func apply(
+        exposure newExposure: SceneLinearExposure,
+        replacing previous: ExposedProcessedRAWImage,
+        cancellation: ProcessingCancellation = .none
+    ) throws -> ExposedProcessedRAWImage {
+        try apply(
+            to: previous.source, exposure: newExposure, cancellation: cancellation
+        )
+    }
+
     // MARK: - The arithmetic
 
     /// The identity path hands the same immutable array back.

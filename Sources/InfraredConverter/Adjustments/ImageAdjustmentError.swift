@@ -118,6 +118,37 @@ public enum ImageAdjustmentError: Error, Equatable {
     /// photograph from the one the record describes, and nothing on screen
     /// would say so.
     case exposureAdjustmentOutOfRange(ev: Double, supported: ClosedRange<Double>)
+    /// A persisted levels adjustment is missing `blackPoint` or `whitePoint`.
+    ///
+    /// Both are required. The pair *is* the interval, and there is no value a
+    /// missing endpoint could be defaulted to: neutral would silently discard
+    /// a tone decision the user made, and any other number would be invented.
+    case missingLevelsField(field: String)
+    /// A persisted black or white point is NaN or an infinity.
+    ///
+    /// Never read as neutral: a value we could not use and a deliberate
+    /// decision to leave the levels alone are different facts.
+    case nonFiniteLevelsBound(field: String, value: Double)
+    /// A persisted levels adjustment has a black point that is not below its
+    /// white point.
+    ///
+    /// Refused rather than reordered. Swapping the two would invert the
+    /// photograph, which nobody asked for; treating them as equal would divide
+    /// by zero. Both are decisions, and neither is one this record makes on a
+    /// user's behalf.
+    case levelsNotOrdered(blackPoint: Double, whitePoint: Double)
+    /// A persisted levels interval is ordered and finite, but its arithmetic is
+    /// not representable.
+    ///
+    /// Two endpoints about `1e308` apart overflow the subtraction, giving a
+    /// scale of exactly `0` that would render every pixel black while every
+    /// number stayed finite; two endpoints closer than about `1e-308` overflow
+    /// the reciprocal, turning every finite input into an infinity. The span
+    /// and the scale are both reported, so which of the two happened is
+    /// readable rather than guessed at.
+    case levelsSpanNotRepresentable(
+        blackPoint: Double, whitePoint: Double, span: Double, scale: Double
+    )
 }
 
 extension ImageAdjustmentError: LocalizedError {
@@ -153,6 +184,14 @@ extension ImageAdjustmentError: LocalizedError {
             return "The saved exposure is not a finite number."
         case .exposureAdjustmentOutOfRange:
             return "The saved exposure is outside the supported range."
+        case .missingLevelsField:
+            return "The saved black and white points are incomplete."
+        case .nonFiniteLevelsBound:
+            return "The saved black or white point is not a finite number."
+        case .levelsNotOrdered:
+            return "The saved black point is not below the saved white point."
+        case .levelsSpanNotRepresentable:
+            return "The saved black and white points are too far apart, or too close together."
         }
     }
 
@@ -243,6 +282,34 @@ extension ImageAdjustmentError: LocalizedError {
                 The exposure is \(ev) EV; a saved exposure must lie between \
                 \(supported.lowerBound) and \(supported.upperBound) EV. It is refused rather \
                 than clamped, because a clamped exposure would render a different photograph.
+                """
+        case .missingLevelsField(let field):
+            return """
+                A levels adjustment is a black point and a white point together, and the \
+                record does not contain "\(field)". It is refused rather than defaulted, \
+                because neutral levels and a levels decision we could not read are different \
+                facts.
+                """
+        case .nonFiniteLevelsBound(let field, let value):
+            return """
+                The \(field) is \(value), which is not a finite number and cannot bound an \
+                interval.
+                """
+        case .levelsNotOrdered(let blackPoint, let whitePoint):
+            return """
+                The black point is \(blackPoint) and the white point is \(whitePoint); the \
+                black point must be strictly below the white point. The two are refused \
+                rather than swapped, because exchanging them inverts the photograph, and \
+                that is a decision nobody made.
+                """
+        case .levelsSpanNotRepresentable(
+            let blackPoint, let whitePoint, let span, let scale
+        ):
+            return """
+                The black point \(blackPoint) and the white point \(whitePoint) are ordered \
+                and finite, but the interval between them measures \(span) and scales by \
+                \(scale). One of those is not a finite number, so the levels cannot be \
+                applied to any pixel.
                 """
         }
     }
