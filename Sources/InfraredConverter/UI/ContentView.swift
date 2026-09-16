@@ -86,6 +86,8 @@ struct ContentView: View {
                 Divider().frame(height: 18)
                 ExposureControl(documentState: documentState)
                 Divider().frame(height: 18)
+                LevelsControl(documentState: documentState)
+                Divider().frame(height: 18)
                 OrientationControls(documentState: documentState)
                 Spacer()
                 AdjustmentSaveStatus(documentState: documentState)
@@ -623,6 +625,10 @@ private struct RAWInspectorView: View {
                 row("Exposure", String(
                     format: "%+.2f EV", preview.renderedExposureEV == 0 ? 0 : preview.renderedExposureEV
                 ))
+                // The levels the levels stage applied, from the rendering's
+                // own provenance — like the exposure row, and ahead of which
+                // the sliders sit while a render is pending.
+                row("Levels", Self.levelsDescription(preview))
                 row("Out-of-range", Self.clippingDescription(processing))
                 row("Encoding", "sRGB, 8 bit, no alpha")
                 Text("""
@@ -795,6 +801,24 @@ private struct RAWInspectorView: View {
         case .explicit: applied = "Explicit matrix"
         }
         return "\(applied) — creative, your choice"
+    }
+
+    /// The levels the rendering actually applied, and what they mean for the
+    /// values.
+    ///
+    /// Named honestly: neutral levels are the identity, so they are described
+    /// as applied-and-identity rather than as not run. And a non-zero black
+    /// point costs proportionality to scene radiance, which is worth saying
+    /// where a person can see it.
+    private static func levelsDescription(_ preview: WorkspacePreview) -> String {
+        let levels = preview.renderedLevels
+        let numbers = String(
+            format: "black %.3f, white %.3f", levels.blackPoint, levels.whitePoint
+        )
+        if levels.isIdentity { return "\(numbers) — identity" }
+        return preview.preservesProportionalityToSceneRadiance
+            ? "\(numbers) — a gain; still scene-proportional"
+            : "\(numbers) — affine; no longer scene-proportional"
     }
 
     /// How much the display-range clipping destroyed, as a count rather than
@@ -1281,6 +1305,135 @@ private struct ChannelMixControl: View {
         return "\(preset.name) — \(filter)"
     }
 
+}
+
+
+/// The levels control: two sliders, their numeric values, and a reset.
+///
+/// It changes one field of `DocumentState`'s canonical adjustment record and
+/// nothing else. No view here subtracts or scales a pixel, touches a `CGImage`
+/// or knows what `1/(white − black)` is: each slider write becomes a
+/// `UserLevelsAdjustment`, the workspace asks its coalescing renderer for the
+/// complete state, and `LinearLevelsApplier` applies it below the retained
+/// scene-linear preview.
+///
+/// ## What the control shows
+///
+/// The **requested** pair, read from `DocumentState` — never the pair of the
+/// last preview that happened to be delivered. A drag that outruns the
+/// renderer therefore does not snap a thumb back to an older value while a
+/// render is pending; the inspector, which reads the preview's provenance, is
+/// the place that describes the image actually on screen.
+///
+/// ## Values the sliders cannot reach
+///
+/// A saved pair beyond `LevelsControlScale.range` pins the thumbs to the end
+/// stops and shows its real values in orange, and it is not changed until the
+/// user moves a slider. The sliders' range is a control range; the validity
+/// rule belongs to `UserLevelsAdjustment` and is far wider. See
+/// `LevelsControlScale`.
+///
+/// Deliberately absent: contrast, a tone curve, a histogram, auto levels, auto
+/// contrast, per-channel levels and a gamma slider.
+private struct LevelsControl: View {
+    let documentState: DocumentState
+
+    var body: some View {
+        let levels = documentState.levelsAdjustment
+        let beyond = LevelsControlScale.isBeyondSliders(levels)
+
+        HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 0) {
+                point(
+                    "Black",
+                    value: levels.blackPoint,
+                    position: LevelsControlScale.blackSliderPosition(for: levels),
+                    beyond: beyond
+                ) { written in
+                    LevelsControlScale.adjustment(
+                        forBlackSliderValue: written,
+                        current: documentState.levelsAdjustment
+                    )
+                }
+                point(
+                    "White",
+                    value: levels.whitePoint,
+                    position: LevelsControlScale.whiteSliderPosition(for: levels),
+                    beyond: beyond
+                ) { written in
+                    LevelsControlScale.adjustment(
+                        forWhiteSliderValue: written,
+                        current: documentState.levelsAdjustment
+                    )
+                }
+            }
+
+            Button(action: documentState.resetLevels) {
+                Label("Reset Levels", systemImage: "arrow.counterclockwise")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .help("""
+                Return the black and white points to 0 and 1 — the white balance, \
+                channel mix, exposure and orientation are unchanged
+                """)
+            .accessibilityLabel("Reset levels")
+            .disabled(levels.isIdentity)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Levels \(levels.levelsDescription)")
+        .disabled(!documentState.canAdjust)
+    }
+
+    /// One labelled slider and its numeric value.
+    ///
+    /// `write` returns the adjustment the position asks for, or `nil` when it
+    /// asks for no change — an echo of a pinned thumb among them, which is
+    /// what keeps a saved value beyond the slider from being rewritten merely
+    /// because it was displayed.
+    private func point(
+        _ label: String,
+        value: Double,
+        position: Double,
+        beyond: Bool,
+        write: @escaping (Double) -> UserLevelsAdjustment?
+    ) -> some View {
+        HStack(spacing: 6) {
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(width: 34, alignment: .trailing)
+
+            Slider(
+                value: Binding(
+                    get: { position },
+                    set: { written in
+                        if let requested = write(written) {
+                            documentState.setLevels(requested)
+                        }
+                    }
+                ),
+                in: LevelsControlScale.range
+            ) {
+                Text("\(label) point")
+            }
+            .controlSize(.mini)
+            .frame(width: 150)
+            .help("""
+                The working-space value that becomes \(label == "Black" ? "0" : "1"), \
+                applied after exposure and before display clipping
+                """)
+
+            Text(String(format: "%.3f", value))
+                .font(.caption)
+                .monospacedDigit()
+                .frame(minWidth: 52, alignment: .trailing)
+                .foregroundStyle(beyond ? AnyShapeStyle(.orange) : AnyShapeStyle(.primary))
+                .help(beyond
+                    ? "The saved levels are beyond the sliders' range; they are kept as saved"
+                    : "The requested \(label.lowercased()) point")
+        }
+    }
 }
 
 

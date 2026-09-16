@@ -87,7 +87,8 @@ import Observation
 /// whiteBalance   which samples the infrared white balance is measured from
 /// orientation    the eight discrete arrangements, composed onto the file's own
 /// channelMix     the creative infrared remix: identity, red/blue swap, matrix
-/// exposure       compensation in EV, applied as × 2^EV by the display stage
+/// exposure       compensation in EV, applied as × 2^EV by its own stage
+/// levels         a black point and a white point, applied after exposure
 /// ```
 ///
 /// The profile is a **selection**, not an adjustment, and it is the other half
@@ -1080,6 +1081,14 @@ final class DocumentState {
         return loaded.adjustments.exposure
     }
 
+    /// The user's black and white points for the open file — the **requested**
+    /// pair, ahead of the rendered preview while a render is pending — or
+    /// `.neutral` when nothing is open.
+    var levelsAdjustment: UserLevelsAdjustment {
+        guard case .decoded(let loaded) = status else { return .neutral }
+        return loaded.adjustments.levels
+    }
+
     /// The user's infrared white balance for the open file — the
     /// **requested** decision, ahead of the rendered preview while a
     /// preparation is running — or `.defaultNeutralPatch` when nothing is
@@ -1789,6 +1798,39 @@ final class DocumentState {
     /// it has rendered; and like it, it leaves the other adjustments exactly
     /// as they were.
     func resetExposure() { setExposure(.neutral) }
+
+    // MARK: - Levels adjustment
+
+    /// Chooses the black and white points and re-renders.
+    ///
+    /// The cheapest adjustment there is: it is applied by a stage below the
+    /// retained reduced preview, so it re-runs the mix, the orientation, the
+    /// exposure and its own arithmetic and nothing above them. No decode, no
+    /// normalisation, no white balance, no demosaic, no camera-to-working
+    /// conversion and no reduction.
+    ///
+    /// It goes through exactly the path the other four adjustments do: the
+    /// complete record is updated, persistence becomes `.pending`, and one
+    /// request goes to the coalescing renderer. A slider drag is a burst of
+    /// such calls; the renderer collapses it to the newest state, and only
+    /// that state can be installed or written. There is no timer, no debounce
+    /// and no levels-specific queue here, deliberately.
+    ///
+    /// No arithmetic happens here either. The pair is already validated by its
+    /// type, and what it does to a pixel is `LinearLevels`'s business.
+    ///
+    /// Asking for the levels already in force does nothing at all.
+    func setLevels(_ levels: UserLevelsAdjustment) {
+        adjust { $0.levels = levels }
+    }
+
+    /// Returns the levels to black `0` / white `1`, and changes nothing else.
+    ///
+    /// Exactly the neutral pair, which is mathematically the identity — so the
+    /// downstream input becomes the one that would have been produced had the
+    /// levels never changed. It is itself a decision and is saved once it has
+    /// rendered, and it leaves the other adjustments exactly as they were.
+    func resetLevels() { setLevels(.neutral) }
 
     // MARK: - White-balance adjustment
 

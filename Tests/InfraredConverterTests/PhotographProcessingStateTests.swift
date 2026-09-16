@@ -32,7 +32,7 @@ struct PhotographProcessingStateTests {
         #expect(state.captureProfile == .builtinUncalibrated)
         #expect(state.adjustments == .none)
         #expect(state.isDefault)
-        #expect(PhotographProcessingState.currentSchemaVersion == 5)
+        #expect(PhotographProcessingState.currentSchemaVersion == 6)
     }
 
     /// The document-level default is both halves, and either one can answer no.
@@ -62,7 +62,7 @@ struct PhotographProcessingStateTests {
                     adjustments: ImageAdjustments(orientation: .quarterTurnRight)
                 )
             )
-                == #"{"adjustments":{"channelMix":{"kind":"identity"},"exposureEV":0,"orientation":"rotate90Clockwise","whiteBalance":{"kind":"defaultNeutralPatch"}},"captureProfileID":"builtin.uncalibrated","schemaVersion":5}"#
+                == #"{"adjustments":{"channelMix":{"kind":"identity"},"exposureEV":0,"levels":{"blackPoint":0,"whitePoint":1},"orientation":"rotate90Clockwise","whiteBalance":{"kind":"defaultNeutralPatch"}},"captureProfileID":"builtin.uncalibrated","schemaVersion":6}"#
         )
 
         // The profile is a bare string: matching is exact and its parts are a
@@ -77,7 +77,7 @@ struct PhotographProcessingStateTests {
                     )
                 )
             )
-                == #"{"adjustments":{"channelMix":{"kind":"redBlueSwap"},"exposureEV":1.25,"orientation":"none","whiteBalance":{"kind":"defaultNeutralPatch"}},"captureProfileID":"user.epl3-720nm","schemaVersion":5}"#
+                == #"{"adjustments":{"channelMix":{"kind":"redBlueSwap"},"exposureEV":1.25,"levels":{"blackPoint":0,"whitePoint":1},"orientation":"none","whiteBalance":{"kind":"defaultNeutralPatch"}},"captureProfileID":"user.epl3-720nm","schemaVersion":6}"#
         )
 
         // A built-in mix's nine numbers are derived from its token and are
@@ -289,11 +289,12 @@ struct PhotographProcessingStateTests {
         )
     }
 
-    /// A migrated record is written back at version 5, in the nested shape,
-    /// with the profile it was migrated to — and re-reading that is the same
-    /// record. The migration runs once.
+    /// A migrated record is written back at version 6, in the nested shape,
+    /// with the profile it was migrated to and the neutral levels it was
+    /// migrated to — and re-reading that is the same record. The migration
+    /// runs once.
     @Test(
-        "Every historical version is written back as a version 5 record",
+        "Every historical version is written back as a version 6 record",
         arguments: [
             #"{"schemaVersion":1,"orientation":"rotate180"}"#,
             #"{"schemaVersion":2,"orientation":"rotate180","channelMix":{"kind":"identity"}}"#,
@@ -306,13 +307,19 @@ struct PhotographProcessingStateTests {
              "channelMix":{"kind":"identity"},"exposureEV":0,
              "whiteBalance":{"kind":"defaultNeutralPatch"}}
             """#,
+            #"""
+            {"schemaVersion":5,"captureProfileID":"builtin.uncalibrated",
+             "adjustments":{"orientation":"rotate180",
+             "channelMix":{"kind":"identity"},"exposureEV":0,
+             "whiteBalance":{"kind":"defaultNeutralPatch"}}}
+            """#,
         ]
     )
     func aMigratedRecordIsWrittenAtTheCurrentVersion(json: String) throws {
         let decoded = try Self.decode(json)
         #expect(
             try Self.encoded(decoded)
-                == #"{"adjustments":{"channelMix":{"kind":"identity"},"exposureEV":0,"orientation":"rotate180","whiteBalance":{"kind":"defaultNeutralPatch"}},"captureProfileID":"builtin.uncalibrated","schemaVersion":5}"#
+                == #"{"adjustments":{"channelMix":{"kind":"identity"},"exposureEV":0,"levels":{"blackPoint":0,"whitePoint":1},"orientation":"rotate180","whiteBalance":{"kind":"defaultNeutralPatch"}},"captureProfileID":"builtin.uncalibrated","schemaVersion":6}"#
         )
         let reread = try JSONDecoder().decode(
             PhotographProcessingState.self, from: try Self.encoder.encode(decoded)
@@ -489,12 +496,12 @@ struct PhotographProcessingStateTests {
 
     @Test(
         "A newer schema version is refused rather than partly applied",
-        arguments: [6, 7, 99]
+        arguments: [7, 8, 99]
     )
     func aNewerSchemaVersionIsRefused(version: Int) {
         #expect(
             throws: PhotographProcessingStateError.unsupportedSchemaVersion(
-                found: version, supported: 5
+                found: version, supported: 6
             )
         ) {
             try Self.decode(
@@ -512,7 +519,7 @@ struct PhotographProcessingStateTests {
     func anImpossibleSchemaVersionIsRefused(version: Int) {
         #expect(
             throws: PhotographProcessingStateError.unsupportedSchemaVersion(
-                found: version, supported: 5
+                found: version, supported: 6
             )
         ) {
             try Self.decode(#"{"schemaVersion":\#(version),"orientation":"none"}"#)
@@ -644,13 +651,13 @@ struct PhotographProcessingStateTests {
     @Test("The record's refusals carry readable reasons")
     func theRefusalsAreInformative() {
         let version = PhotographProcessingStateError.unsupportedSchemaVersion(
-            found: 9, supported: 5
+            found: 9, supported: 6
         )
         #expect(version.errorDescription?.isEmpty == false)
         #expect(version.failureReason?.contains("9") == true)
 
         let older = PhotographProcessingStateError.unsupportedSchemaVersion(
-            found: 0, supported: 5
+            found: 0, supported: 6
         )
         #expect(older.failureReason?.contains("no version") == true)
 

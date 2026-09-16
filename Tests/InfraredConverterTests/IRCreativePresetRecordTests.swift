@@ -282,7 +282,7 @@ struct IRCreativePresetRecordTests {
     func thePresetSchemaVersionIsItsOwnCounter() {
         #expect(IRCreativePreset.currentSchemaVersion == 1)
         #expect(IRCaptureProfile.currentSchemaVersion == 1)
-        #expect(PhotographProcessingState.currentSchemaVersion == 5)
+        #expect(PhotographProcessingState.currentSchemaVersion == 6)
         // Different enum types entirely, so a version bump to one can never
         // silently move the other. Compared here only by their raw numbers,
         // which is all a wire format can see.

@@ -409,7 +409,7 @@ struct WorkspaceExposureAdjustmentTests {
         )
         // The version 5 shape: the capture-profile reference beside an
         // `adjustments` object, rather than four fields at the top level.
-        #expect(object["schemaVersion"] as? Int == 5)
+        #expect(object["schemaVersion"] as? Int == 6)
         #expect(object["captureProfileID"] as? String == "builtin.uncalibrated")
         let adjustments = try #require(object["adjustments"] as? [String: Any])
         #expect(adjustments["orientation"] as? String == "rotate90Clockwise")
