@@ -3,12 +3,19 @@ import Foundation
 @testable import InfraredConverter
 
 /// The gate that decides whether the expensive real-RAW suites run, and the
-/// one test that makes a misconfigured request impossible to mistake for
-/// coverage.
+/// tests that make a misconfigured request impossible to mistake for coverage.
 ///
-/// This suite is deliberately **not** gated on anything. It is cheap, it
-/// reads no RAW file, and it must run in the ordinary fast suite — the
-/// misconfiguration it reports is one that only shows up there.
+/// This suite is deliberately **not** gated on anything. It is cheap and it
+/// reads no RAW file, so it runs in the ordinary fast suite.
+///
+/// It is no longer the *only* thing that reports a misconfiguration, and it
+/// could never have been enough on its own: `--filter` excludes it, so a
+/// targeted Tier 2 run against a missing fixture passed while executing
+/// nothing. The refusal now lives in `RAWFixtureMode.gate()`, behind the
+/// `.requiresRAWFixture` trait every fixture suite carries. What is left here
+/// is the pure policy — the parse, the two questions being separate, and the
+/// shape of the refusals — plus the whole-run guards, which still catch a
+/// misconfigured `swift test` that selects no fixture suite at all.
 @Suite("Real-RAW fixture mode")
 struct RAWFixtureModeTests {
 
@@ -115,6 +122,74 @@ struct RAWFixtureModeTests {
             set it to 0.
             """
         )
+    }
+
+    // MARK: - The gate every suite carries
+
+    /// What `--filter` broke, and where the repair had to live.
+    ///
+    /// The two tests above fail a whole `swift test` run, and they cannot
+    /// fail the documented Tier 2 command, because `--filter` excludes this
+    /// suite from it. So the refusal moved into `gate()` — the one function
+    /// behind `.requiresRAWFixture`, which every real-RAW suite carries.
+    ///
+    /// This is the pure-policy half. The half that matters, that a throwing
+    /// condition trait fails a *filtered* run rather than skipping it, is a
+    /// property of the command line and is verified there.
+    @Test("The gate skips when nobody asked")
+    func theGateSkipsWhenNobodyAsked() throws {
+        // Whatever this machine's environment says, the two off cases are the
+        // quiet ones: an ordinary `swift test` must not fail for want of a
+        // fixture nobody asked for.
+        #expect(RAWFixtureMode.parse(nil) == .absent)
+        #expect(RAWFixtureMode.parse("0") == .disabled)
+
+        switch RAWFixtureMode.request {
+        case .absent, .disabled:
+            #expect(try RAWFixtureMode.gate() == false)
+        case .enabled:
+            #expect(try RAWFixtureMode.gate() == RAWFixtures.isAvailable)
+        case .unrecognised:
+            break
+        }
+    }
+
+    /// An impossible request is an error out of the gate, not a `false`.
+    ///
+    /// `false` is what "nobody asked" means. Reusing it for "somebody asked
+    /// and it cannot be done" is exactly how a targeted run came to report
+    /// success having executed nothing.
+    @Test("An impossible request throws out of the gate rather than returning false")
+    func anImpossibleRequestThrows() {
+        guard case let .unrecognised(value) = RAWFixtureMode.request else {
+            if RAWFixtureMode.isRequested && !RAWFixtures.isAvailable {
+                #expect(throws: RAWFixtureMode.Misconfiguration.requestedWithoutFixture) {
+                    try RAWFixtureMode.gate()
+                }
+            }
+            return
+        }
+        #expect(throws: RAWFixtureMode.Misconfiguration.unrecognisedValue(value)) {
+            try RAWFixtureMode.gate()
+        }
+    }
+
+    /// The diagnostics are what a developer actually reads when a filtered run
+    /// fails, so they must name the variable, the other variable, and the
+    /// value that was rejected.
+    @Test("The refusals say which setting to change")
+    func theRefusalsSayWhichSettingToChange() {
+        let missing = String(describing: RAWFixtureMode.Misconfiguration.requestedWithoutFixture)
+        #expect(missing.contains(RAWFixtureMode.variableName))
+        #expect(missing.contains("INFRARED_TEST_ORF"))
+        #expect(missing.contains("no usable RAW fixture was found"))
+
+        let unrecognised = String(
+            describing: RAWFixtureMode.Misconfiguration.unrecognisedValue("true")
+        )
+        #expect(unrecognised.contains(RAWFixtureMode.variableName))
+        #expect(unrecognised.contains("\"true\""))
+        #expect(unrecognised.contains("exactly 1"))
     }
 
     // MARK: - The skip reason says which condition failed

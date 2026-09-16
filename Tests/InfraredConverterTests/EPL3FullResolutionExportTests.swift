@@ -18,7 +18,7 @@ import Foundation
 /// see; and nothing is ever written into `RAW/`.
 @Suite(
     "E-PL3 full-resolution export",
-    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)"),
+    .requiresRAWFixture,
     .serialized
 )
 struct EPL3FullResolutionExportTests {

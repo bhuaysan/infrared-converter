@@ -27,7 +27,7 @@ import Foundation
 /// patterns. A visual check would pass for a mirrored result.
 @Suite(
     "E-PL3 orientation correction",
-    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)")
+    .requiresRAWFixture
 )
 struct EPL3OrientationCorrectionTests {
 

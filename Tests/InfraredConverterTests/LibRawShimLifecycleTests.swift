@@ -76,7 +76,7 @@ struct LibRawShimLifecycleTests {
 /// *opened* context from an *unpacked* one.
 @Suite(
     "LibRaw shim lifecycle (fixture)",
-    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)")
+    .requiresRAWFixture
 )
 struct LibRawShimLifecycleFixtureTests {
     private static func withContext<T>(_ body: (OpaquePointer) throws -> T) rethrows -> T {

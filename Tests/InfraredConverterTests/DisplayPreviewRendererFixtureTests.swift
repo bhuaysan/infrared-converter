@@ -35,7 +35,7 @@ import Foundation
 /// it.
 @Suite(
     "DisplayPreviewRenderer integration",
-    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)")
+    .requiresRAWFixture
 )
 struct DisplayPreviewRendererFixtureTests {
 

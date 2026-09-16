@@ -6,7 +6,7 @@ import Foundation
 ///
 /// These require a local fixture (see `RAWFixtures`) and skip cleanly without it,
 /// so the repository stays buildable and testable on CI and other machines.
-@Suite("LibRawDecoder integration", .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)"))
+@Suite("LibRawDecoder integration", .requiresRAWFixture)
 struct LibRawDecoderFixtureTests {
     @Test("Reads metadata from a real Olympus ORF")
     func readsMetadata() throws {

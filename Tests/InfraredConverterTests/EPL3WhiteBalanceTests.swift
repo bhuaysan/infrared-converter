@@ -22,7 +22,7 @@ import Foundation
 /// results, one decode.
 @Suite(
     "E-PL3 interactive white balance",
-    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)"),
+    .requiresRAWFixture,
     .serialized
 )
 struct EPL3WhiteBalanceTests {

@@ -10,7 +10,7 @@ import Foundation
 /// without it.
 @Suite(
     "RAWWhiteBalancer integration",
-    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)")
+    .requiresRAWFixture
 )
 struct RAWWhiteBalancerFixtureTests {
     /// Deterministic gains for testing only.

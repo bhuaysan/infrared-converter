@@ -1,4 +1,5 @@
 import Foundation
+import Testing
 
 /// Whether the expensive real-RAW fixture suites should run at all.
 ///
@@ -35,7 +36,30 @@ import Foundation
 /// A policy spread across seventeen `ProcessInfo` lookups is seventeen
 /// chances to spell the variable differently, to forget one suite, or to let
 /// a new suite default to the old behaviour. The rule is stated once here and
-/// every suite gates on `isEnabled`.
+/// every suite carries the one trait `.requiresRAWFixture`, which is the only
+/// place the decision is made.
+///
+/// ## Why the gate throws rather than merely returning `false`
+///
+/// A misconfiguration used to be reported by one ungated test in
+/// `RAWFixtureModeTests`, which is enough for a whole `swift test` run and
+/// not enough for the documented Tier 2 command:
+///
+/// ```bash
+/// INFRARED_RUN_RAW_FIXTURES=1 swift test --filter EPL3OrientationCorrectionTests
+/// ```
+///
+/// `--filter` excludes the suite that would have complained. The targeted
+/// suite, finding `isRequested` true and no fixture, disabled itself — and the
+/// run reported success having executed no real-RAW test at all.
+///
+/// So the refusal lives in the gate every fixture suite already touches.
+/// `gate()` returns `false` for the ordinary "nobody asked" case, so an
+/// ordinary `swift test` still skips quietly, and *throws* when the
+/// configuration is one nobody can act on: an explicit request with no
+/// fixture, or a value this reader has no meaning for. A condition trait whose
+/// condition throws is a recorded error rather than a skip, so whichever
+/// fixture suite `--filter` selected fails the process and says why.
 enum RAWFixtureMode {
 
     /// The environment variable that opts in.
@@ -98,5 +122,75 @@ enum RAWFixtureMode {
             \(variableName)=1 was set, but no RAW fixture was found. \
             \(RAWFixtures.unavailableReason)
             """
+    }
+
+    /// A fixture request that cannot be honoured, and that nothing downstream
+    /// can sensibly interpret as "off".
+    enum Misconfiguration: Error, Equatable, CustomStringConvertible {
+        /// `=1`, but there is no file to run against.
+        case requestedWithoutFixture
+        /// Set to a value this reader has no meaning for.
+        case unrecognisedValue(String)
+
+        var description: String {
+            switch self {
+            case .requestedWithoutFixture:
+                return """
+                    \(RAWFixtureMode.variableName)=1 asked for the expensive \
+                    real-RAW fixture suites, but no usable RAW fixture was \
+                    found, so this suite could only have skipped. A run that \
+                    skipped it proves nothing about real-camera integration, \
+                    so it is a failure rather than a skip.
+
+                    \(RAWFixtures.unavailableReason)
+
+                    The two settings are separate: \
+                    \(RAWFixtureMode.variableName) decides whether the suites \
+                    run, INFRARED_TEST_ORF decides where the file is.
+                    """
+            case let .unrecognisedValue(value):
+                return """
+                    \(RAWFixtureMode.variableName) is set to "\(value)", which \
+                    this reader has no meaning for, so this suite could only \
+                    have skipped. Set it to exactly 1 to run the real-RAW \
+                    fixture suites, or to 0 — or unset it — to skip them.
+                    """
+            }
+        }
+    }
+
+    /// The single decision every fixture-backed suite makes.
+    ///
+    /// - Returns: `true` when the suites were asked for and a fixture exists,
+    ///   `false` when nobody asked.
+    /// - Throws: `Misconfiguration` when somebody asked and the request cannot
+    ///   be honoured. Returning `false` there would be the false green this
+    ///   gate exists to prevent.
+    static func gate() throws -> Bool {
+        switch request {
+        case .absent, .disabled:
+            return false
+        case let .unrecognised(value):
+            throw Misconfiguration.unrecognisedValue(value)
+        case .enabled:
+            guard RAWFixtures.isAvailable else {
+                throw Misconfiguration.requestedWithoutFixture
+            }
+            return true
+        }
+    }
+}
+
+extension Trait where Self == ConditionTrait {
+
+    /// The gate carried by every expensive real-RAW fixture suite.
+    ///
+    /// One trait rather than seventeen copies of the same `.enabled(if:)`
+    /// expression, so that what a misconfigured request does is decided in
+    /// `RAWFixtureMode.gate()` and nowhere else. Skips quietly when nobody
+    /// asked; fails the run — under `--filter` as much as under a whole
+    /// `swift test` — when somebody asked for something impossible.
+    static var requiresRAWFixture: Self {
+        .enabled(if: try RAWFixtureMode.gate(), "\(RAWFixtureMode.disabledReason)")
     }
 }

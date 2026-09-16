@@ -58,28 +58,61 @@ you ask for, and asking is one flag.
 The last two rows are the point of the table. A developer who typed
 `INFRARED_RUN_RAW_FIXTURES=1` has stated an intent, and a fast green run is not
 an honest answer to "run the real-RAW suites" when there was nothing to run
-them against. `RAWFixtureModeTests` therefore fails, naming both variables,
-rather than letting seventeen silent skips add up to a passing extended run.
+them against. The run therefore fails, naming both variables, rather than
+letting seventeen silent skips add up to a passing extended run.
 
 The same holds for a value nobody defined. `INFRARED_RUN_RAW_FIXTURES=true` is
 a plausible thing to type; folding it into "off" would produce exactly the
 false confidence the flag exists to prevent, so it is reported instead.
 
+**Those two rows hold under `--filter` as well**, which is the whole reason the
+refusal lives where it does. See the next section.
+
 ### Where the rule lives
 
 One type, `Tests/InfraredConverterTests/Support/RAWFixtureMode.swift`. Every
-gated suite reads it:
+gated suite carries one trait, and that trait is the only caller of the
+decision:
 
 ```swift
-@Suite(
-    "…",
-    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)")
-)
+@Suite("…", .requiresRAWFixture)
 ```
 
 A policy spread across seventeen `ProcessInfo` lookups is seventeen chances to
 spell the variable differently, to miss a suite, or to let a new suite default
 to the old behaviour.
+
+#### Why the gate throws
+
+`.requiresRAWFixture` is `.enabled(if: try RAWFixtureMode.gate(), …)`, and
+`gate()` has three outcomes rather than two:
+
+```text
+nobody asked                    false     → the suite skips, quietly
+asked, and a fixture exists     true      → the suite runs
+asked, and it cannot be done    throws    → the run fails
+```
+
+The third outcome is the fix for a real false green. The refusal used to live
+only in `RAWFixtureModeTests`, an ungated suite that fails a whole `swift test`
+run. That cannot reach the documented Tier 2 command:
+
+```bash
+INFRARED_RUN_RAW_FIXTURES=1 swift test --filter EPL3OrientationCorrectionTests
+```
+
+`--filter` excludes the suite that would have complained. The targeted suite —
+asked for, with no fixture — disabled itself, and the run reported success
+having executed no real-RAW test at all. Every honest signal was outside the
+filter.
+
+A condition trait whose condition *throws* is a recorded error, not a skip, so
+whichever fixture suite the filter selected now fails the process itself and
+prints which of the two settings to change. Nothing has to remember to append
+`RAWFixtureModeTests` to a filter, and no suite restates the policy: the
+returned `false` still produces the ordinary quiet skip, so plain `swift test`
+is unaffected, and a filter that selects no fixture suite at all — `swift test
+--filter ChannelMix` — never evaluates the gate.
 
 `RAWFixtures` still answers the other question — it resolves
 `INFRARED_TEST_ORF`, then `RAW/OLYMPUS.ORF`, then any other `.orf` in `RAW/` —

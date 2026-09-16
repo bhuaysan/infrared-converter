@@ -8,7 +8,7 @@ import Foundation
 ///
 /// These require a local fixture (see `RAWFixtures`) and skip cleanly
 /// without it.
-@Suite("LibRawDecoder mosaic integration", .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)"))
+@Suite("LibRawDecoder mosaic integration", .requiresRAWFixture)
 struct LibRawDecoderMosaicFixtureTests {
     @Test("Mosaic dimensions equal the active area, tightly packed, 16 bits per stored sample")
     func mosaicDimensionsMatchActiveArea() throws {

@@ -33,7 +33,7 @@ import Foundation
 /// it.
 @Suite(
     "RAWDemosaicer integration",
-    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)")
+    .requiresRAWFixture
 )
 struct RAWDemosaicerFixtureTests {
 

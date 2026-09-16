@@ -18,7 +18,7 @@ import Foundation
 /// megapixel file renders the same way it did before capture profiles existed.
 @Suite(
     "E-PL3 capture profile",
-    .enabled(if: RAWFixtureMode.isEnabled, "\(RAWFixtureMode.disabledReason)"),
+    .requiresRAWFixture,
     .serialized
 )
 struct EPL3CaptureProfileTests {
