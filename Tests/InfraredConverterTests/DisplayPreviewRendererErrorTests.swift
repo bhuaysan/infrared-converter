@@ -24,13 +24,10 @@ struct DisplayPreviewRendererErrorTests {
     )
     func nonFiniteExposureIsRefused(exposureEV: Double) {
         #expect {
-            _ = try DisplayPreviewRenderer().render(
-                DisplayPreviewTestData.pixel(0.5, 0.5, 0.5),
-                settings: DisplayPreviewTestData.settings(exposureEV: exposureEV)
-            )
+            _ = try DisplayPreviewTestData.renderPreview(DisplayPreviewTestData.pixel(0.5, 0.5, 0.5), exposureEV: exposureEV)
         } throws: { error in
             guard case .nonFiniteExposure(let reportedEV, _) =
-                    error as? DisplayRenderingError else { return false }
+                    error as? SceneLinearExposureError else { return false }
             // NaN cannot be compared with `==`, so it is identified as NaN.
             return exposureEV.isNaN ? reportedEV.isNaN : reportedEV == exposureEV
         }
@@ -46,13 +43,10 @@ struct DisplayPreviewRendererErrorTests {
         #expect(exp2(-Double.infinity).isFinite)
 
         #expect {
-            _ = try DisplayPreviewRenderer().render(
-                DisplayPreviewTestData.pixel(0.5, 0.5, 0.5),
-                settings: DisplayPreviewTestData.settings(exposureEV: -.infinity)
-            )
+            _ = try DisplayPreviewTestData.renderPreview(DisplayPreviewTestData.pixel(0.5, 0.5, 0.5), exposureEV: -.infinity)
         } throws: { error in
             guard case .nonFiniteExposure(let reportedEV, let scale) =
-                    error as? DisplayRenderingError else { return false }
+                    error as? SceneLinearExposureError else { return false }
             return reportedEV == -.infinity && scale == 0
         }
     }
@@ -67,13 +61,10 @@ struct DisplayPreviewRendererErrorTests {
         #expect(!exp2(exposureEV).isFinite)
 
         #expect {
-            _ = try DisplayPreviewRenderer().render(
-                DisplayPreviewTestData.pixel(0.5, 0.5, 0.5),
-                settings: DisplayPreviewTestData.settings(exposureEV: exposureEV)
-            )
+            _ = try DisplayPreviewTestData.renderPreview(DisplayPreviewTestData.pixel(0.5, 0.5, 0.5), exposureEV: exposureEV)
         } throws: { error in
             guard case .nonFiniteExposure(let reportedEV, let scale) =
-                    error as? DisplayRenderingError else { return false }
+                    error as? SceneLinearExposureError else { return false }
             return reportedEV == exposureEV && scale == .infinity
         }
     }
@@ -93,12 +84,10 @@ struct DisplayPreviewRendererErrorTests {
             values: [0.5, 0.5, 0.5, 0.25, .greatestFiniteMagnitude, 0.75]
         )
         #expect {
-            _ = try DisplayPreviewRenderer().render(
-                image, settings: DisplayPreviewTestData.settings(exposureEV: 1)
-            )
+            _ = try DisplayPreviewTestData.renderPreview(image, exposureEV: 1)
         } throws: { error in
             guard case .nonFiniteExposedValue(let row, let column, let channel, let exposureEV) =
-                    error as? DisplayRenderingError else { return false }
+                    error as? SceneLinearExposureError else { return false }
             return row == 0 && column == 1 && channel == .green && exposureEV == 1
         }
     }
@@ -108,10 +97,7 @@ struct DisplayPreviewRendererErrorTests {
     /// about the arithmetic, not about the value being large.
     @Test("The largest finite magnitude renders at 0 EV and clips high")
     func aHugeButRepresentableValueClipsInstead() throws {
-        let rendered = try DisplayPreviewRenderer().render(
-            DisplayPreviewTestData.pixel(.greatestFiniteMagnitude, 0.5, 0),
-            settings: DisplayPreviewTestData.settings(exposureEV: 0)
-        )
+        let rendered = try DisplayPreviewTestData.renderPreview(DisplayPreviewTestData.pixel(.greatestFiniteMagnitude, 0.5, 0))
         #expect(rendered.bytes[0] == 255)
         #expect(rendered.processing.clippedHighSampleCount == 1)
     }
@@ -129,12 +115,10 @@ struct DisplayPreviewRendererErrorTests {
             let image = DisplayPreviewTestData.image(width: 2, height: 2, values: values)
 
             #expect {
-                _ = try DisplayPreviewRenderer().render(
-                    image, settings: DisplayPreviewTestData.settings(exposureEV: 0)
-                )
+                _ = try DisplayPreviewTestData.renderPreview(image)
             } throws: { error in
                 guard case .nonFiniteSceneLinearInput(let row, let column, let reported, _) =
-                        error as? DisplayRenderingError else { return false }
+                        error as? SceneLinearExposureError else { return false }
                 return row == 1 && column == 0 && reported == channel
             }
         }
@@ -147,13 +131,10 @@ struct DisplayPreviewRendererErrorTests {
     @Test("An infinite input is named as an input, not as an exposure failure")
     func nonFiniteInputIsNotReportedAsAnExposureFailure() {
         #expect {
-            _ = try DisplayPreviewRenderer().render(
-                DisplayPreviewTestData.pixel(.infinity, 0.5, 0.5),
-                settings: DisplayPreviewTestData.settings(exposureEV: 2)
-            )
+            _ = try DisplayPreviewTestData.renderPreview(DisplayPreviewTestData.pixel(.infinity, 0.5, 0.5), exposureEV: 2)
         } throws: { error in
             guard case .nonFiniteSceneLinearInput(_, _, let channel, let value) =
-                    error as? DisplayRenderingError else { return false }
+                    error as? SceneLinearExposureError else { return false }
             return channel == .red && value == .infinity
         }
     }
@@ -164,23 +145,19 @@ struct DisplayPreviewRendererErrorTests {
     func inconsistentGeometryIsRefused() {
         let renderer = DisplayPreviewRenderer()
         // Declares 2×2 (12 values) and holds 9.
-        let short = DisplayPreviewTestData.image(
+        let short = DisplayPreviewTestData.leveledImage(
             width: 2, height: 2, values: [Float](repeating: 0.5, count: 9)
         )
         #expect {
-            _ = try renderer.render(
-                short, settings: DisplayPreviewTestData.settings(exposureEV: 0)
-            )
+            _ = try renderer.render(short, settings: DisplayPreviewTestData.settings)
         } throws: { error in
             guard case .invalidGeometry = error as? DisplayRenderingError else { return false }
             return true
         }
 
-        let empty = DisplayPreviewTestData.image(width: 0, height: 4, values: [])
+        let empty = DisplayPreviewTestData.leveledImage(width: 0, height: 4, values: [])
         #expect {
-            _ = try renderer.render(
-                empty, settings: DisplayPreviewTestData.settings(exposureEV: 0)
-            )
+            _ = try renderer.render(empty, settings: DisplayPreviewTestData.settings)
         } throws: { error in
             guard case .invalidGeometry = error as? DisplayRenderingError else { return false }
             return true
@@ -188,18 +165,22 @@ struct DisplayPreviewRendererErrorTests {
     }
 
     /// Geometry is checked before exposure, so a broken image reports the
-    /// broken image rather than whatever the settings happen to be.
+    /// broken image rather than whatever the settings happen to be. The stage
+    /// that reports it is now the exposer, which is the first of the three to
+    /// see the image — and that is the point rather than an accident: the
+    /// chain refuses at its earliest boundary instead of carrying a broken
+    /// image further down it.
     @Test("Geometry is refused before the exposure is even considered")
     func geometryIsCheckedFirst() {
         let short = DisplayPreviewTestData.image(
             width: 4, height: 4, values: [Float](repeating: 0.5, count: 3)
         )
         #expect {
-            _ = try DisplayPreviewRenderer().render(
-                short, settings: DisplayPreviewTestData.settings(exposureEV: .nan)
-            )
+            _ = try DisplayPreviewTestData.renderPreview(short, exposureEV: .nan)
         } throws: { error in
-            guard case .invalidGeometry = error as? DisplayRenderingError else { return false }
+            guard case .invalidGeometry = error as? SceneLinearExposureError else {
+                return false
+            }
             return true
         }
     }
@@ -210,17 +191,37 @@ struct DisplayPreviewRendererErrorTests {
     func errorsDescribeThemselves() {
         let errors: [DisplayRenderingError] = [
             .invalidGeometry(reason: "2x2 needs 12 values, buffer holds 9."),
-            .nonFiniteExposure(exposureEV: .nan, scale: .nan),
-            .nonFiniteSceneLinearInput(row: 3, column: 4, channel: .green, value: .infinity),
-            .nonFiniteExposedValue(row: 5, column: 6, channel: .blue, exposureEV: 2),
+            .nonFiniteLinearInput(row: 3, column: 4, channel: .green, value: .infinity),
             .displayImageUnavailable(reason: "CoreGraphics declined."),
         ]
         for error in errors {
             #expect(error.errorDescription?.isEmpty == false)
             #expect(error.failureReason?.isEmpty == false)
         }
-        #expect(errors[2].failureReason?.contains("row 3, column 4") == true)
-        #expect(errors[3].failureReason?.contains("row 5, column 6") == true)
-        #expect(errors[3].failureReason?.contains("2.0 EV") == true)
+        #expect(errors[1].failureReason?.contains("row 3, column 4") == true)
+    }
+
+    /// The two exposure cases are **gone** from this error type, not merely
+    /// unused. An error case that cannot occur describes a stage that no
+    /// longer exists, and a reader handling it would be handling nothing.
+    @Test("The display error surface is exactly three cases")
+    func theErrorSurfaceCarriesNoExposureCases() {
+        // Written as an exhaustive switch: adding a case to
+        // `DisplayRenderingError` without deciding what it means fails to
+        // compile here.
+        func describe(_ error: DisplayRenderingError) -> String {
+            switch error {
+            case .invalidGeometry: return "geometry"
+            case .nonFiniteLinearInput: return "input"
+            case .displayImageUnavailable: return "platform"
+            }
+        }
+        #expect(describe(.invalidGeometry(reason: "x")) == "geometry")
+        #expect(
+            describe(
+                .nonFiniteLinearInput(row: 0, column: 0, channel: .red, value: .nan)
+            ) == "input"
+        )
+        #expect(describe(.displayImageUnavailable(reason: "x")) == "platform")
     }
 }

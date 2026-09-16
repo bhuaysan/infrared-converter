@@ -58,8 +58,21 @@ struct FullResolutionExportPipelineTests {
         )
         #expect(rendered.image.processing.workingColorSpace == .extendedLinearSRGB)
         #expect(!rendered.image.processing.isValidatedInfraredCalibration)
-        // Scene-linear and unclipped: the encoder owns the range policy.
-        #expect(rendered.image.processing.sceneLinear)
+        #expect(rendered.image.processing.levelsApplied)
+        #expect(rendered.image.processing.blackPoint == 0)
+        #expect(rendered.image.processing.whitePoint == 1)
+        // Linear-light and unclipped: the encoder owns the range policy.
+        //
+        // Not *scene*-linear, and the record says so even at neutral levels.
+        // The levels stage is licensed to subtract an offset, and a reader
+        // asking "is this proportional to scene radiance?" of a stage that may
+        // have moved the origin should get one answer rather than an answer
+        // that depends on the value. The weaker, value-dependent fact is
+        // available separately — and here it is true, because black is 0.
+        #expect(!rendered.image.processing.sceneLinear)
+        #expect(rendered.image.processing.linearLightEncoded)
+        #expect(rendered.image.processing.preservesProportionalityToSceneRadiance)
+        #expect(rendered.image.processing.exposureProcessing.sceneLinear)
         #expect(!rendered.image.processing.clamped)
         #expect(!rendered.image.processing.displayEncodingApplied)
         #expect(!rendered.image.processing.reducedForPreview)

@@ -109,22 +109,45 @@ public enum DisplayEncoding: Equatable, Sendable {
 /// Every choice the display rendering stage requires, and nothing else.
 ///
 /// ```text
-/// IRChannelMixedRGBImage        extended linear sRGB, scene-linear, unclamped
+/// LeveledLinearRGBImage         linear-light, unclamped, every adjustment applied
 ///         ↓
-/// DisplayRenderSettings         ← this type: exposure + range policy + encoding
+/// DisplayRenderSettings         ← this type: range policy + encoding
 ///         ↓
 /// DisplayPreviewRenderer
 ///         ↓
 /// DisplayEncodedPreviewImage    display-referred sRGB, 8 bits per component
 /// ```
 ///
-/// ## There is no default
+/// ## Why there is no exposure here any more
 ///
-/// No `.standard`, no `.neutral`, no zero-argument initialiser, and no
-/// defaulted parameter on any renderer entry point that could supply one. A
-/// caller that wants neutral exposure writes `0 EV`, and that choice is then
-/// visible at the call site to anyone reading the code — which is the whole
-/// point, and the same reason `IRChannelMixer` requires a mix to be named.
+/// There used to be. `exposureEV` lived on these settings because the display
+/// renderer applied exposure in the same pass that it clipped and encoded,
+/// which made the *display* stage the authority on a *scene-linear*
+/// adjustment. That was already uncomfortable when the export path had to
+/// apply the same decision without going near an 8-bit renderer, and it became
+/// untenable when Levels arrived: Levels must sit **after** exposure and
+/// **before** clipping, and there is no way to put a stage between two halves
+/// of one fused pass.
+///
+/// So exposure moved out, to `SceneLinearExposer`, where the export path had
+/// already been calling it, and Levels follows it as `LinearLevelsApplier`.
+/// The preview and the export now run the identical three-stage sequence and
+/// hand the identical type to their respective encoders:
+///
+/// ```text
+/// OrientedSceneLinearRGBImage
+///   → SceneLinearExposer        adjustments.exposure
+///   → LinearLevelsApplier       adjustments.levels
+///   → LeveledLinearRGBImage     ─┬─ DisplayPreviewRenderer  (this type)
+///                                └─ ExportImageEncoder      (ExportRenderSettings)
+/// ```
+///
+/// The absence is therefore structural rather than tidy, exactly as it is for
+/// `ExportRenderSettings`: the image these settings describe has already been
+/// exposed and levelled, and settings carrying an exposure would offer a
+/// second, silent application of it. The renderer cannot double-expose because
+/// it is not given an exposure. See
+/// `docs/decisions/0026-linear-levels.md`.
 ///
 /// ## No automatic behaviour
 ///
@@ -136,65 +159,33 @@ public enum DisplayEncoding: Equatable, Sendable {
 ///
 /// `IRChannelMix` and `RAWCameraToWorkingColorTransform` pair a matrix with a
 /// **provenance claim**, so a caller-assembled pairing could assert that a
-/// matrix came from somewhere it did not. This type pairs three independent
-/// choices, none of which is a claim about anything's origin. There is nothing
-/// here to forge, so the memberwise initialiser stays open and the value is
-/// validated once, where it is used.
+/// matrix came from somewhere it did not. This type pairs two independent
+/// choices, neither of which is a claim about anything's origin. There is
+/// nothing here to forge, so the memberwise initialiser stays open and the
+/// value is validated once, where it is used.
 public struct DisplayRenderSettings: Equatable, Sendable {
-    /// Exposure in photographic stops, applied in the **linear** domain as
-    /// `linearInput × 2^EV`.
-    ///
-    /// ```text
-    /// +1 EV   ×2
-    ///  0 EV   ×1        the mathematically neutral value
-    /// −1 EV   ×0.5
-    /// +2 EV   ×4
-    /// ```
-    ///
-    /// Fractional values are supported and mean what they say: `+0.5 EV` is
-    /// `×2^0.5`, half a stop.
-    ///
-    /// Not clamped to a "sensible" range. It must, however, be finite, and
-    /// `2^EV` must be finite too — `DisplayPreviewRenderer` refuses both
-    /// failures rather than substituting a plausible number.
-    public let exposureEV: Double
-    /// What happens to coordinates outside `0...1`, after exposure.
+    /// What happens to coordinates outside `0...1`.
     public let rangePolicy: DisplayRangePolicy
     /// The transfer function and colour space the output bytes are in.
     public let encoding: DisplayEncoding
 
-    public init(
-        exposureEV: Double,
-        rangePolicy: DisplayRangePolicy,
-        encoding: DisplayEncoding
-    ) {
-        self.exposureEV = exposureEV
+    public init(rangePolicy: DisplayRangePolicy, encoding: DisplayEncoding) {
         self.rangePolicy = rangePolicy
         self.encoding = encoding
     }
 
-    /// This exposure as the shared scene-linear primitive.
+    /// The settings every interactive preview in this version uses.
     ///
-    /// The settings carry the number; `SceneLinearExposure` owns what it
-    /// means. The export path applies the same primitive to the same value
-    /// without going near these settings or this renderer, which is the point
-    /// of the primitive existing. See
-    /// `docs/decisions/0018-full-resolution-tiff-export.md`.
-    public var exposure: SceneLinearExposure { SceneLinearExposure(ev: exposureEV) }
-
-    /// The linear multiplier `2^exposureEV`.
-    ///
-    /// Exact for integer stops: `exp2(0) == 1`, `exp2(1) == 2`,
-    /// `exp2(-1) == 0.5`, `exp2(2) == 4`, with no rounding in any of them.
-    ///
-    /// Not guaranteed finite — a finite but enormous EV produces an infinite
-    /// scale, which the renderer refuses. This property reports what the
-    /// arithmetic gives; it does not sanitise it.
-    public var exposureScale: Double { exposure.scale }
+    /// An application choice, spelled out in one place rather than defaulted
+    /// inside the renderer — the renderer has no default settings,
+    /// deliberately, for the same reason no processing stage in this project
+    /// has one. The mirror of `ExportRenderSettings.standard`.
+    public static let standard = DisplayRenderSettings(
+        rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
+    )
 
     /// A one-line summary for diagnostics and reports.
     public var diagnosticDescription: String {
-        "\(exposureEV) EV (×\(exposureScale)), \(rangePolicy.diagnosticDescription), "
-            + encoding.diagnosticDescription
+        "\(rangePolicy.diagnosticDescription), \(encoding.diagnosticDescription)"
     }
 }

@@ -32,6 +32,21 @@ struct DisplayPreviewRendererPolicyTests {
         )
     }
 
+    /// The same image, exposed and levelled, as the renderer now receives it.
+    /// Both identity stages hand the buffer back untouched, so at the defaults
+    /// these are the same numbers `spreadImage()` holds.
+    static func spreadLeveled(
+        processing: ImageOrientationProcessing? = nil,
+        exposureEV: Double = 0,
+        blackPoint: Double = 0,
+        whitePoint: Double = 1
+    ) throws -> LeveledLinearRGBImage {
+        try DisplayPreviewTestData.develop(
+            spreadImage(processing: processing),
+            exposureEV: exposureEV, blackPoint: blackPoint, whitePoint: whitePoint
+        )
+    }
+
     // MARK: - Metadata cannot reach the rendering
 
     /// The core entry point takes an image and settings, so there is no
@@ -45,9 +60,9 @@ struct DisplayPreviewRendererPolicyTests {
     @Test("Varying every upstream fact leaves the rendered bytes identical")
     func upstreamProvenanceCannotChangeTheRendering() throws {
         let renderer = DisplayPreviewRenderer()
-        let settings = DisplayPreviewTestData.settings(exposureEV: 0)
+        let settings = DisplayPreviewTestData.settings
 
-        let baseline = try renderer.render(Self.spreadImage(), settings: settings)
+        let baseline = try renderer.render(try Self.spreadLeveled(), settings: settings)
 
         // A completely different upstream history: a different creative mix, a
         // different camera-to-working transform, different white-balance gains
@@ -65,7 +80,7 @@ struct DisplayPreviewRendererPolicyTests {
             whiteLevel: 16383
         )
         let varied = try renderer.render(
-            Self.spreadImage(processing: differentHistory), settings: settings
+            try Self.spreadLeveled(processing: differentHistory), settings: settings
         )
 
         #expect(varied.bytes == baseline.bytes)
@@ -90,16 +105,16 @@ struct DisplayPreviewRendererPolicyTests {
     @Test("Overall image brightness does not influence any sample")
     func nothingIsNormalisedToTheImage() throws {
         let renderer = DisplayPreviewRenderer()
-        let settings = DisplayPreviewTestData.settings(exposureEV: 0)
+        let settings = DisplayPreviewTestData.settings
         let probe: Float = 0.18
 
         // The same probe value, once among dark neighbours and once among
         // bright ones.
-        let dark = DisplayPreviewTestData.image(
+        let dark = DisplayPreviewTestData.leveledImage(
             width: 2, height: 1,
             values: [probe, 0.01, 0.01, 0.02, 0.01, 0.005]
         )
-        let bright = DisplayPreviewTestData.image(
+        let bright = DisplayPreviewTestData.leveledImage(
             width: 2, height: 1,
             values: [probe, 0.99, 0.97, 0.95, 1.0, 0.98]
         )
@@ -124,10 +139,7 @@ struct DisplayPreviewRendererPolicyTests {
         for step in 0..<(16 * 3) {
             values.append(Float(step) * 0.021 - 0.15)
         }
-        let rendered = try DisplayPreviewRenderer().render(
-            DisplayPreviewTestData.image(width: 4, height: 4, values: values),
-            settings: DisplayPreviewTestData.settings(exposureEV: 0.25)
-        )
+        let rendered = try DisplayPreviewTestData.renderPreview(DisplayPreviewTestData.image(width: 4, height: 4, values: values), exposureEV: 0.25)
         for (offset, value) in values.enumerated() {
             #expect(
                 rendered.bytes[offset]
@@ -145,7 +157,7 @@ struct DisplayPreviewRendererPolicyTests {
     @Test("A component's sample does not depend on the other two")
     func componentsDoNotInfluenceEachOther() throws {
         let renderer = DisplayPreviewRenderer()
-        let settings = DisplayPreviewTestData.settings(exposureEV: 0)
+        let settings = DisplayPreviewTestData.settings
         let probe: Float = 0.4
         let expected = DisplayPreviewTestData.referenceSample(
             sceneLinear: probe, exposureEV: 0
@@ -156,7 +168,7 @@ struct DisplayPreviewRendererPolicyTests {
         ]
         for (green, blue) in companions {
             let rendered = try renderer.render(
-                DisplayPreviewTestData.pixel(probe, green, blue), settings: settings
+                DisplayPreviewTestData.leveledPixel(probe, green, blue), settings: settings
             )
             #expect(rendered.bytes[0] == expected, "companions \(green), \(blue)")
         }
@@ -175,9 +187,7 @@ struct DisplayPreviewRendererPolicyTests {
             values.append(Float(index % 97) * 0.01)
         }
         let image = DisplayPreviewTestData.image(width: width, height: height, values: values)
-        let rendered = try DisplayPreviewRenderer().render(
-            image, settings: DisplayPreviewTestData.settings(exposureEV: 0)
-        )
+        let rendered = try DisplayPreviewTestData.renderPreview(image)
 
         #expect(rendered.width == image.width)
         #expect(rendered.height == image.height)
@@ -208,9 +218,9 @@ struct DisplayPreviewRendererPolicyTests {
 
     @Test("Provenance states what ran and what did not")
     func provenanceRecordsTheStageHonestly() throws {
-        let settings = DisplayPreviewTestData.settings(exposureEV: -0.75)
+        let settings = DisplayPreviewTestData.settings
         let rendered = try DisplayPreviewRenderer().render(
-            Self.spreadImage(), settings: settings
+            try Self.spreadLeveled(exposureEV: -0.75), settings: settings
         )
         let processing = rendered.processing
 
@@ -261,9 +271,7 @@ struct DisplayPreviewRendererPolicyTests {
     /// fact from never applying exposure.
     @Test("Zero EV still records that exposure ran")
     func zeroEVStillRecordsExposure() throws {
-        let rendered = try DisplayPreviewRenderer().render(
-            Self.spreadImage(), settings: DisplayPreviewTestData.settings(exposureEV: 0)
-        )
+        let rendered = try DisplayPreviewTestData.renderPreview(Self.spreadImage())
         #expect(rendered.processing.exposureApplied)
         #expect(rendered.processing.exposureEV == 0)
         #expect(rendered.processing.exposureScale == 1)

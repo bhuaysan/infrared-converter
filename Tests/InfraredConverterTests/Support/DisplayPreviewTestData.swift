@@ -102,14 +102,161 @@ enum DisplayPreviewTestData {
         image(width: 1, height: 1, values: [red, green, blue])
     }
 
-    /// Settings with everything spelled out. There is no default in the
-    /// production API and none is invented here either — the exposure is
-    /// always passed.
-    static func settings(exposureEV: Double) -> DisplayRenderSettings {
-        DisplayRenderSettings(
-            exposureEV: exposureEV,
-            rangePolicy: .hardClipToDisplayRange,
-            encoding: .sRGB
+    /// Provenance for an exposed image, over an orientation history rich
+    /// enough that a stage which overwrote it would be visible.
+    static func exposureProcessing(
+        exposureEV: Double = 0,
+        orientation: RAWImageOrientation = .upright,
+        mix: IRChannelMix = .identity,
+        transform: RAWCameraToWorkingColorTransform = .sensorRGBIdentityFalseColor,
+        gains: RAWWhiteBalanceGains = RAWWhiteBalanceGains(
+            plane0: 2, plane1: 1, plane2: 3, plane3: 1
+        ),
+        whiteLevel: UInt32 = 4095
+    ) -> SceneLinearExposureProcessing {
+        SceneLinearExposureProcessing(
+            exposure: SceneLinearExposure(ev: exposureEV),
+            orientationProcessing: orientationProcessing(
+                orientation: orientation, mix: mix, transform: transform,
+                gains: gains, whiteLevel: whiteLevel
+            )
+        )
+    }
+
+    /// Provenance for a levelled image — what the display renderer now
+    /// consumes — over the whole upstream chain.
+    static func levelsProcessing(
+        blackPoint: Double = 0,
+        whitePoint: Double = 1,
+        exposureEV: Double = 0,
+        orientation: RAWImageOrientation = .upright,
+        mix: IRChannelMix = .identity,
+        transform: RAWCameraToWorkingColorTransform = .sensorRGBIdentityFalseColor,
+        gains: RAWWhiteBalanceGains = RAWWhiteBalanceGains(
+            plane0: 2, plane1: 1, plane2: 3, plane3: 1
+        ),
+        whiteLevel: UInt32 = 4095
+    ) -> LinearLevelsProcessing {
+        LinearLevelsProcessing(
+            levels: LinearLevels(blackPoint: blackPoint, whitePoint: whitePoint),
+            exposureProcessing: exposureProcessing(
+                exposureEV: exposureEV, orientation: orientation, mix: mix,
+                transform: transform, gains: gains, whiteLevel: whiteLevel
+            )
+        )
+    }
+
+    /// An exposed scene-linear image from interleaved `R G B` values: the
+    /// levels stage's input.
+    static func exposedImage(
+        width: Int,
+        height: Int,
+        values: [Float],
+        processing: SceneLinearExposureProcessing? = nil
+    ) -> ExposedSceneLinearRGBImage {
+        ExposedSceneLinearRGBImage(
+            width: width,
+            height: height,
+            values: values,
+            processing: processing ?? exposureProcessing()
+        )
+    }
+
+    /// A levelled linear-light image from interleaved `R G B` values: what the
+    /// display renderer actually consumes.
+    static func leveledImage(
+        width: Int,
+        height: Int,
+        values: [Float],
+        processing: LinearLevelsProcessing? = nil
+    ) -> LeveledLinearRGBImage {
+        LeveledLinearRGBImage(
+            width: width,
+            height: height,
+            values: values,
+            processing: processing ?? levelsProcessing()
+        )
+    }
+
+    /// One levelled pixel, for hand-computable arithmetic.
+    static func leveledPixel(
+        _ red: Float, _ green: Float, _ blue: Float
+    ) -> LeveledLinearRGBImage {
+        leveledImage(width: 1, height: 1, values: [red, green, blue])
+    }
+
+    /// The two adjustment stages the display renderer no longer performs, run
+    /// by the **production** stages.
+    ///
+    /// It exists so that a suite whose subject is clipping, encoding and
+    /// quantisation can still be written in terms of a scene-linear input and
+    /// an exposure, and so that what it feeds the renderer is what the
+    /// workspace would feed it — not a hand-assembled buffer that happens to
+    /// look similar. Nothing here reimplements exposure or levels.
+    static func develop(
+        _ image: OrientedSceneLinearRGBImage,
+        exposureEV: Double = 0,
+        blackPoint: Double = 0,
+        whitePoint: Double = 1,
+        cancellation: ProcessingCancellation = .none
+    ) throws -> LeveledLinearRGBImage {
+        try LinearLevelsApplier().apply(
+            to: SceneLinearExposer().apply(
+                to: image,
+                exposure: SceneLinearExposure(ev: exposureEV),
+                cancellation: cancellation
+            ),
+            levels: LinearLevels(blackPoint: blackPoint, whitePoint: whitePoint),
+            cancellation: cancellation
+        )
+    }
+
+    /// The same, from raw component values.
+    static func developedPixel(
+        _ red: Float, _ green: Float, _ blue: Float,
+        exposureEV: Double = 0,
+        blackPoint: Double = 0,
+        whitePoint: Double = 1
+    ) throws -> LeveledLinearRGBImage {
+        try develop(
+            pixel(red, green, blue),
+            exposureEV: exposureEV, blackPoint: blackPoint, whitePoint: whitePoint
+        )
+    }
+
+    /// The destination settings, with everything spelled out. There is no
+    /// default in the production API; this is the test suites' one copy of the
+    /// application's choice.
+    static let settings = DisplayRenderSettings(
+        rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
+    )
+
+    /// The interactive render chain's last three stages, run in order by the
+    /// **production** types: exposure, levels, then display encoding.
+    ///
+    /// The display renderer no longer applies exposure — `SceneLinearExposer`
+    /// and `LinearLevelsApplier` are stages of their own, between the
+    /// orientation and the encoder — so a suite whose subject is clipping,
+    /// encoding or quantisation needs all three to get from a scene-linear
+    /// input to a preview. This composes them exactly as
+    /// `WorkspacePreviewPipeline.render` does, and reimplements none of them.
+    static func renderPreview(
+        _ image: OrientedSceneLinearRGBImage,
+        exposureEV: Double = 0,
+        blackPoint: Double = 0,
+        whitePoint: Double = 1,
+        cancellation: ProcessingCancellation = .none
+    ) throws -> DisplayEncodedPreviewImage {
+        try DisplayPreviewRenderer().render(
+            develop(
+                image,
+                exposureEV: exposureEV,
+                blackPoint: blackPoint,
+                whitePoint: whitePoint,
+                cancellation: cancellation
+            ),
+            settings: settings,
+            cancellation: cancellation
         )
     }
 
@@ -137,9 +284,24 @@ enum DisplayPreviewTestData {
 
     /// The whole per-component pipeline, from scene-linear coordinate to
     /// 8-bit sample, computed independently of the renderer.
-    static func referenceSample(sceneLinear: Float, exposureEV: Double) -> UInt8 {
-        let exposed = Double(sceneLinear) * exp2(exposureEV)
-        let clipped = min(max(exposed, 0), 1)
+    ///
+    /// Exposure, then levels, then the clip, then the transfer function, then
+    /// quantisation — written from the specification in that order, because
+    /// the order is part of what is being checked.
+    ///
+    /// The narrowing is deliberate and matches the production convention: each
+    /// stage narrows to `Float32` exactly once, so this oracle reproduces the
+    /// rounding the pipeline actually performs rather than an idealised
+    /// `Double` result the pipeline never computes.
+    static func referenceSample(
+        sceneLinear: Float,
+        exposureEV: Double,
+        blackPoint: Double = 0,
+        whitePoint: Double = 1
+    ) -> UInt8 {
+        let exposed = Float(Double(sceneLinear) * exp2(exposureEV))
+        let leveled = Float((Double(exposed) - blackPoint) * (1 / (whitePoint - blackPoint)))
+        let clipped = min(max(Double(leveled), 0), 1)
         return referenceQuantize(referenceEncode(clipped))
     }
 }

@@ -1,8 +1,8 @@
 import Foundation
 
-/// The first display boundary: `OrientedSceneLinearRGBImage` →
-/// `DisplayEncodedPreviewImage`, by exposure, hard display-range clipping, the
-/// sRGB transfer function and deterministic quantisation.
+/// The display boundary: `LeveledLinearRGBImage` →
+/// `DisplayEncodedPreviewImage`, by hard display-range clipping, the sRGB
+/// transfer function and deterministic quantisation.
 ///
 /// ```text
 /// IRChannelMixedRGBImage         extended linear sRGB, in sensor order
@@ -13,21 +13,47 @@ import Foundation
 ///       ↓
 /// OrientedSceneLinearRGBImage    the same values, in viewing order
 ///       │
+///       │  explicit SceneLinearExposure
+///       ↓
+/// SceneLinearExposer             × 2^EV, in the linear domain — ADR 0017
+///       ↓
+/// ExposedSceneLinearRGBImage     still scene-linear, still unclamped
+///       │
+///       │  explicit LinearLevels
+///       ↓
+/// LinearLevelsApplier            (x − black) / (white − black) — ADR 0026
+///       ↓
+/// LeveledLinearRGBImage          linear-light, no longer scene-linear
+///       │
 ///       │  explicit DisplayRenderSettings
 ///       ↓
 /// DisplayPreviewRenderer         ← this stage
 ///       │
-///       │  linearExposed = linearInput × 2^EV        in the LINEAR domain
-///       │  clipped       = min(max(x, 0), 1)         hard, named, counted
-///       │  encoded       = sRGB OETF(clipped)        piecewise, not 1/2.2
-///       │  sample        = round(encoded × 255)      half away from zero
+///       │  clipped = min(max(x, 0), 1)         hard, named, counted
+///       │  encoded = sRGB OETF(clipped)        piecewise, not 1/2.2
+///       │  sample  = round(encoded × 255)      half away from zero
 ///       ↓
 /// DisplayEncodedPreviewImage     display-referred sRGB, 8 bits per component
 ///       ↓
 /// DisplayPreviewCGImageAdapter   tagged sRGB, handed to SwiftUI
 /// ```
 ///
-/// See `docs/decisions/0008-display-preview-rendering.md`.
+/// See `docs/decisions/0008-display-preview-rendering.md` and
+/// `docs/decisions/0026-linear-levels.md`.
+///
+/// ## Why it no longer applies exposure
+///
+/// It used to, in the same pass that it clipped and encoded, which made the
+/// display stage the arithmetic authority on a scene-linear adjustment. Levels
+/// ended that: they must sit **after** exposure and **before** clipping, and
+/// nothing can be inserted between two halves of one fused pass. Exposure
+/// therefore moved to `SceneLinearExposer` — where the export path had already
+/// been calling it — and Levels follows it as `LinearLevelsApplier`.
+///
+/// What remains here is exactly what belongs to a destination: a range policy,
+/// a transfer function and a bit depth. The export encoder now receives the
+/// **same type** from the **same stages**, so preview and export differ in
+/// resolution, range policy, bit depth and destination, and in nothing else.
 ///
 /// ## What this stage is not
 ///
@@ -43,34 +69,34 @@ import Foundation
 ///
 /// ## The input is taken at its word, and only at its word
 ///
-/// The input must be extended-linear-sRGB coordinates: `Float32`, interleaved,
-/// finite, and legitimately outside `0...1` in both directions. They are never
-/// treated as though they were already sRGB-encoded — the mistake that is
-/// invisible in code and obvious on screen.
+/// The input must be linear-light working-space coordinates: `Float32`,
+/// interleaved, finite, and legitimately outside `0...1` in both directions.
+/// They are never treated as though they were already sRGB-encoded — the
+/// mistake that is invisible in code and obvious on screen.
 ///
-/// What the stage does **not** assume is that they are good. Whether they mean
-/// anything colourimetrically for an infrared capture is the camera-to-working
-/// transform's business, and no transform in this project is a validated
-/// infrared calibration. Displayable is a weaker claim than correct.
+/// They are **not** scene-linear, and the type says so: Levels have already
+/// subtracted an offset. That changes nothing about this stage's arithmetic —
+/// clipping and a transfer function care about the range, not about
+/// proportionality to radiance — but it is why the parameter is a
+/// `LeveledLinearRGBImage` and not an `OrientedSceneLinearRGBImage`.
+///
+/// What the stage does **not** assume is that the values are good. Whether
+/// they mean anything colourimetrically for an infrared capture is the
+/// camera-to-working transform's business, and no transform in this project is
+/// a validated infrared calibration. Displayable is a weaker claim than
+/// correct.
 ///
 /// ## No defaults, anywhere
 ///
 /// Every entry point requires a `DisplayRenderSettings`. There is no defaulted
-/// exposure parameter, so `0 EV` is a choice a caller makes visibly rather
-/// than one this type makes silently — the same rule `IRChannelMixer` applies
-/// to mixes, for the same reason.
+/// parameter that could supply one — the same rule `IRChannelMixer` applies to
+/// mixes, for the same reason.
 ///
 /// ## Arithmetic
 ///
-/// Storage is `Float32` in and `UInt8` out. The exposure scale is computed
-/// once per image in `Double`; each component is widened to `Double`,
-/// multiplied, and narrowed back to `Float32` exactly once — the convention
-/// `RAWWorkingColorConverter` and `IRChannelMixer` already use. Clipping
-/// operates on that `Float32`; the transfer function is evaluated in `Double`
-/// on the clipped value; quantisation rounds to nearest, half away from zero.
-///
-/// Overflow is a typed error, never an infinity written into an image and
-/// never a value clamped to something plausible.
+/// Storage is `Float32` in and `UInt8` out. Clipping operates on the `Float32`
+/// value; the transfer function is evaluated in `Double` on the clipped value;
+/// quantisation rounds to nearest, half away from zero.
 ///
 /// ## Geometry
 ///
@@ -79,11 +105,9 @@ import Foundation
 /// This stage does not read `RAWMetadata.geometry.flip` and never will.
 ///
 /// Its input arrives already arranged for viewing because `ImageOrienter` did
-/// that one stage upstream, as its own auditable operation. Provenance
+/// that three stages upstream, as its own auditable operation. Provenance
 /// forwards the fact — `orientationApplied` and `appliedOrientation` are
 /// readable from a preview — while the work itself stays where it can be seen.
-/// Rotating inside a colour stage would make the one record meant to describe
-/// the pipeline describe it wrongly.
 ///
 /// ## Cancellation
 ///
@@ -100,9 +124,9 @@ import Foundation
 /// ## Cost
 ///
 /// `O(component count)`: one read pass over the input, one owned output buffer
-/// a third of its size, one `exp2` outside the loop, and one `pow` per
-/// component that takes the nonlinear branch. No full-frame intermediate, no
-/// `Double` image buffer, no per-pixel allocation.
+/// a quarter of its size, and one `pow` per component that takes the nonlinear
+/// branch. No full-frame intermediate, no `Double` image buffer, no per-pixel
+/// allocation.
 ///
 /// This is a reference CPU implementation. Metal, Accelerate, vDSP and Core
 /// Image are deliberately absent — Core Image especially, since a `CIFilter`
@@ -111,14 +135,15 @@ import Foundation
 public struct DisplayPreviewRenderer: Sendable {
     public init() {}
 
-    /// Renders scene-linear working coordinates into display-encoded preview
-    /// pixels.
+    /// Renders adjusted linear-light working coordinates into display-encoded
+    /// preview pixels.
     ///
     /// - Parameters:
-    ///   - image: extended-linear-sRGB coordinates in viewing order, as
-    ///     `ImageOrienter` produces. Not mutated, not clamped, not modified in
-    ///     any way.
-    ///   - settings: exposure, range policy and encoding. Required — there is
+    ///   - image: linear-light working-space coordinates in viewing order,
+    ///     with the mix, the orientation, the exposure and the levels already
+    ///     applied, as `LinearLevelsApplier` produces. Not mutated, not
+    ///     clamped, not modified in any way.
+    ///   - settings: range policy and encoding. Required — there is
     ///     deliberately no default.
     ///   - cancellation: polled once here and once per row. Defaults to never
     ///     cancelling.
@@ -126,14 +151,14 @@ public struct DisplayPreviewRenderer: Sendable {
     ///   was superseded. The two are deliberately distinct types: one says the
     ///   image could not be encoded, the other says nobody wants it.
     public func render(
-        _ image: OrientedSceneLinearRGBImage,
+        _ image: LeveledLinearRGBImage,
         settings: DisplayRenderSettings,
         cancellation: ProcessingCancellation = .none
     ) throws -> DisplayEncodedPreviewImage {
         guard image.isGeometryConsistent else {
             throw DisplayRenderingError.invalidGeometry(
                 reason: """
-                    Oriented scene-linear RGB geometry \(image.width)x\(image.height) needs \
+                    Levelled linear RGB geometry \(image.width)x\(image.height) needs \
                     \(image.expectedValueCount.map(String.init) ?? "an unrepresentable number of") \
                     values, buffer holds \(image.values.count).
                     """
@@ -143,16 +168,6 @@ public struct DisplayPreviewRenderer: Sendable {
         // Before anything is allocated: a caller that has already superseded
         // this call gets nothing built for it at all.
         try cancellation.check()
-
-        // The shared scene-linear primitive, not arithmetic of this stage's
-        // own. `SceneLinearExposure` states why both halves of its
-        // applicability check are needed.
-        let exposure = settings.exposure
-        guard exposure.isApplicable else {
-            throw DisplayRenderingError.nonFiniteExposure(
-                exposureEV: exposure.ev, scale: exposure.scale
-            )
-        }
 
         // A consistent input already proves this product is representable —
         // the output needs exactly the count the input's `Float` buffer
@@ -184,54 +199,47 @@ public struct DisplayPreviewRenderer: Sendable {
                 )
             }
             let encoding = settings.encoding
-            let exposureEV = settings.exposureEV
 
             try image.values.withUnsafeBufferPointer { input in
-                // One component: validate, expose, clip, encode, quantise.
-                // Written once and called three times per pixel rather than
-                // looped over `RAWLinearRGBChannel.allCases`, which would
-                // allocate an array per pixel — the same reason the channel
-                // mixer writes its three checks out.
+                // One component: validate, clip, encode, quantise. Written
+                // once and called three times per pixel rather than looped
+                // over `RAWLinearRGBChannel.allCases`, which would allocate an
+                // array per pixel — the same reason the channel mixer writes
+                // its three checks out.
                 func sample(
                     _ index: Int,
                     _ row: Int,
                     _ column: Int,
                     _ channel: RAWLinearRGBChannel
                 ) throws -> UInt8 {
-                    let sceneLinear = input[index]
+                    let linear = input[index]
 
                     // A hand-built image can carry anything, and no upstream
                     // stage here can produce a non-finite value, so this is a
                     // real boundary rather than an assertion.
-                    guard sceneLinear.isFinite else {
-                        throw DisplayRenderingError.nonFiniteSceneLinearInput(
-                            row: row, column: column, channel: channel, value: sceneLinear
+                    guard linear.isFinite else {
+                        throw DisplayRenderingError.nonFiniteLinearInput(
+                            row: row, column: column, channel: channel, value: linear
                         )
                     }
 
-                    // Exposure, in the linear domain, before anything else,
-                    // by the shared primitive. The export encoder applies the
-                    // identical arithmetic to the identical value; that is
-                    // what makes a preview and an export the same rendering
-                    // at two bit depths rather than two pipelines.
-                    let exposed = exposure.applied(to: sceneLinear)
-                    guard exposed.isFinite else {
-                        throw DisplayRenderingError.nonFiniteExposedValue(
-                            row: row, column: column, channel: channel, exposureEV: exposureEV
-                        )
-                    }
-
-                    // Hard display-range clipping, counted. Both branches
-                    // destroy detail; that is what the counts are for.
+                    // Hard display-range clipping, counted, per
+                    // `settings.rangePolicy`. Both branches destroy detail;
+                    // that is what the counts are for. It is the first thing
+                    // this stage does, because everything an adjustment is
+                    // allowed to do to these values has already been done.
                     let clipped: Float
-                    if exposed < 0 {
-                        clipped = 0
-                        clippedLow += 1
-                    } else if exposed > 1 {
-                        clipped = 1
-                        clippedHigh += 1
-                    } else {
-                        clipped = exposed
+                    switch settings.rangePolicy {
+                    case .hardClipToDisplayRange:
+                        if linear < 0 {
+                            clipped = 0
+                            clippedLow += 1
+                        } else if linear > 1 {
+                            clipped = 1
+                            clippedHigh += 1
+                        } else {
+                            clipped = linear
+                        }
                     }
 
                     return Self.quantize(Self.encode(Double(clipped), as: encoding))
@@ -260,22 +268,22 @@ public struct DisplayPreviewRenderer: Sendable {
             bytes: bytes,
             processing: DisplayPreviewProcessing(
                 settings: settings,
-                orientationProcessing: image.processing,
+                levelsProcessing: image.processing,
                 clippedLowSampleCount: clippedLow,
                 clippedHighSampleCount: clippedHigh
             )
         )
     }
 
-    /// Renders an oriented result, keeping that whole scene-linear state
-    /// reachable on the returned value's `source`.
+    /// Renders a levelled result, keeping that whole adjusted state reachable
+    /// on the returned value's `source`.
     ///
     /// Use this rather than the bare-image overload whenever the caller may
-    /// want different settings later: the result carries everything needed to
-    /// re-render from the scene-linear image, without orienting, mixing,
+    /// want different settings — or different adjustments — later: the result
+    /// carries everything needed to restart from any upstream stage, without
     /// converting, demosaicing or decoding again.
     public func render(
-        _ processed: OrientedProcessedRAWImage,
+        _ processed: LeveledProcessedRAWImage,
         settings: DisplayRenderSettings,
         cancellation: ProcessingCancellation = .none
     ) throws -> DisplayPreviewProcessedRAWImage {
@@ -289,14 +297,15 @@ public struct DisplayPreviewRenderer: Sendable {
     /// scene-linear image it was produced from.
     ///
     /// Previews never compound: new settings are applied to the
-    /// `OrientedSceneLinearRGBImage`, never to the already-encoded bytes. That is
+    /// `LeveledLinearRGBImage`, never to the already-encoded bytes. That is
     /// structural — this reaches through `previous.source` and never touches
     /// `previous.image`. Re-rendering an encoded preview would apply the
     /// transfer function twice, compound quantisation, and be unable to
     /// recover a single clipped highlight, while looking entirely plausible.
     ///
-    /// Nothing upstream reruns: no orientation, no channel mix, no camera
-    /// conversion, no demosaic, no white balance, no decode.
+    /// Nothing upstream reruns: no levels, no exposure, no orientation, no
+    /// channel mix, no camera conversion, no demosaic, no white balance, no
+    /// decode.
     public func render(
         settings newSettings: DisplayRenderSettings,
         replacing previous: DisplayPreviewProcessedRAWImage,

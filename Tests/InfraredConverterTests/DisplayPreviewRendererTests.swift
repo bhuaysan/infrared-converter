@@ -37,8 +37,7 @@ struct DisplayPreviewRendererTests {
         ]
     )
     func integerStopsScaleExactly(exposureEV: Double, expected: Double) {
-        let settings = DisplayPreviewTestData.settings(exposureEV: exposureEV)
-        #expect(settings.exposureScale == expected)
+        #expect(SceneLinearExposure(ev: exposureEV).scale == expected)
     }
 
     @Test("Fractional stops scale by 2 to that power")
@@ -47,7 +46,7 @@ struct DisplayPreviewRendererTests {
         // differently-associated expression, so the tolerance is one ULP of
         // the expected magnitude rather than an arbitrary epsilon.
         func agrees(_ exposureEV: Double, _ expected: Double) -> Bool {
-            let scale = DisplayPreviewTestData.settings(exposureEV: exposureEV).exposureScale
+            let scale = SceneLinearExposure(ev: exposureEV).scale
             return abs(scale - expected) <= expected.ulp
         }
         #expect(agrees(0.5, 2.0.squareRoot()))
@@ -67,12 +66,12 @@ struct DisplayPreviewRendererTests {
         let renderer = DisplayPreviewRenderer()
 
         let brightened = try renderer.render(
-            DisplayPreviewTestData.pixel(0.1, 0.2, 0.3),
-            settings: DisplayPreviewTestData.settings(exposureEV: 1)
+            try DisplayPreviewTestData.developedPixel(0.1, 0.2, 0.3, exposureEV: 1),
+            settings: DisplayPreviewTestData.settings
         )
         let preScaled = try renderer.render(
-            DisplayPreviewTestData.pixel(0.2, 0.4, 0.6),
-            settings: DisplayPreviewTestData.settings(exposureEV: 0)
+            try DisplayPreviewTestData.developedPixel(0.2, 0.4, 0.6),
+            settings: DisplayPreviewTestData.settings
         )
         #expect(brightened.bytes == preScaled.bytes)
 
@@ -91,10 +90,7 @@ struct DisplayPreviewRendererTests {
     func zeroEVChangesNothingBeforeEncoding() throws {
         let values: [Float] = [0.0, 0.18, 0.5, 0.75, 1.0, 0.003_130_8]
         for value in values {
-            let rendered = try DisplayPreviewRenderer().render(
-                DisplayPreviewTestData.pixel(value, value, value),
-                settings: DisplayPreviewTestData.settings(exposureEV: 0)
-            )
+            let rendered = try DisplayPreviewTestData.renderPreview(DisplayPreviewTestData.pixel(value, value, value))
             let expected = DisplayPreviewTestData.referenceQuantize(
                 DisplayPreviewTestData.referenceEncode(Double(value))
             )
@@ -116,28 +112,32 @@ struct DisplayPreviewRendererTests {
     @Test("Values outside 0...1 are hard clipped, values inside are untouched")
     func clippingFollowsTheStatedTable() throws {
         let renderer = DisplayPreviewRenderer()
-        let settings = DisplayPreviewTestData.settings(exposureEV: 0)
+        let settings = DisplayPreviewTestData.settings
 
         // Below zero and zero produce the same byte, and it is 0.
         let negative = try renderer.render(
-            DisplayPreviewTestData.pixel(-5, -0.001, -0.0), settings: settings
+            DisplayPreviewTestData.leveledPixel(-5, -0.001, -0.0), settings: settings
         )
         #expect(Array(negative.bytes) == [0, 0, 0])
-        let zero = try renderer.render(DisplayPreviewTestData.pixel(0, 0, 0), settings: settings)
+        let zero = try renderer.render(
+            DisplayPreviewTestData.leveledPixel(0, 0, 0), settings: settings
+        )
         #expect(Array(zero.bytes) == [0, 0, 0])
 
         // Above one and one produce the same byte, and it is 255.
         let above = try renderer.render(
-            DisplayPreviewTestData.pixel(1.0001, 5, 1e30), settings: settings
+            DisplayPreviewTestData.leveledPixel(1.0001, 5, 1e30), settings: settings
         )
         #expect(Array(above.bytes) == [255, 255, 255])
-        let one = try renderer.render(DisplayPreviewTestData.pixel(1, 1, 1), settings: settings)
+        let one = try renderer.render(
+            DisplayPreviewTestData.leveledPixel(1, 1, 1), settings: settings
+        )
         #expect(Array(one.bytes) == [255, 255, 255])
 
         // A value inside the range reaches the encoder unchanged: 0.25 encodes
         // to the same byte whether or not any clipping code touched it.
         let inside = try renderer.render(
-            DisplayPreviewTestData.pixel(0.25, 0.25, 0.25), settings: settings
+            DisplayPreviewTestData.leveledPixel(0.25, 0.25, 0.25), settings: settings
         )
         let expected = DisplayPreviewTestData.referenceQuantize(
             DisplayPreviewTestData.referenceEncode(0.25)
@@ -156,10 +156,7 @@ struct DisplayPreviewRendererTests {
             1.5, 0.1, 0.9,
             0.0, 1.0, 3.0,
         ]
-        let rendered = try DisplayPreviewRenderer().render(
-            DisplayPreviewTestData.image(width: 2, height: 2, values: values),
-            settings: DisplayPreviewTestData.settings(exposureEV: 0)
-        )
+        let rendered = try DisplayPreviewTestData.renderPreview(DisplayPreviewTestData.image(width: 2, height: 2, values: values))
         #expect(rendered.processing.clippedLowSampleCount == 2)
         #expect(rendered.processing.clippedHighSampleCount == 3)
         #expect(rendered.processing.clippedSampleCount == 5)
@@ -169,18 +166,13 @@ struct DisplayPreviewRendererTests {
 
     @Test("Exposure decides what clips, because it happens first")
     func exposureChangesWhatClips() throws {
-        let renderer = DisplayPreviewRenderer()
         let image = DisplayPreviewTestData.pixel(0.6, 0.6, 0.6)
 
-        let neutral = try renderer.render(
-            image, settings: DisplayPreviewTestData.settings(exposureEV: 0)
-        )
+        let neutral = try DisplayPreviewTestData.renderPreview(image)
         #expect(neutral.processing.clippedHighSampleCount == 0)
 
         // ×2 puts every component above 1.
-        let brightened = try renderer.render(
-            image, settings: DisplayPreviewTestData.settings(exposureEV: 1)
-        )
+        let brightened = try DisplayPreviewTestData.renderPreview(image, exposureEV: 1)
         #expect(brightened.processing.clippedHighSampleCount == 3)
         #expect(Array(brightened.bytes) == [255, 255, 255])
     }
@@ -201,9 +193,7 @@ struct DisplayPreviewRendererTests {
         // −1 EV, so the largest finite magnitude in the buffer is halved
         // rather than overflowed: what is under test here is that the input
         // survives, not what an overflow does.
-        _ = try DisplayPreviewRenderer().render(
-            image, settings: DisplayPreviewTestData.settings(exposureEV: -1)
-        )
+        _ = try DisplayPreviewTestData.renderPreview(image, exposureEV: -1)
 
         #expect(image.values.count == before.count)
         for index in 0..<before.count {
@@ -334,10 +324,7 @@ struct DisplayPreviewRendererTests {
         for step in 0..<(64 * 3) {
             values.append(Float(step) * 0.05 - 1.5)
         }
-        let rendered = try DisplayPreviewRenderer().render(
-            DisplayPreviewTestData.image(width: 8, height: 8, values: values),
-            settings: DisplayPreviewTestData.settings(exposureEV: 1.5)
-        )
+        let rendered = try DisplayPreviewTestData.renderPreview(DisplayPreviewTestData.image(width: 8, height: 8, values: values), exposureEV: 1.5)
         #expect(rendered.bytes.count == 8 * 8 * 3)
         // `UInt8` cannot hold anything else, so what this really pins is that
         // every byte was written, and matches the independent reference.
@@ -361,10 +348,7 @@ struct DisplayPreviewRendererTests {
             0.25, 0.6, 0.005,
             0.7, 0.15, 0.5,
         ]
-        let rendered = try DisplayPreviewRenderer().render(
-            DisplayPreviewTestData.image(width: 2, height: 2, values: values),
-            settings: DisplayPreviewTestData.settings(exposureEV: 0)
-        )
+        let rendered = try DisplayPreviewTestData.renderPreview(DisplayPreviewTestData.image(width: 2, height: 2, values: values))
 
         for (offset, value) in values.enumerated() {
             let expected = DisplayPreviewTestData.referenceSample(
@@ -405,10 +389,7 @@ struct DisplayPreviewRendererTests {
         for index in 0..<(width * height * 3) {
             values.append(Float(index) / Float(width * height * 3))
         }
-        let rendered = try DisplayPreviewRenderer().render(
-            DisplayPreviewTestData.image(width: width, height: height, values: values),
-            settings: DisplayPreviewTestData.settings(exposureEV: 0)
-        )
+        let rendered = try DisplayPreviewTestData.renderPreview(DisplayPreviewTestData.image(width: width, height: height, values: values))
 
         #expect(rendered.width == width)
         #expect(rendered.height == height)
@@ -437,10 +418,10 @@ struct DisplayPreviewRendererTests {
     @Test("Out-of-bounds coordinates return nil rather than trapping")
     func accessorsRefuseOutOfBounds() throws {
         let rendered = try DisplayPreviewRenderer().render(
-            DisplayPreviewTestData.image(
+            DisplayPreviewTestData.leveledImage(
                 width: 2, height: 2, values: [Float](repeating: 0.5, count: 12)
             ),
-            settings: DisplayPreviewTestData.settings(exposureEV: 0)
+            settings: DisplayPreviewTestData.settings
         )
         #expect(rendered.byteIndex(row: -1, column: 0) == nil)
         #expect(rendered.byteIndex(row: 0, column: -1) == nil)
@@ -467,8 +448,8 @@ struct DisplayPreviewRendererTests {
             height: 4,
             bytes: Data(count: 12),
             processing: DisplayPreviewProcessing(
-                settings: DisplayPreviewTestData.settings(exposureEV: 0),
-                orientationProcessing: DisplayPreviewTestData.orientationProcessing(),
+                settings: DisplayPreviewTestData.settings,
+                levelsProcessing: DisplayPreviewTestData.levelsProcessing(),
                 clippedLowSampleCount: 0,
                 clippedHighSampleCount: 0
             )

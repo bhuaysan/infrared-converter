@@ -89,6 +89,39 @@ enum ExportTestData {
         )
     }
 
+    /// A levelled linear-light image, ready for the encoder — the type both
+    /// destinations now take.
+    static func leveled(
+        width: Int,
+        height: Int,
+        values: [Float],
+        exposureEV: Double = 0,
+        blackPoint: Double = 0,
+        whitePoint: Double = 1,
+        orientation: RAWImageOrientation = .upright,
+        mix: IRChannelMix = .identity
+    ) throws -> LeveledLinearRGBImage {
+        try LinearLevelsApplier().apply(
+            to: exposed(
+                width: width, height: height, values: values,
+                exposureEV: exposureEV, orientation: orientation, mix: mix
+            ),
+            levels: LinearLevels(blackPoint: blackPoint, whitePoint: whitePoint)
+        )
+    }
+
+    /// A levelled image whose provenance says it came from a reduced preview.
+    static func leveledFromPreview(
+        width: Int,
+        height: Int,
+        values: [Float]
+    ) throws -> LeveledLinearRGBImage {
+        try LinearLevelsApplier().apply(
+            to: exposedFromPreview(width: width, height: height, values: values),
+            levels: .neutral
+        )
+    }
+
     // MARK: - The reference implementation
 
     /// The sRGB OETF, written out again.
@@ -103,10 +136,21 @@ enum ExportTestData {
         UInt16((encoded * 65535).rounded())
     }
 
-    /// One scene-linear component through the whole export boundary.
-    static func referenceSample(sceneLinear: Float, exposureEV: Double = 0) -> UInt16 {
-        let exposed = Double(sceneLinear) * exp2(exposureEV)
-        let clipped = min(max(exposed, 0), 1)
+    /// One scene-linear component through exposure, levels and the whole
+    /// export boundary, written from the specification.
+    ///
+    /// Each stage narrows to `Float32` exactly once, matching the production
+    /// convention, so this oracle reproduces the rounding the pipeline
+    /// actually performs.
+    static func referenceSample(
+        sceneLinear: Float,
+        exposureEV: Double = 0,
+        blackPoint: Double = 0,
+        whitePoint: Double = 1
+    ) -> UInt16 {
+        let exposed = Float(Double(sceneLinear) * exp2(exposureEV))
+        let leveled = Float((Double(exposed) - blackPoint) * (1 / (whitePoint - blackPoint)))
+        let clipped = min(max(Double(leveled), 0), 1)
         return referenceQuantize(referenceEncode(clipped))
     }
 

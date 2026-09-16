@@ -154,7 +154,6 @@ struct PublicProcessingSurfaceTests {
         // The settings are spelled out here, because there is no default on
         // the public API to fall back on — which is the point.
         let settings = DisplayRenderSettings(
-            exposureEV: 0,
             rangePolicy: .hardClipToDisplayRange,
             encoding: .sRGB
         )
@@ -174,10 +173,50 @@ struct PublicProcessingSurfaceTests {
         _ = oriented.metadata
         #expect(oriented.url == decoded.url)
 
+        let exposed: ExposedProcessedRAWImage = try SceneLinearExposer()
+            .apply(to: oriented, exposure: .neutral)
+        _ = exposed.source
+        _ = exposed.image
+        _ = exposed.orientedImage
+        _ = exposed.channelMixedImage
+        _ = exposed.workingColorImage
+        _ = exposed.demosaicedImage
+        _ = exposed.whiteBalancedMosaic
+        _ = exposed.linearMosaic
+        _ = exposed.processing
+        _ = exposed.exposure
+        _ = exposed.orientation
+        _ = exposed.mix
+        _ = exposed.cameraToWorkingTransform
+        _ = exposed.metadata
+        #expect(exposed.url == decoded.url)
+
+        let leveled: LeveledProcessedRAWImage = try LinearLevelsApplier()
+            .apply(to: exposed, levels: .neutral)
+        _ = leveled.source
+        _ = leveled.image
+        _ = leveled.exposedImage
+        _ = leveled.orientedImage
+        _ = leveled.channelMixedImage
+        _ = leveled.workingColorImage
+        _ = leveled.demosaicedImage
+        _ = leveled.whiteBalancedMosaic
+        _ = leveled.linearMosaic
+        _ = leveled.processing
+        _ = leveled.levels
+        _ = leveled.exposure
+        _ = leveled.orientation
+        _ = leveled.mix
+        _ = leveled.cameraToWorkingTransform
+        _ = leveled.metadata
+        #expect(leveled.url == decoded.url)
+
         let preview: DisplayPreviewProcessedRAWImage = try DisplayPreviewRenderer()
-            .render(oriented, settings: settings)
+            .render(leveled, settings: settings)
         _ = preview.source
         _ = preview.image
+        _ = preview.leveledImage
+        _ = preview.exposedImage
         _ = preview.orientedImage
         _ = preview.channelMixedImage
         _ = preview.workingColorImage
@@ -186,6 +225,8 @@ struct PublicProcessingSurfaceTests {
         _ = preview.linearMosaic
         _ = preview.processing
         _ = preview.settings
+        _ = preview.levels
+        _ = preview.exposure
         _ = preview.orientation
         _ = preview.mix
         _ = preview.cameraToWorkingTransform
@@ -193,8 +234,10 @@ struct PublicProcessingSurfaceTests {
         #expect(preview.url == decoded.url)
 
         // The whole chain is readable from the last wrapper alone.
-        #expect(preview.source.source.source.source.source.source.source.mosaic
-            == decoded.mosaic)
+        #expect(
+            preview.source.source.source.source.source.source.source.source.source.mosaic
+                == decoded.mosaic
+        )
         #expect(mixed.image.isGeometryConsistent)
         #expect(mixed.processing.whiteBalanceApplied)
         #expect(mixed.processing.channelMixApplied)
@@ -258,11 +301,15 @@ struct PublicProcessingSurfaceTests {
             bytes: Data(count: 12),
             processing: DisplayPreviewProcessing(
                 settings: DisplayRenderSettings(
-                    exposureEV: 0, rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
+                    rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
                 ),
-                orientationProcessing: ImageOrientationProcessing(
-                    orientation: .upright,
-                    channelMixProcessing: IRChannelMixProcessing(
+                levelsProcessing: LinearLevelsProcessing(
+                    levels: .neutral,
+                    exposureProcessing: SceneLinearExposureProcessing(
+                        exposure: .neutral,
+                        orientationProcessing: ImageOrientationProcessing(
+                            orientation: .upright,
+                            channelMixProcessing: IRChannelMixProcessing(
                         mix: .identity,
                         workingColorProcessing: RAWWorkingColorProcessing(
                             transform: .sensorRGBIdentityFalseColor,
@@ -280,6 +327,8 @@ struct PublicProcessingSurfaceTests {
                                     linearProcessing: linearProcessing
                                 )
                             )
+                        )
+                    )
                         )
                     )
                 ),

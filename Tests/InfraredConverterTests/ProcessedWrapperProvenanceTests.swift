@@ -106,25 +106,54 @@ struct ProcessedWrapperProvenanceTests {
         #expect(oriented.source.source.source.source.source.source.mosaic == decoded.mosaic)
         #expect(oriented.url == decoded.url)
 
-        // Stage 7 mints DisplayPreviewProcessedRAWImage over that.
+        // Stage 7 mints ExposedProcessedRAWImage over that.
+        let exposed = try SceneLinearExposer().apply(
+            to: oriented, exposure: SceneLinearExposure(ev: 1)
+        )
+        #expect(exposed.orientedImage == oriented.image)
+        #expect(exposed.channelMixedImage == mixed.image)
+        #expect(exposed.source.source.source.source.source.source.source.mosaic
+            == decoded.mosaic)
+        #expect(exposed.url == decoded.url)
+
+        // Stage 8 mints LeveledProcessedRAWImage over that.
+        let leveled = try LinearLevelsApplier().apply(
+            to: exposed, levels: LinearLevels(blackPoint: 0.05, whitePoint: 0.95)
+        )
+        #expect(leveled.exposedImage == exposed.image)
+        #expect(leveled.orientedImage == oriented.image)
+        #expect(leveled.channelMixedImage == mixed.image)
+        #expect(leveled.source.source.source.source.source.source.source.source.mosaic
+            == decoded.mosaic)
+        #expect(leveled.url == decoded.url)
+
+        // Stage 9 mints DisplayPreviewProcessedRAWImage over that.
         let preview = try DisplayPreviewRenderer().render(
-            oriented,
+            leveled,
             settings: DisplayRenderSettings(
-                exposureEV: 0, rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
+                rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
             )
         )
+        #expect(preview.leveledImage == leveled.image)
+        #expect(preview.exposedImage == exposed.image)
         #expect(preview.orientedImage == oriented.image)
         #expect(preview.channelMixedImage == mixed.image)
         #expect(preview.workingColorImage == working.image)
-        #expect(preview.source.source.source.source.source.source.source.mosaic
-            == decoded.mosaic)
+        #expect(
+            preview.source.source.source.source.source.source.source.source.source.mosaic
+                == decoded.mosaic
+        )
         #expect(preview.url == decoded.url)
 
-        // The provenance record reaches back through all five stages upstream
+        // The provenance record reaches back through all seven stages upstream
         // of the display one, and the display record reaches through it.
         #expect(preview.processing.mixSource == .redBlueSwap)
         #expect(preview.processing.whiteBalanceGains == gains)
-        #expect(preview.processing.exposureEV == 0)
+        #expect(preview.processing.exposureEV == 1)
+        #expect(preview.processing.blackPoint == 0.05)
+        #expect(preview.processing.whitePoint == 0.95)
+        #expect(preview.processing.levelsApplied)
+        #expect(!preview.processing.preservesProportionalityToSceneRadiance)
         #expect(preview.processing.appliedOrientation == .rotated90Clockwise)
         #expect(preview.orientation == .rotated90Clockwise)
 

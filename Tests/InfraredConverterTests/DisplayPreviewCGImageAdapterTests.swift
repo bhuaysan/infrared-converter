@@ -21,10 +21,7 @@ struct DisplayPreviewCGImageAdapterTests {
         for index in 0..<(width * height * 3) {
             values.append(Float(index % 251) / 251)
         }
-        return try DisplayPreviewRenderer().render(
-            DisplayPreviewTestData.image(width: width, height: height, values: values),
-            settings: DisplayPreviewTestData.settings(exposureEV: exposureEV)
-        )
+        return try DisplayPreviewTestData.renderPreview(DisplayPreviewTestData.image(width: width, height: height, values: values), exposureEV: exposureEV)
     }
 
     @Test("The image is described with the documented layout")
@@ -66,9 +63,7 @@ struct DisplayPreviewCGImageAdapterTests {
 
         for orientation in RAWImageOrientation.allCases {
             let oriented = try ImageOrienter().apply(to: mixed, orientation: orientation)
-            let preview = try DisplayPreviewRenderer().render(
-                oriented, settings: DisplayPreviewTestData.settings(exposureEV: 0)
-            )
+            let preview = try DisplayPreviewTestData.renderPreview(oriented)
             let cgImage = try DisplayPreviewCGImageAdapter.makeCGImage(from: preview)
 
             let expectedWidth = orientation.swapsDimensions ? height : width
@@ -134,10 +129,7 @@ struct DisplayPreviewCGImageAdapterTests {
 
     @Test("A single pixel is a legal image")
     func onePixelWorks() throws {
-        let preview = try DisplayPreviewRenderer().render(
-            DisplayPreviewTestData.pixel(0.18, 0.5, 1.0),
-            settings: DisplayPreviewTestData.settings(exposureEV: 0)
-        )
+        let preview = try DisplayPreviewTestData.renderPreview(DisplayPreviewTestData.pixel(0.18, 0.5, 1.0))
         let cgImage = try DisplayPreviewCGImageAdapter.makeCGImage(from: preview)
         #expect(cgImage.width == 1)
         #expect(cgImage.height == 1)
@@ -152,8 +144,8 @@ struct DisplayPreviewCGImageAdapterTests {
     @Test("An image whose buffer does not match its dimensions is refused")
     func inconsistentGeometryIsRefused() {
         let processing = DisplayPreviewProcessing(
-            settings: DisplayPreviewTestData.settings(exposureEV: 0),
-            orientationProcessing: DisplayPreviewTestData.orientationProcessing(),
+            settings: DisplayPreviewTestData.settings,
+            levelsProcessing: DisplayPreviewTestData.levelsProcessing(),
             clippedLowSampleCount: 0,
             clippedHighSampleCount: 0
         )

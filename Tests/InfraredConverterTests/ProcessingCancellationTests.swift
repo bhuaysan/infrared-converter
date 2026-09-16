@@ -29,14 +29,26 @@ struct ProcessingCancellationTests {
         return DisplayPreviewTestData.image(width: columns, height: rows, values: values)
     }
 
+    /// The display renderer's input, with neutral exposure and neutral levels
+    /// already applied. Both identity paths hand the buffer back untouched, so
+    /// the values the renderer sees are the ones `oriented()` built.
+    static func leveled() -> LeveledLinearRGBImage {
+        let values = (0..<(rows * columns * 3)).map { Float($0) / 10_000 }
+        return DisplayPreviewTestData.leveledImage(
+            width: columns, height: rows, values: values
+        )
+    }
+
     // MARK: - The default is unchanged behaviour
 
     @Test("A stage with no cancellation signal behaves exactly as before")
     func theDefaultIsNoCancellation() throws {
         let oriented = try ImageOrienter()
             .apply(to: Self.channelMixed(), orientation: .rotated90Clockwise)
-        let preview = try DisplayPreviewRenderer()
-            .render(oriented, settings: DisplayPreviewTestData.settings(exposureEV: 0))
+        let preview = try DisplayPreviewRenderer().render(
+            try DisplayPreviewTestData.develop(oriented),
+            settings: DisplayPreviewTestData.settings
+        )
 
         #expect(oriented.width == Self.rows)
         #expect(oriented.height == Self.columns)
@@ -56,10 +68,25 @@ struct ProcessingCancellationTests {
         #expect(oriented.height == Self.columns)
         #expect(orienterProbe.pollCount == 1 + Self.columns)
 
+        // Each of the three stages below the orientation polls on the same
+        // stated granularity, and each is asked separately: a fused pass could
+        // not make this assertion three times.
+        let exposerProbe = CancellationProbe()
+        let exposed = try SceneLinearExposer().apply(
+            to: oriented, exposure: .neutral, cancellation: exposerProbe.cancellation
+        )
+        #expect(exposerProbe.pollCount == 1 + Self.columns)
+
+        let levelsProbe = CancellationProbe()
+        let leveled = try LinearLevelsApplier().apply(
+            to: exposed, levels: .neutral, cancellation: levelsProbe.cancellation
+        )
+        #expect(levelsProbe.pollCount == 1 + Self.columns)
+
         let rendererProbe = CancellationProbe()
         _ = try DisplayPreviewRenderer().render(
-            oriented,
-            settings: DisplayPreviewTestData.settings(exposureEV: 0),
+            leveled,
+            settings: DisplayPreviewTestData.settings,
             cancellation: rendererProbe.cancellation
         )
         #expect(rendererProbe.pollCount == 1 + Self.columns)
@@ -137,8 +164,8 @@ struct ProcessingCancellationTests {
         let probe = CancellationProbe(cancelAfterPolls: 1)
         #expect(throws: CancellationError.self) {
             try DisplayPreviewRenderer().render(
-                Self.oriented(),
-                settings: DisplayPreviewTestData.settings(exposureEV: 0),
+                Self.leveled(),
+                settings: DisplayPreviewTestData.settings,
                 cancellation: probe.cancellation
             )
         }
@@ -150,8 +177,8 @@ struct ProcessingCancellationTests {
         let probe = CancellationProbe(cancelAfterPolls: 4)
         #expect(throws: CancellationError.self) {
             try DisplayPreviewRenderer().render(
-                Self.oriented(),
-                settings: DisplayPreviewTestData.settings(exposureEV: 0),
+                Self.leveled(),
+                settings: DisplayPreviewTestData.settings,
                 cancellation: probe.cancellation
             )
         }
@@ -165,8 +192,8 @@ struct ProcessingCancellationTests {
         let probe = CancellationProbe(cancelAfterPolls: 5)
         let result = Result {
             try DisplayPreviewRenderer().render(
-                Self.oriented(),
-                settings: DisplayPreviewTestData.settings(exposureEV: 0),
+                Self.leveled(),
+                settings: DisplayPreviewTestData.settings,
                 cancellation: probe.cancellation
             )
         }

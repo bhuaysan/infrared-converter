@@ -9,7 +9,10 @@ public enum ExportEncodingError: Error, Equatable {
     /// The input's declared dimensions and its buffer disagree.
     case invalidGeometry(reason: String)
     /// The image contains a value that is not a finite number.
-    case nonFiniteSceneLinearInput(
+    ///
+    /// Named for what this stage actually receives. Its input has had Levels
+    /// applied, so it is linear-light but no longer scene-linear.
+    case nonFiniteLinearInput(
         row: Int,
         column: Int,
         channel: RAWLinearRGBChannel,
@@ -25,7 +28,7 @@ extension ExportEncodingError: LocalizedError {
         switch self {
         case .invalidGeometry:
             return "The image's dimensions are inconsistent and cannot be exported."
-        case .nonFiniteSceneLinearInput:
+        case .nonFiniteLinearInput:
             return "The image data contains a value that is not a finite number."
         case .previewReducedSource:
             return "This image is a reduced preview and cannot be exported."
@@ -36,9 +39,9 @@ extension ExportEncodingError: LocalizedError {
         switch self {
         case .invalidGeometry(let reason):
             return reason
-        case .nonFiniteSceneLinearInput(let row, let column, let channel, let value):
+        case .nonFiniteLinearInput(let row, let column, let channel, let value):
             return """
-                Scene-linear \(channel) coordinate \(value) at row \(row), column \(column) \
+                Linear \(channel) coordinate \(value) at row \(row), column \(column) \
                 is not finite.
                 """
         case .previewReducedSource(let resolution):
@@ -52,12 +55,12 @@ extension ExportEncodingError: LocalizedError {
     }
 }
 
-/// The export boundary: `ExposedSceneLinearRGBImage` →
+/// The export boundary: `LeveledLinearRGBImage` →
 /// `ExportEncodedImage`, by hard export-range clipping, the sRGB transfer
 /// function and deterministic 16-bit quantisation.
 ///
 /// ```text
-/// ExposedSceneLinearRGBImage    extended linear sRGB, mixed, oriented, exposed
+/// LeveledLinearRGBImage         linear-light, mixed, oriented, exposed, levelled
 ///       │
 ///       │  explicit ExportRenderSettings
 ///       ↓
@@ -116,10 +119,14 @@ extension ExportEncodingError: LocalizedError {
 public struct ExportImageEncoder: Sendable {
     public init() {}
 
-    /// Encodes an exposed scene-linear image into 16-bit export samples.
+    /// Encodes an adjusted linear-light image into 16-bit export samples.
+    ///
+    /// The **same type** the display renderer takes, produced by the **same
+    /// stages** from the **same adjustment values**. The two encoders differ
+    /// in range policy, bit depth and destination, and in nothing else.
     ///
     /// - Parameters:
-    ///   - image: extended-linear-sRGB coordinates with every canonical
+    ///   - image: linear-light working-space coordinates with every canonical
     ///     adjustment already applied. Not mutated and not clamped.
     ///   - settings: range policy and encoding. Required — there is
     ///     deliberately no default.
@@ -127,14 +134,14 @@ public struct ExportImageEncoder: Sendable {
     /// - Throws: `ExportEncodingError`, or `CancellationError` when the work
     ///   was superseded.
     public func encode(
-        _ image: ExposedSceneLinearRGBImage,
+        _ image: LeveledLinearRGBImage,
         settings: ExportRenderSettings,
         cancellation: ProcessingCancellation = .none
     ) throws -> ExportEncodedImage {
         guard image.isGeometryConsistent else {
             throw ExportEncodingError.invalidGeometry(
                 reason: """
-                    Exposed scene-linear RGB geometry \(image.width)x\(image.height) needs \
+                    Levelled linear RGB geometry \(image.width)x\(image.height) needs \
                     \(image.expectedValueCount.map(String.init) ?? "an unrepresentable number of") \
                     values, buffer holds \(image.values.count).
                     """
@@ -178,16 +185,16 @@ public struct ExportImageEncoder: Sendable {
                     _ column: Int,
                     _ channel: RAWLinearRGBChannel
                 ) throws -> UInt16 {
-                    let sceneLinear = input[index]
+                    let linear = input[index]
 
                     // A hand-built image can carry anything, and no upstream
                     // stage here can produce a non-finite value, so this is a
                     // real boundary rather than an assertion. It also matters
                     // more here than on a preview: a NaN that clipped to a
                     // plausible sample would be written to a file and kept.
-                    guard sceneLinear.isFinite else {
-                        throw ExportEncodingError.nonFiniteSceneLinearInput(
-                            row: row, column: column, channel: channel, value: sceneLinear
+                    guard linear.isFinite else {
+                        throw ExportEncodingError.nonFiniteLinearInput(
+                            row: row, column: column, channel: channel, value: linear
                         )
                     }
 
@@ -196,14 +203,14 @@ public struct ExportImageEncoder: Sendable {
                     let clipped: Float
                     switch settings.rangePolicy {
                     case .hardClipToExportRange:
-                        if sceneLinear < 0 {
+                        if linear < 0 {
                             clipped = 0
                             clippedLow += 1
-                        } else if sceneLinear > 1 {
+                        } else if linear > 1 {
                             clipped = 1
                             clippedHigh += 1
                         } else {
-                            clipped = sceneLinear
+                            clipped = linear
                         }
                     }
 
@@ -244,7 +251,7 @@ public struct ExportImageEncoder: Sendable {
             samples: samples,
             processing: ExportImageProcessing(
                 settings: settings,
-                exposureProcessing: image.processing,
+                levelsProcessing: image.processing,
                 clippedLowSampleCount: clippedLow,
                 clippedHighSampleCount: clippedHigh
             )

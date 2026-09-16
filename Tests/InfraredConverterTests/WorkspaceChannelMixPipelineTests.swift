@@ -125,11 +125,16 @@ struct WorkspaceChannelMixPipelineTests {
                 source, adjustments: ImageAdjustments(channelMix: mix)
             )
             let byHand = try DisplayPreviewRenderer().render(
-                try ImageOrienter().apply(
+                try DisplayPreviewTestData.develop(
+                    try ImageOrienter().apply(
                     to: try IRChannelMixer().apply(to: source.preview, mix: mix.mix),
-                    orientation: .upright
+                        orientation: .upright
+                    ),
+                    exposureEV: ImageAdjustments(channelMix: mix).exposure.ev,
+                    blackPoint: ImageAdjustments(channelMix: mix).levels.blackPoint,
+                    whitePoint: ImageAdjustments(channelMix: mix).levels.whitePoint
                 ),
-                settings: WorkspacePreviewPipeline.displaySettings(for: ImageAdjustments(channelMix: mix))
+                settings: WorkspacePreviewPipeline.displaySettings
             )
             #expect(
                 WorkspaceStubs.pixelBytes(rendered.image)
@@ -242,13 +247,13 @@ struct WorkspaceChannelMixPipelineTests {
         // The second rendering is one pass of the second matrix over the
         // retained pre-mix buffer — computed here from that buffer directly.
         let byHand = try DisplayPreviewRenderer().render(
-            try ImageOrienter().apply(
-                to: try IRChannelMixer().apply(to: source.preview, mix: second.mix),
-                orientation: .upright
+            try DisplayPreviewTestData.develop(
+                try ImageOrienter().apply(
+                    to: try IRChannelMixer().apply(to: source.preview, mix: second.mix),
+                    orientation: .upright
+                )
             ),
-            settings: WorkspacePreviewPipeline.displaySettings(
-                for: ImageAdjustments(channelMix: second)
-            )
+            settings: WorkspacePreviewPipeline.displaySettings
         )
         #expect(
             afterSecond

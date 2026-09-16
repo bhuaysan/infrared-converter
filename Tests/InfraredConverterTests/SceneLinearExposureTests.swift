@@ -101,12 +101,17 @@ struct SceneLinearExposureTests {
 
     // MARK: - One authority, two consumers
 
-    @Test("The display renderer applies this primitive and not its own arithmetic")
-    func theDisplayRendererUsesThePrimitive() throws {
-        let settings = DisplayPreviewTestData.settings(exposureEV: 1.75)
-        #expect(settings.exposure.ev == 1.75)
-        #expect(settings.exposureScale == SceneLinearExposure(ev: 1.75).scale)
-        #expect(settings.exposureScale == exp2(1.75))
+    /// The adjustment is the only thing that carries an EV now. The display
+    /// settings used to carry one too; they no longer can, which is what makes
+    /// `SceneLinearExposure` the single authority rather than merely the
+    /// preferred one.
+    @Test("The user's adjustment maps to this primitive and to nothing else")
+    func theAdjustmentMapsToThePrimitive() throws {
+        let adjustment = try UserExposureAdjustment(ev: 1.75)
+        let exposure = SceneLinearExposure(adjustment)
+        #expect(exposure.ev == 1.75)
+        #expect(exposure.scale == SceneLinearExposure(ev: 1.75).scale)
+        #expect(exposure.scale == exp2(1.75))
     }
 
     @Test("Both end paths expose the same value identically")

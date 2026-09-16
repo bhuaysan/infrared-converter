@@ -27,11 +27,18 @@ struct WorkspacePreviewPipelineTests {
         #expect(!WorkspacePreviewPipeline.initialTransform.source
             .isValidatedInfraredCalibration)
 
-        // Neutral exposure, chosen rather than defaulted.
-        #expect(WorkspacePreviewPipeline.displaySettings(for: .none).exposureEV == 0)
-        #expect(WorkspacePreviewPipeline.displaySettings(for: .none).exposureScale == 1)
-        #expect(WorkspacePreviewPipeline.displaySettings(for: .none).rangePolicy == .hardClipToDisplayRange)
-        #expect(WorkspacePreviewPipeline.displaySettings(for: .none).encoding == .sRGB)
+        // Neutral exposure and neutral levels, chosen rather than defaulted —
+        // and read from the adjustments, which is now the only place either
+        // lives. The display settings no longer carry an exposure at all.
+        #expect(ImageAdjustments.none.exposure == .neutral)
+        #expect(ImageAdjustments.none.exposure.ev == 0)
+        #expect(ImageAdjustments.none.levels == .neutral)
+        #expect(ImageAdjustments.none.levels.blackPoint == 0)
+        #expect(ImageAdjustments.none.levels.whitePoint == 1)
+
+        // The destination's own two choices, which no adjustment can reach.
+        #expect(WorkspacePreviewPipeline.displaySettings.rangePolicy == .hardClipToDisplayRange)
+        #expect(WorkspacePreviewPipeline.displaySettings.encoding == .sRGB)
     }
 
     /// The orientation a file gets is read from its metadata and nothing

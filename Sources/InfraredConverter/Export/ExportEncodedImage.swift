@@ -2,14 +2,17 @@ import Foundation
 
 /// What the export encoder did, and what it deliberately did not do.
 ///
-/// Carries the exposure stage's record, which carries the orientation stage's,
-/// and so on back to the mosaic — so an exported file's provenance is the
-/// whole history of its pixels, not just its last step.
+/// Carries the levels stage's record, which carries the exposure stage's,
+/// which carries the orientation stage's, and so on back to the mosaic — so an
+/// exported file's provenance is the whole history of its pixels, not just its
+/// last step.
 public struct ExportImageProcessing: Equatable, Sendable {
     /// The range policy and encoding this image was produced with.
     public let settings: ExportRenderSettings
-    /// The scene-linear state it was produced from.
-    public let exposureProcessing: SceneLinearExposureProcessing
+    /// The adjusted linear-light state it was produced from — the same type
+    /// the display path's record carries, because both encoders consume the
+    /// same image.
+    public let levelsProcessing: LinearLevelsProcessing
     /// How many components the range policy clipped to `0`.
     public let clippedLowSampleCount: Int
     /// How many components the range policy clipped to `1`.
@@ -26,6 +29,7 @@ public struct ExportImageProcessing: Equatable, Sendable {
     public let toneMappingApplied: Bool = false
     public let highlightReconstructionApplied: Bool = false
     public let automaticExposureApplied: Bool = false
+    public let automaticLevelsApplied: Bool = false
     public let contrastApplied: Bool = false
     public let saturationApplied: Bool = false
     public let sharpeningApplied: Bool = false
@@ -34,12 +38,12 @@ public struct ExportImageProcessing: Equatable, Sendable {
 
     public init(
         settings: ExportRenderSettings,
-        exposureProcessing: SceneLinearExposureProcessing,
+        levelsProcessing: LinearLevelsProcessing,
         clippedLowSampleCount: Int,
         clippedHighSampleCount: Int
     ) {
         self.settings = settings
-        self.exposureProcessing = exposureProcessing
+        self.levelsProcessing = levelsProcessing
         self.clippedLowSampleCount = clippedLowSampleCount
         self.clippedHighSampleCount = clippedHighSampleCount
     }
@@ -53,7 +57,24 @@ public struct ExportImageProcessing: Equatable, Sendable {
     /// Always `false` for anything the encoder produced — it refuses a reduced
     /// source outright — and kept as a readable fact so an export's own record
     /// says so rather than leaving it to be inferred.
-    public var reducedForPreview: Bool { exposureProcessing.reducedForPreview }
+    public var reducedForPreview: Bool { levelsProcessing.reducedForPreview }
+
+    /// Levels were applied upstream, by `LinearLevelsApplier`. `true` even at
+    /// black `0` / white `1`.
+    public var levelsApplied: Bool { levelsProcessing.levelsApplied }
+    /// The levels that were applied.
+    public var levels: LinearLevels { levelsProcessing.levels }
+    public var blackPoint: Double { levelsProcessing.blackPoint }
+    public var whitePoint: Double { levelsProcessing.whitePoint }
+    /// Whether those levels left the values proportional to scene radiance —
+    /// true exactly when the black point is `0`.
+    public var preservesProportionalityToSceneRadiance: Bool {
+        levelsProcessing.preservesProportionalityToSceneRadiance
+    }
+    /// Provenance of the exposed image the levels stage consumed.
+    public var exposureProcessing: SceneLinearExposureProcessing {
+        levelsProcessing.exposureProcessing
+    }
 
     public var exposureEV: Double { exposureProcessing.exposureEV }
     public var exposureScale: Double { exposureProcessing.exposureScale }

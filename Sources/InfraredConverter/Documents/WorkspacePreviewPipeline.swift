@@ -23,7 +23,11 @@ import Foundation
 ///     ↓  EffectiveImageOrientation (metadata orientation + user adjustment)
 ///     ↓  ImageOrienter (one permutation, by the effective orientation)
 /// OrientedSceneLinearRGBImage
-///     ↓  DisplayPreviewRenderer (adjustments.exposure, hard clipping, sRGB)
+///     ↓  SceneLinearExposer (adjustments.exposure)
+/// ExposedSceneLinearRGBImage
+///     ↓  LinearLevelsApplier (adjustments.levels)
+/// LeveledLinearRGBImage                      ← linear-light, not scene-linear
+///     ↓  DisplayPreviewRenderer (hard clipping, sRGB, 8-bit)
 /// DisplayEncodedPreviewImage
 ///     ↓  DisplayPreviewCGImageAdapter
 /// CGImage
@@ -90,7 +94,7 @@ import Foundation
 ///                → RETAIN the pre-mix reduced preview
 ///
 /// render         retained pre-mix preview → channel mix → orientation
-///                → display (exposure, range policy, encoding)
+///                → exposure → levels → display (range policy, encoding)
 /// ```
 ///
 /// Three phases rather than two, and the new line is the white balance. It sits
@@ -232,26 +236,25 @@ struct WorkspacePreviewPipeline {
     }
 
     /// What the display stage does with values outside `0...1`. Not an
-    /// adjustment: exposure changes which values those are, never this.
+    /// adjustment: exposure and levels change which values those are, never
+    /// this.
     static let displayRangePolicy = DisplayRangePolicy.hardClipToDisplayRange
 
     /// The encoding the display stage produces. Not an adjustment either.
     static let displayEncoding = DisplayEncoding.sRGB
 
-    /// The display settings one complete adjustment state is rendered with.
+    /// The display settings every interactive render uses.
     ///
-    /// The user's exposure is passed through **unchanged** — no rounding, no
-    /// clamp, no scale computed here. `DisplayPreviewRenderer` is the one
-    /// authority on what `exposureEV` does to a pixel, and it did so before
-    /// exposure was a user decision. The range policy and the encoding are
-    /// the application's fixed choices and do not depend on the adjustments.
-    static func displaySettings(for adjustments: ImageAdjustments) -> DisplayRenderSettings {
-        DisplayRenderSettings(
-            exposureEV: adjustments.exposure.ev,
-            rangePolicy: displayRangePolicy,
-            encoding: displayEncoding
-        )
-    }
+    /// A constant rather than a function of the adjustments, and that is the
+    /// visible trace of this milestone's boundary change. It used to carry
+    /// `exposureEV`, because the display renderer applied exposure in the same
+    /// pass that it clipped and encoded. Exposure and levels are now stages of
+    /// their own, upstream, so nothing a user chooses reaches these settings —
+    /// they are the application's two fixed destination choices and nothing
+    /// more. See `docs/decisions/0026-linear-levels.md`.
+    static let displaySettings = DisplayRenderSettings(
+        rangePolicy: displayRangePolicy, encoding: displayEncoding
+    )
 
     /// Decodes a RAW file and normalises its mosaic, and stops.
     ///
@@ -397,31 +400,47 @@ struct WorkspacePreviewPipeline {
     ///
     /// The interactive half, and the only half any adjustment reruns.
     ///
-    /// Exposure is scene-linear arithmetic, `× 2^EV`, and it happens inside the
-    /// display stage **before** that stage's range policy: nothing here clamps
-    /// the mixed, oriented values first, so a value that exposure lifts above
-    /// `1` is clipped — and counted — by the policy that owns clipping, not by
-    /// anything upstream of it. It
-    /// always starts from `source.preview`, which is unmixed and unoriented,
-    /// so repeated changes never compose: the mix is applied exactly once, by
-    /// the requested matrix, and the image is permuted exactly once, by the
-    /// effective orientation, from the same buffer every time.
+    /// Exposure is `× 2^EV` on scene-linear light; levels are
+    /// `(x − black) × 1/(white − black)` on the result. Both happen **before**
+    /// the display stage's range policy, and neither clamps — so a value
+    /// either of them pushes outside `0…1` is clipped, and counted, by the
+    /// policy that owns clipping, not by anything upstream of it.
+    ///
+    /// It always starts from `source.preview`, which is unmixed, unoriented,
+    /// unexposed and unlevelled, so repeated changes never compose: the mix is
+    /// applied exactly once by the requested matrix, the image is permuted
+    /// exactly once by the effective orientation, and the levels are applied
+    /// exactly once to the exposed values, from the same buffer every time.
     ///
     /// The order is fixed and is not a matter of taste. The mix is a colour
     /// operation on a scene-linear representation and the orientation is
-    /// discrete geometry, so they commute in principle — but the orientation
-    /// stage is where the provenance chain is assembled and the display stage
-    /// is the first thing that stops being proportional to light, so a colour
-    /// stage after either would be a different kind of claim. Colour, then
-    /// geometry, then encoding.
+    /// discrete geometry, so those two commute in principle — but the
+    /// orientation stage is where the provenance chain is assembled, so a
+    /// colour stage after it would be a different kind of claim. Exposure
+    /// precedes levels because they are different decisions: a gain and an
+    /// affine remap, and folding them together would make each control change
+    /// what the other one did. Colour, then geometry, then exposure, then
+    /// levels, then encoding.
     ///
-    /// All three stages poll `cancellation`, so a superseded re-render stops
+    /// All five stages poll `cancellation`, so a superseded re-render stops
     /// inside the pass rather than at the end of it. A cancelled call throws
     /// `CancellationError` and produces no preview; it is the caller's job to
     /// tell that apart from a stage refusing the image.
     ///
+    /// ## What it costs
+    ///
+    /// Two more reduced-resolution `Float32` buffers than before this
+    /// milestone, transiently — the exposed image and the levelled one, each
+    /// the size of the mixed and oriented ones already allocated here, and all
+    /// of them unreachable the moment this function returns. At the default
+    /// preview policy that is tens of megabytes, not hundreds, and it buys the
+    /// boundary that makes preview and export provably the same rendering.
+    /// `0 EV` and neutral levels each hand their input's buffer back rather
+    /// than copying it, so the common case allocates neither.
+    ///
     /// - Throws: `PreviewReductionError`, `IRProcessingError`,
-    ///   `OrientationError`, `DisplayRenderingError`, or `CancellationError`.
+    ///   `OrientationError`, `SceneLinearExposureError`, `LinearLevelsError`,
+    ///   `DisplayRenderingError`, or `CancellationError`.
     func render(
         _ source: Source,
         captureProfile: IRCaptureProfile,
@@ -457,9 +476,25 @@ struct WorkspacePreviewPipeline {
             cancellation: cancellation
         )
 
+        // Exposure and levels, as their own stages, in that order. The export
+        // path calls the identical two with the identical values; that is what
+        // makes a preview and an export the same rendering at two resolutions
+        // rather than two pipelines.
+        let exposed = try SceneLinearExposer().apply(
+            to: oriented,
+            exposure: SceneLinearExposure(adjustments.exposure),
+            cancellation: cancellation
+        )
+
+        let leveled = try LinearLevelsApplier().apply(
+            to: exposed,
+            levels: LinearLevels(adjustments.levels),
+            cancellation: cancellation
+        )
+
         let encoded = try DisplayPreviewRenderer().render(
-            oriented,
-            settings: Self.displaySettings(for: adjustments),
+            leveled,
+            settings: Self.displaySettings,
             cancellation: cancellation
         )
 
@@ -475,6 +510,7 @@ struct WorkspacePreviewPipeline {
             ),
             channelMixAdjustment: adjustments.channelMix,
             exposureAdjustment: adjustments.exposure,
+            levelsAdjustment: adjustments.levels,
             resolution: source.resolution,
             sourcePixelWidth: source.preview.width,
             sourcePixelHeight: source.preview.height,
@@ -726,6 +762,14 @@ struct WorkspacePreview {
     /// what the person chose, an audit of the rendering reads what the stage
     /// applied, and a test asserts that they agree.
     let exposureAdjustment: UserExposureAdjustment
+    /// The black and white points the user asked for, as the canonical
+    /// adjustment.
+    ///
+    /// The levels that were **rendered** are `processing.levels` — see
+    /// `renderedLevels` — and the pipeline passes one to the other unchanged,
+    /// so the two always hold the same pair. Two facts, for the same reason
+    /// `exposureAdjustment` is two.
+    let levelsAdjustment: UserLevelsAdjustment
     /// What resolution these pixels are, what full resolution they were
     /// reduced from, by which policy and by which method.
     ///
@@ -760,9 +804,17 @@ struct WorkspacePreview {
     }
     /// The mix the creative stage actually applied, with its provenance.
     var channelMix: IRChannelMix { processing.mix }
-    /// The exposure the display stage actually applied, from its own
-    /// provenance. What the inspector shows.
+    /// The exposure the exposure stage actually applied, from the rendering's
+    /// own provenance. What the inspector shows.
     var renderedExposureEV: Double { processing.exposureEV }
+    /// The levels the levels stage actually applied, from the rendering's own
+    /// provenance.
+    var renderedLevels: LinearLevels { processing.levels }
+    /// Whether the rendered levels left the values proportional to scene
+    /// radiance — true exactly when the black point is `0`.
+    var preservesProportionalityToSceneRadiance: Bool {
+        processing.preservesProportionalityToSceneRadiance
+    }
     /// Width of the full-resolution, unoriented active image area, in pixels.
     var fullResolutionSourcePixelWidth: Int { resolution.sourceWidth }
     /// Height of that same area.

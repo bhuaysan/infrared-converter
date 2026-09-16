@@ -46,11 +46,16 @@ struct WorkspaceExposurePipelineTests {
         adjustments: ImageAdjustments
     ) throws -> DisplayEncodedPreviewImage {
         try DisplayPreviewRenderer().render(
-            try ImageOrienter().apply(
+            try DisplayPreviewTestData.develop(
+                try ImageOrienter().apply(
                 to: try IRChannelMixer().apply(to: source.preview, mix: mix),
-                orientation: orientation
+                    orientation: orientation
+                ),
+                exposureEV: adjustments.exposure.ev,
+                blackPoint: adjustments.levels.blackPoint,
+                whitePoint: adjustments.levels.whitePoint
             ),
-            settings: WorkspacePreviewPipeline.displaySettings(for: adjustments)
+            settings: WorkspacePreviewPipeline.displaySettings
         )
     }
 
@@ -89,8 +94,8 @@ struct WorkspaceExposurePipelineTests {
 
         // The stage was asked for exactly the user's value, and applied its
         // scale.
-        #expect(exposed.processing.settings.exposureEV == ev)
-        #expect(exposed.processing.settings.exposureScale == Double(factor))
+        #expect(exposed.processing.exposureEV == ev)
+        #expect(exposed.processing.exposureScale == Double(factor))
 
         // And the bytes are the specification's, not merely self-consistent.
         let byHand = try Self.byHand(source, adjustments: adjustments)
@@ -109,7 +114,7 @@ struct WorkspaceExposurePipelineTests {
         let byHand = try Self.byHand(source, adjustments: .none)
 
         #expect(Self.bytes(byHand) == Self.reference(Self.values, exposureEV: 0))
-        #expect(preview.processing.settings.exposureScale == 1)
+        #expect(preview.processing.exposureScale == 1)
         // One component above 1 and one below 0 in the input, and nothing
         // else crosses the range at ×1.
         #expect(preview.processing.clippedHighSampleCount == 1)

@@ -23,12 +23,14 @@ public enum FullResolutionExportError: Error {
         case channelMix
         case orientation
         case exposure
+        case levels
 
         public var diagnosticDescription: String {
             switch self {
             case .channelMix: return "the creative channel mix"
             case .orientation: return "the orientation"
             case .exposure: return "the exposure"
+            case .levels: return "the black and white points"
             }
         }
     }
@@ -72,16 +74,21 @@ extension FullResolutionExportError: LocalizedError {
     }
 }
 
-/// One export's rendered pixels: scene-linear, full resolution, every
+/// One export's rendered pixels: linear-light, full resolution, every
 /// canonical adjustment applied, nothing encoded yet.
 ///
 /// The hand-over point between RAW processing and file encoding, and the
-/// value a test inspects to see that a red/blue swap, a quarter turn and a
-/// stop of exposure all happened — and happened *before* anything was clipped
-/// or quantised.
+/// value a test inspects to see that a red/blue swap, a quarter turn, a stop
+/// of exposure and a pair of levels all happened — and happened *before*
+/// anything was clipped or quantised.
+///
+/// It is the **same type** the interactive path hands its display renderer,
+/// which is the whole architectural claim of `docs/decisions/0026-linear-levels.md`:
+/// preview and export differ at resolution, range policy, bit depth and
+/// destination, and nowhere above that line.
 public struct FullResolutionExportRender: Sendable {
-    /// The adjusted scene-linear image, at the sensor's own resolution.
-    public let image: ExposedSceneLinearRGBImage
+    /// The adjusted linear-light image, at the sensor's own resolution.
+    public let image: LeveledLinearRGBImage
     /// The RAW-state metadata the chain was processed against.
     public let metadata: RAWMetadata
     /// The snapshot this was rendered from.
@@ -95,7 +102,7 @@ public struct FullResolutionExportRender: Sendable {
     public let estimate: RAWWhiteBalanceEstimate
 
     init(
-        image: ExposedSceneLinearRGBImage,
+        image: LeveledLinearRGBImage,
         metadata: RAWMetadata,
         request: ExportRequest,
         estimate: RAWWhiteBalanceEstimate
@@ -131,8 +138,12 @@ public struct FullResolutionExportRender: Sendable {
     public var orientation: RAWImageOrientation { image.processing.orientation }
     /// The mix the creative stage actually applied.
     public var mix: IRChannelMix { image.processing.mix }
-    /// The exposure the scene-linear stage actually applied.
+    /// The exposure the exposure stage actually applied.
     public var exposureEV: Double { image.processing.exposureEV }
+    /// The levels the levels stage actually applied.
+    public var levels: LinearLevels { image.processing.levels }
+    public var blackPoint: Double { image.processing.blackPoint }
+    public var whitePoint: Double { image.processing.whitePoint }
 }
 
 /// The full-resolution end path: a RAW file and one canonical adjustment
@@ -149,7 +160,9 @@ public struct FullResolutionExportRender: Sendable {
 ///     ↓  ImageOrienter                file orientation + adjustments.orientation
 /// OrientedSceneLinearRGBImage
 ///     ↓  SceneLinearExposer           adjustments.exposure
-/// ExposedSceneLinearRGBImage          ← the full-resolution render
+/// ExposedSceneLinearRGBImage
+///     ↓  LinearLevelsApplier          adjustments.levels
+/// LeveledLinearRGBImage               ← the full-resolution render
 ///     ↓  ExportImageEncoder           clip, sRGB, 16-bit quantisation
 /// ExportEncodedImage
 ///     ↓  TIFFExporter                 temp file → finalise → move
@@ -189,21 +202,21 @@ public struct FullResolutionExportRender: Sendable {
 ///
 /// The most expensive thing the application does, and deliberately so. For the
 /// 4056×3040 reference frame one full-resolution `Float32` RGB buffer is about
-/// 148 MB, and the four the adjustment stages produce — working, mixed,
-/// oriented, exposed — are all in scope inside `applyAdjustments`, so the
-/// conservative bound is about 592 MB while the last is being written. Once
-/// `render` returns only the exposed image survives, and the encoder's 74 MB
+/// 148 MB, and the five the adjustment stages produce — working, mixed,
+/// oriented, exposed, levelled — are all in scope inside `applyAdjustments`,
+/// so the conservative bound is about 740 MB while the last is being written.
+/// Once `render` returns only the levelled image survives, and the encoder's 74 MB
 /// `UInt16` buffer is allocated beside that one alone.
 ///
-/// An identity mix, an upright orientation and a `0 EV` exposure each hand
-/// their input's buffer back rather than copying it, so a neutral export
-/// allocates one `Float32` image and the result.
+/// An identity mix, an upright orientation, a `0 EV` exposure and neutral
+/// levels each hand their input's buffer back rather than copying it, so a
+/// neutral export allocates one `Float32` image and the result.
 ///
 /// It belongs off the main thread, and `DocumentState` runs it there.
 ///
 /// ## Cancellation
 ///
-/// The three adjustment stages and the encoder poll `cancellation` once per
+/// The four adjustment stages and the encoder poll `cancellation` once per
 /// row, and so now do the white-balance estimate, the balancer, the demosaicer
 /// and the working-colour conversion. What still does not is the decode and
 /// the normalisation, so an export cancelled during decoding stops at the task
@@ -331,19 +344,21 @@ public struct FullResolutionExportPipeline: Sendable {
 
     // MARK: - The adjustable stages
 
-    /// Mix, then orientation, then exposure — the same three stages the
-    /// interactive preview runs, in the same order, from the same values.
+    /// Mix, then orientation, then exposure, then levels — the same four
+    /// stages the interactive preview runs, in the same order, from the same
+    /// values.
     ///
     /// The order is fixed and is not a matter of taste: the mix is a colour
     /// operation on a scene-linear representation, the orientation is discrete
-    /// geometry, and exposure is a scalar on light. Colour, then geometry,
-    /// then exposure — matching the preview exactly, because the claim this
-    /// milestone makes is that the two are the same rendering.
+    /// geometry, exposure is a gain on light, and levels are an affine remap
+    /// of the result. Colour, then geometry, then exposure, then levels —
+    /// matching the preview exactly, because the claim this path makes is that
+    /// the two are the same rendering.
     private static func applyAdjustments(
         to prepared: PreparedWorkingImage,
         adjustments: ImageAdjustments,
         cancellation: ProcessingCancellation
-    ) throws -> ExposedSceneLinearRGBImage {
+    ) throws -> LeveledLinearRGBImage {
         // The bare-image overloads throughout: the wrapper overloads keep the
         // whole upstream chain reachable through `source`, and at full
         // resolution that is several hundred megabytes nobody needs.
@@ -378,8 +393,9 @@ public struct FullResolutionExportPipeline: Sendable {
             )
         }
 
+        let exposed: ExposedSceneLinearRGBImage
         do {
-            return try SceneLinearExposer().apply(
+            exposed = try SceneLinearExposer().apply(
                 to: oriented,
                 exposure: SceneLinearExposure(adjustments.exposure),
                 cancellation: cancellation
@@ -389,6 +405,20 @@ public struct FullResolutionExportPipeline: Sendable {
         } catch {
             throw FullResolutionExportError.adjustmentProcessingFailed(
                 stage: .exposure, underlying: error
+            )
+        }
+
+        do {
+            return try LinearLevelsApplier().apply(
+                to: exposed,
+                levels: LinearLevels(adjustments.levels),
+                cancellation: cancellation
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw FullResolutionExportError.adjustmentProcessingFailed(
+                stage: .levels, underlying: error
             )
         }
     }

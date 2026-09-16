@@ -115,13 +115,16 @@ struct DisplayPreviewRendererFixtureTests {
     func theFixtureRendersToDisplayPixels() throws {
         let oriented = try Self.orientedFixture(mix: .identity)
         let settings = DisplayRenderSettings(
-            exposureEV: 0,
             rangePolicy: .hardClipToDisplayRange,
             encoding: .sRGB
         )
+        let leveled = try LinearLevelsApplier().apply(
+            to: try SceneLinearExposer().apply(to: oriented, exposure: .neutral),
+            levels: .neutral
+        )
 
         let start = DispatchTime.now().uptimeNanoseconds
-        let result = try DisplayPreviewRenderer().render(oriented, settings: settings)
+        let result = try DisplayPreviewRenderer().render(leveled, settings: settings)
         let milliseconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
         let preview = result.image
 
@@ -148,6 +151,9 @@ struct DisplayPreviewRendererFixtureTests {
         #expect(processing.rangePolicy == .hardClipToDisplayRange)
         #expect(processing.encoding == .sRGB)
         #expect(processing.exposureApplied)
+        #expect(processing.levelsApplied)
+        #expect(processing.blackPoint == 0)
+        #expect(processing.whitePoint == 1)
         #expect(processing.displayRangeClippingApplied)
         #expect(processing.displayEncodingApplied)
         #expect(processing.quantized)
@@ -241,13 +247,8 @@ struct DisplayPreviewRendererFixtureTests {
     func selectedPixelsMatchHandComputedArithmetic() throws {
         let oriented = try Self.orientedFixture(mix: .identity)
         let exposureEV = 0.0
-        let preview = try DisplayPreviewRenderer().render(
-            oriented.image,
-            settings: DisplayRenderSettings(
-                exposureEV: exposureEV,
-                rangePolicy: .hardClipToDisplayRange,
-                encoding: .sRGB
-            )
+        let preview = try DisplayPreviewTestData.renderPreview(
+            oriented.image, exposureEV: exposureEV
         )
 
         var report = "\n--- Deterministic preview pixels (Olympus E-PL3 fixture) ---\n"
@@ -294,18 +295,26 @@ struct DisplayPreviewRendererFixtureTests {
     func exposureOnTheFixture() throws {
         let oriented = try Self.orientedFixture(mix: .identity)
         let renderer = DisplayPreviewRenderer()
-
-        let neutral = try renderer.render(
-            oriented,
-            settings: DisplayRenderSettings(
-                exposureEV: 0, rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
-            )
+        let exposer = SceneLinearExposer()
+        let leveler = LinearLevelsApplier()
+        let settings = DisplayRenderSettings(
+            rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
         )
+
+        let neutralExposure = try exposer.apply(to: oriented, exposure: .neutral)
+        let neutral = try renderer.render(
+            try leveler.apply(to: neutralExposure, levels: .neutral), settings: settings
+        )
+        // Replacing the exposure restarts from the oriented image, which is
+        // where the adjustment now lives.
         let brightened = try renderer.render(
-            settings: DisplayRenderSettings(
-                exposureEV: 1, rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
+            try leveler.apply(
+                to: try exposer.apply(
+                    exposure: SceneLinearExposure(ev: 1), replacing: neutralExposure
+                ),
+                levels: .neutral
             ),
-            replacing: neutral
+            settings: settings
         )
 
         // Re-rendering started from the same scene-linear image, not from the
@@ -351,16 +360,26 @@ struct DisplayPreviewRendererFixtureTests {
     @Test("A red/blue swap swaps the preview's outer samples, exactly")
     func theMixIsVisibleInThePreview() throws {
         let settings = DisplayRenderSettings(
-            exposureEV: 0, rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
+            rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
         )
         let renderer = DisplayPreviewRenderer()
 
-        let identity = try renderer.render(
-            try Self.orientedFixture(mix: .identity), settings: settings
-        )
-        let swapped = try renderer.render(
-            try Self.orientedFixture(mix: .redBlueSwap), settings: settings
-        )
+        func preview(
+            _ mix: IRChannelMix
+        ) throws -> DisplayPreviewProcessedRAWImage {
+            try renderer.render(
+                try LinearLevelsApplier().apply(
+                    to: try SceneLinearExposer().apply(
+                        to: try Self.orientedFixture(mix: mix), exposure: .neutral
+                    ),
+                    levels: .neutral
+                ),
+                settings: settings
+            )
+        }
+
+        let identity = try preview(.identity)
+        let swapped = try preview(.redBlueSwap)
 
         // The display stage is per-component, so a permutation upstream shows
         // as exactly that permutation downstream — no cross-channel term can
@@ -386,12 +405,7 @@ struct DisplayPreviewRendererFixtureTests {
     @Test("The fixture's preview becomes a correctly tagged CGImage")
     func theFixtureReachesCoreGraphics() throws {
         let oriented = try Self.orientedFixture(mix: .identity)
-        let preview = try DisplayPreviewRenderer().render(
-            oriented.image,
-            settings: DisplayRenderSettings(
-                exposureEV: 0, rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
-            )
-        )
+        let preview = try DisplayPreviewTestData.renderPreview(oriented.image)
         let cgImage = try DisplayPreviewCGImageAdapter.makeCGImage(from: preview)
 
         #expect(cgImage.width == 4056)

@@ -24,7 +24,7 @@ struct TIFFExporterTests {
         values: [Float]
     ) throws -> ExportEncodedImage {
         try ExportImageEncoder().encode(
-            try ExportTestData.exposed(width: width, height: height, values: values),
+            try ExportTestData.leveled(width: width, height: height, values: values),
             settings: .standard
         )
     }
@@ -195,7 +195,7 @@ struct TIFFExporterTests {
     func orientationMetadataIsAlwaysUpright() throws {
         // The pixels here came through a quarter turn. The file must not also
         // ask its reader to turn them.
-        let exposed = try ExportTestData.exposed(
+        let exposed = try ExportTestData.leveled(
             width: 2, height: 3,
             values: Array(repeating: 0.5, count: 18),
             orientation: .rotated90Clockwise
@@ -308,10 +308,7 @@ struct TIFFExporterTests {
                 samples: [1, 2, 3],
                 processing: ExportImageProcessing(
                     settings: .standard,
-                    exposureProcessing: SceneLinearExposureProcessing(
-                        exposure: .neutral,
-                        orientationProcessing: DisplayPreviewTestData.orientationProcessing()
-                    ),
+                    levelsProcessing: DisplayPreviewTestData.levelsProcessing(),
                     clippedLowSampleCount: 0,
                     clippedHighSampleCount: 0
                 )

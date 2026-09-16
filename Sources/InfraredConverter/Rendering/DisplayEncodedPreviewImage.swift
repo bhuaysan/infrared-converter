@@ -24,13 +24,13 @@ import Foundation
 /// policy does not fully describe what it did. How much of the image the
 /// policy consumed is part of the honest record.
 public struct DisplayPreviewProcessing: Equatable, Sendable {
-    /// The exact settings that were applied: exposure, range policy, encoding.
+    /// The exact settings that were applied: range policy and encoding.
     public let settings: DisplayRenderSettings
-    /// Provenance of the `OrientedSceneLinearRGBImage` this stage consumed,
-    /// carried forward so the whole chain from unpacked samples to here is
-    /// readable from one record — including the orientation, which happened
-    /// upstream and not here.
-    public let orientationProcessing: ImageOrientationProcessing
+    /// Provenance of the `LeveledLinearRGBImage` this stage consumed, carried
+    /// forward so the whole chain from unpacked samples to here is readable
+    /// from one record — including the levels, the exposure and the
+    /// orientation, all of which happened upstream and not here.
+    public let levelsProcessing: LinearLevelsProcessing
     /// How many **components** (not pixels) were below `0` after exposure and
     /// were replaced by `0`.
     ///
@@ -45,10 +45,6 @@ public struct DisplayPreviewProcessing: Equatable, Sendable {
     /// display range ran out.
     public let clippedHighSampleCount: Int
 
-    /// Exposure was applied, in the linear domain, before clipping and before
-    /// encoding. `true` even at `0 EV`: traversing the stage and asking for
-    /// `×1` is a different fact from never applying exposure at all.
-    public let exposureApplied: Bool = true
     /// Coordinates outside `0...1` were clipped, per `settings.rangePolicy`.
     /// This stage's whole answer to out-of-range data.
     public let displayRangeClippingApplied: Bool = true
@@ -63,10 +59,12 @@ public struct DisplayPreviewProcessing: Equatable, Sendable {
     /// No tone mapping of any kind: no Reinhard, no filmic curve, no shoulder
     /// or toe, no local operator. Clipping is not tone mapping.
     public let toneMappingApplied: Bool = false
-    /// No automatic exposure. No histogram was read, no mean or percentile was
-    /// computed, and nothing was normalised to a maximum. The exposure is the
-    /// one on `settings`, chosen by a caller.
+    /// No automatic exposure and no automatic levels. No histogram was read,
+    /// no mean or percentile was computed, and nothing was normalised to a
+    /// maximum. The exposure and the levels are the ones a person chose, and
+    /// both were applied upstream.
     public let automaticExposureApplied: Bool = false
+    public let automaticLevelsApplied: Bool = false
     /// No contrast adjustment.
     public let contrastApplied: Bool = false
     /// No saturation or vibrance adjustment.
@@ -76,6 +74,34 @@ public struct DisplayPreviewProcessing: Equatable, Sendable {
     public let highlightReconstructionApplied: Bool = false
     /// No sharpening and no noise reduction.
     public let sharpeningApplied: Bool = false
+    /// Exposure was applied — **upstream**, by `SceneLinearExposer`, not here.
+    /// `true` even at `0 EV`: traversing that stage and asking for `×1` is a
+    /// different fact from never applying exposure at all.
+    public var exposureApplied: Bool { levelsProcessing.exposureApplied }
+    /// Levels were applied — **upstream**, by `LinearLevelsApplier`, not here.
+    /// `true` even at black `0` / white `1`, for the same reason.
+    public var levelsApplied: Bool { levelsProcessing.levelsApplied }
+    /// The levels that were applied upstream.
+    public var levels: LinearLevels { levelsProcessing.levels }
+    /// The black point a person chose.
+    public var blackPoint: Double { levelsProcessing.blackPoint }
+    /// The white point a person chose.
+    public var whitePoint: Double { levelsProcessing.whitePoint }
+    /// Whether those levels left the values proportional to scene radiance —
+    /// true exactly when the black point is `0`. Derived from the levels, so
+    /// it cannot disagree with what was applied.
+    public var preservesProportionalityToSceneRadiance: Bool {
+        levelsProcessing.preservesProportionalityToSceneRadiance
+    }
+    /// Provenance of the exposed image the levels stage consumed.
+    public var exposureProcessing: SceneLinearExposureProcessing {
+        levelsProcessing.exposureProcessing
+    }
+    /// Provenance of the oriented image the exposure stage consumed.
+    public var orientationProcessing: ImageOrientationProcessing {
+        levelsProcessing.orientationProcessing
+    }
+
     /// An orientation was applied — **upstream**, by `ImageOrienter`, not
     /// here. This stage remains strictly per-component and
     /// geometry-preserving: it does not rotate, flip, crop or resample, and it
@@ -92,10 +118,10 @@ public struct DisplayPreviewProcessing: Equatable, Sendable {
         orientationProcessing.dimensionsSwapped
     }
 
-    /// Exposure in stops, read through `settings`.
-    public var exposureEV: Double { settings.exposureEV }
+    /// Exposure in stops, read through the stage that applied it.
+    public var exposureEV: Double { levelsProcessing.exposureEV }
     /// The linear multiplier that exposure applied, `2^EV`.
-    public var exposureScale: Double { settings.exposureScale }
+    public var exposureScale: Double { levelsProcessing.exposureScale }
     /// What was done with out-of-range coordinates.
     public var rangePolicy: DisplayRangePolicy { settings.rangePolicy }
     /// The transfer function and colour space the bytes are in.
@@ -164,12 +190,12 @@ public struct DisplayPreviewProcessing: Equatable, Sendable {
     /// module-internal.
     public init(
         settings: DisplayRenderSettings,
-        orientationProcessing: ImageOrientationProcessing,
+        levelsProcessing: LinearLevelsProcessing,
         clippedLowSampleCount: Int,
         clippedHighSampleCount: Int
     ) {
         self.settings = settings
-        self.orientationProcessing = orientationProcessing
+        self.levelsProcessing = levelsProcessing
         self.clippedLowSampleCount = clippedLowSampleCount
         self.clippedHighSampleCount = clippedHighSampleCount
     }
@@ -443,21 +469,25 @@ public struct DisplayPreviewProcessedRAWImage: Sendable {
     /// with the unoriented channel-mixed image on its own `.source`, the
     /// pre-mix working image below that, and the camera-native image and the
     /// mosaics below that again.
-    public let source: OrientedProcessedRAWImage
+    public let source: LeveledProcessedRAWImage
     /// The display-encoded preview.
     public let image: DisplayEncodedPreviewImage
 
     /// Module-internal, deliberately: only `DisplayPreviewRenderer` pairs a
     /// scene-linear state with the preview it rendered from it.
-    init(source: OrientedProcessedRAWImage, image: DisplayEncodedPreviewImage) {
+    init(source: LeveledProcessedRAWImage, image: DisplayEncodedPreviewImage) {
         self.source = source
         self.image = image
     }
 
-    /// The oriented scene-linear image the settings were applied to,
-    /// untouched by rendering. Changing exposure or the encoding must always
-    /// start here.
-    public var orientedImage: OrientedSceneLinearRGBImage { source.image }
+    /// The levelled linear-light image the settings were applied to,
+    /// untouched by rendering. Changing the range policy or the encoding must
+    /// always start here.
+    public var leveledImage: LeveledLinearRGBImage { source.image }
+    /// The exposed, un-levelled image. Changing the levels starts here.
+    public var exposedImage: ExposedSceneLinearRGBImage { source.exposedImage }
+    /// The oriented, un-exposed image. Changing the exposure starts here.
+    public var orientedImage: OrientedSceneLinearRGBImage { source.orientedImage }
     /// The unoriented channel-mixed image. Changing the orientation starts
     /// here.
     public var channelMixedImage: IRChannelMixedRGBImage { source.channelMixedImage }
@@ -477,6 +507,10 @@ public struct DisplayPreviewProcessedRAWImage: Sendable {
     public var processing: DisplayPreviewProcessing { image.processing }
     /// The settings that produced `image`.
     public var settings: DisplayRenderSettings { image.processing.settings }
+    /// The levels applied upstream.
+    public var levels: LinearLevels { source.levels }
+    /// The exposure applied upstream.
+    public var exposure: SceneLinearExposure { source.exposure }
     /// The orientation applied upstream — a geometry operation, distinct from
     /// every colour decision in the chain.
     public var orientation: RAWImageOrientation { source.orientation }

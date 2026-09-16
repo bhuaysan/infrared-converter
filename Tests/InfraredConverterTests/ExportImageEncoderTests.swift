@@ -16,7 +16,7 @@ struct ExportImageEncoderTests {
         exposureEV: Double = 0
     ) throws -> ExportEncodedImage {
         try ExportImageEncoder().encode(
-            try ExportTestData.exposed(
+            try ExportTestData.leveled(
                 width: width, height: height, values: values, exposureEV: exposureEV
             ),
             settings: settings
@@ -183,7 +183,7 @@ struct ExportImageEncoderTests {
 
     @Test("The whole chain stays readable through the encoded image")
     func provenanceIsCarriedThrough() throws {
-        let exposed = try ExportTestData.exposed(
+        let exposed = try ExportTestData.leveled(
             width: 1, height: 1,
             values: [0.2, 0.4, 0.6],
             exposureEV: 1.5,
@@ -217,7 +217,7 @@ struct ExportImageEncoderTests {
 
     @Test("A reduced preview is refused, whatever else is right about it")
     func aReducedPreviewIsRefused() throws {
-        let preview = try ExportTestData.exposedFromPreview(
+        let preview = try ExportTestData.leveledFromPreview(
             width: 2, height: 1, values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
         )
         do {
@@ -235,14 +235,11 @@ struct ExportImageEncoderTests {
 
     @Test("Inconsistent geometry is refused")
     func inconsistentGeometryIsRefused() {
-        let broken = ExposedSceneLinearRGBImage(
+        let broken = LeveledLinearRGBImage(
             width: 4,
             height: 4,
             values: [0, 0, 0],
-            processing: SceneLinearExposureProcessing(
-                exposure: .neutral,
-                orientationProcessing: DisplayPreviewTestData.orientationProcessing()
-            )
+            processing: DisplayPreviewTestData.levelsProcessing()
         )
         #expect(throws: ExportEncodingError.self) {
             try ExportImageEncoder().encode(broken, settings: Self.settings)
@@ -251,21 +248,18 @@ struct ExportImageEncoderTests {
 
     @Test("A non-finite value is refused rather than clipped to something plausible")
     func aNonFiniteValueIsRefused() {
-        let broken = ExposedSceneLinearRGBImage(
+        let broken = LeveledLinearRGBImage(
             width: 2,
             height: 1,
             values: [0.1, 0.2, 0.3, 0.4, .infinity, 0.6],
-            processing: SceneLinearExposureProcessing(
-                exposure: .neutral,
-                orientationProcessing: DisplayPreviewTestData.orientationProcessing()
-            )
+            processing: DisplayPreviewTestData.levelsProcessing()
         )
         do {
             _ = try ExportImageEncoder().encode(broken, settings: Self.settings)
             Issue.record("An infinite component should have been refused.")
         } catch let error as ExportEncodingError {
             #expect(
-                error == .nonFiniteSceneLinearInput(
+                error == .nonFiniteLinearInput(
                     row: 0, column: 1, channel: .green, value: .infinity
                 )
             )
@@ -279,7 +273,7 @@ struct ExportImageEncoderTests {
     @Test("A superseded call stops before it allocates")
     func aSupersededCallStopsImmediately() throws {
         let probe = CancellationProbe(cancelAfterPolls: 1)
-        let exposed = try ExportTestData.exposed(
+        let exposed = try ExportTestData.leveled(
             width: 2, height: 1, values: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
         )
         #expect(throws: CancellationError.self) {
@@ -292,7 +286,7 @@ struct ExportImageEncoderTests {
     @Test("The pass polls once per row")
     func thePassPollsPerRow() throws {
         let probe = CancellationProbe()
-        let exposed = try ExportTestData.exposed(
+        let exposed = try ExportTestData.leveled(
             width: 1, height: 4, values: Array(repeating: 0.5, count: 12)
         )
         _ = try ExportImageEncoder().encode(
@@ -304,7 +298,7 @@ struct ExportImageEncoderTests {
     @Test("Cancelling mid-pass abandons the buffer")
     func cancellingMidPassAbandonsTheBuffer() throws {
         let probe = CancellationProbe(cancelAfterPolls: 3)
-        let exposed = try ExportTestData.exposed(
+        let exposed = try ExportTestData.leveled(
             width: 1, height: 8, values: Array(repeating: 0.5, count: 24)
         )
         #expect(throws: CancellationError.self) {
