@@ -1079,8 +1079,17 @@ private struct CaptureProfileControl: View {
 /// ```text
 /// Identity          .identity        remap nothing
 /// Red/Blue Swap     .redBlueSwap     the classic infrared exchange
+/// Monochrome…       .explicit(m)     three contributions, one weighted sum
 /// Custom Matrix…    .explicit(m)     nine coefficients the user authored
 /// ```
+///
+/// The last two are two ways of authoring the **same** state. A monochrome
+/// mix is an explicit matrix whose three rows are identical, so it persists,
+/// renders and exports as any other authored matrix does, and a photograph
+/// developed through either editor is indistinguishable in everything that is
+/// stored. That is why both entries can be marked at once: an authored
+/// monochrome matrix genuinely is a custom matrix, and it genuinely is
+/// monochrome. See `docs/decisions/0025-monochrome-channel-mix-authoring.md`.
 ///
 /// `.explicit` is deliberately not in `UserChannelMixAdjustment.selectableCases`:
 /// that list is the mixes a menu can offer by name, and a matrix is authored
@@ -1114,6 +1123,11 @@ private struct ChannelMixControl: View {
     /// Whether the matrix editor is open. Transient view state: being about to
     /// author a matrix is not an editing decision and persists nothing.
     @State private var isEditingMatrix = false
+
+    /// Whether the monochrome editor is open. Transient for the same reason,
+    /// and separate from `isEditingMatrix` only because they are two sheets —
+    /// both author the one canonical `UserChannelMixAdjustment`.
+    @State private var isEditingMonochrome = false
 
     /// The save-as-preset sheet's request, when one is open.
     ///
@@ -1177,6 +1191,20 @@ private struct ChannelMixControl: View {
             Divider()
 
             Button {
+                isEditingMonochrome = true
+            } label: {
+                // Marked when the matrix in force has three identical rows,
+                // whoever authored it — the matrix editor, a sidecar, a
+                // preset. The question is asked of the coefficients, never of
+                // the provenance, because there is no monochrome provenance.
+                if IRMonochromeMix(recognising: documentState.channelMixAdjustment) != nil {
+                    Label("Monochrome…", systemImage: "checkmark")
+                } else {
+                    Text("Monochrome…")
+                }
+            }
+
+            Button {
                 isEditingMatrix = true
             } label: {
                 // Marked when an authored matrix is what is in force, for the
@@ -1208,6 +1236,16 @@ private struct ChannelMixControl: View {
                 apply: documentState.setChannelMix
             )
         }
+        .sheet(isPresented: $isEditingMonochrome) {
+            // Seeded from the mix in force as well: its three contributions
+            // when it is already monochrome, and Equal RGB when it is not.
+            // The same `setChannelMix` — a monochrome mix is not a different
+            // kind of decision, only a different way of typing one.
+            MonochromeMixEditorView(
+                current: documentState.channelMixAdjustment,
+                apply: documentState.setChannelMix
+            )
+        }
         .sheet(item: $presetSaveRequest) { request in
             // The whole sheet from the captured request; `documentState` is
             // not in this expression at all, and the initialiser offers
@@ -1227,6 +1265,7 @@ private struct ChannelMixControl: View {
             // that does nothing.
             if !canAdjust {
                 isEditingMatrix = false
+                isEditingMonochrome = false
                 presetSaveRequest = nil
             }
         }
