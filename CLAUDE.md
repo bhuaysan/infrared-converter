@@ -240,7 +240,7 @@ source + adjustments
 
 This architecture must make undo/redo, presets, recipes, batch processing, parameter comparison, and sidecars possible without modifying source data.
 
-The sidecar is the first of those to exist. It holds the photograph's complete application-owned processing state — the **capture-profile reference** and the adjustments together, today the white-balance choice, the orientation correction, the creative channel mix and the exposure — and it is written and read as a whole, never field by field. A RAW file is an immutable input — never rewritten, appended to, re-tagged or replaced — and a user's decisions live in one application-owned JSON file beside it, named by one rule in one place. It is read **before** the file is decoded, so the first render is already the saved state; it is written only after a state has rendered successfully and is still the current one; and a record it cannot understand stops the open rather than becoming a default state. See `docs/decisions/0013-adjustment-sidecar.md` and `docs/decisions/0020-ir-capture-profile-foundation.md`.
+The sidecar is the first of those to exist. It holds the photograph's complete application-owned processing state — the **capture-profile reference** and the adjustments together, today the white-balance choice, the orientation correction, the creative channel mix, the exposure and the black and white points — and it is written and read as a whole, never field by field. A RAW file is an immutable input — never rewritten, appended to, re-tagged or replaced — and a user's decisions live in one application-owned JSON file beside it, named by one rule in one place. It is read **before** the file is decoded, so the first render is already the saved state; it is written only after a state has rendered successfully and is still the current one; and a record it cannot understand stops the open rather than becoming a default state. See `docs/decisions/0013-adjustment-sidecar.md` and `docs/decisions/0020-ir-capture-profile-foundation.md`.
 
 Two kinds of state live there, and keeping them apart is the point:
 
@@ -344,7 +344,11 @@ IR Capture-Profile Adjustment
         ↓
 Infrared Channel / Color Transform
         ↓
-Develop Adjustments
+Image Orientation
+        ↓
+Exposure
+        ↓
+Levels (black point, white point)
         ↓
 Display or Export Transform
         ↓
@@ -359,13 +363,19 @@ The camera/sensor interpretation stage — the camera-to-working transform — i
 
 The working representation is established **before** the infrared channel/color transform, not after it. That ordering was originally hypothesised the other way round; implementation showed that a creative channel mix is only meaningful once the RGB axes it remixes are defined, so the stage operates inside the working representation and leaves it unchanged. See `docs/decisions/0006-working-color-space.md` and `docs/decisions/0007-infrared-channel-mixing.md`.
 
-The pipeline's "Display or Export Transform" step is implemented as **two separate boundaries**, and no tone stage exists at either. The display boundary — exposure, hard display-range clipping, the sRGB transfer function, 8-bit quantisation — is `docs/decisions/0008-display-preview-rendering.md`. The export boundary — hard export-range clipping, the same transfer function, 16-bit quantisation — is `docs/decisions/0018-full-resolution-tiff-export.md`. They share the arithmetic that is genuinely one rule (`SceneLinearExposure`, `SRGBTransferFunction`) and each owns its own range policy, bit depth and destination. Neither may reuse the other's buffer, and an export must never start from the 8-bit preview.
+The pipeline's "Display or Export Transform" step is implemented as **two separate boundaries**, and no tone *mapping* exists at either — a destination clips, encodes and quantises, and nothing more. The display boundary — hard display-range clipping, the sRGB transfer function, 8-bit quantisation — is `docs/decisions/0008-display-preview-rendering.md`. The export boundary — hard export-range clipping, the same transfer function, 16-bit quantisation — is `docs/decisions/0018-full-resolution-tiff-export.md`. They share the arithmetic that is genuinely one rule (`SceneLinearExposure`, `LinearLevels`, `SRGBTransferFunction`), they take the **same input type**, `LeveledLinearRGBImage`, and each owns its own range policy, bit depth and destination. Neither may reuse the other's buffer, and an export must never start from the 8-bit preview.
+
+Exposure used to be applied inside the display boundary. It is not any more: levels have to sit between exposure and the clip, and nothing can be inserted between two halves of one fused pass. `DisplayRenderSettings` therefore carries a range policy and an encoding and nothing a user chooses, exactly as `ExportRenderSettings` always has. See `docs/decisions/0026-linear-levels.md`.
 
 Between the working representation and the creative channel mix there is now one more boundary, and it is the only stage in the pipeline that changes how many pixels there are: the **preview reduction**. It produces the reduced scene-linear rendition the interactive workspace holds, leaves the colour space, the linearity and the numeric range unchanged, and is deliberately absent from any full-resolution path. See `docs/decisions/0015-reduced-resolution-preview.md`.
 
 The creative channel mix that follows it is a **user adjustment**, not a fixed application choice. It is applied in the interactive half of the pipeline, to the retained **pre-mix** reduced preview — never composed onto a previous mix, and never baked into what a document holds open — and it forms one complete render state with the user's orientation correction and exposure. See `docs/decisions/0016-interactive-channel-mixer.md`.
 
-Exposure is the third user adjustment. Its arithmetic is `SceneLinearExposure` — `× 2^EV`, in the linear domain, before whichever range policy follows — and that one primitive is the only place it is written. The interactive path applies it inside the display boundary, where it has always lived; the full-resolution export applies it as a stage of its own, `SceneLinearExposer`, so the adjusted scene-linear image exists before anything clips or quantises it. It is not tone mapping. See `docs/decisions/0017-interactive-exposure.md` and its amendment.
+Exposure is the third user adjustment. Its arithmetic is `SceneLinearExposure` — `× 2^EV`, in the linear domain, before whichever range policy follows — and that one primitive is the only place it is written. **Both** paths apply it as a stage of its own, `SceneLinearExposer`, so the adjusted scene-linear image exists as an inspectable value before anything clips or quantises it. It is not tone mapping. See `docs/decisions/0017-interactive-exposure.md` and its amendment.
+
+The black and white points are the fifth user adjustment, and the first tone control. Their arithmetic is `LinearLevels` — `(x − blackPoint) × 1/(whitePoint − blackPoint)`, applied identically to every RGB component, in the linear domain — and that one primitive is the only place it is written. `LinearLevelsApplier` runs it **after** exposure and **before** whichever range policy follows, on both paths, and its output is the one type both destination encoders take. It does not clip: clipping belongs to the destination, downstream, where it is counted.
+
+After the offset the values are **linear-light but no longer scene-linear** — no transfer function has been applied, but they are no longer proportional to the light that reached the sensor. That is why `LeveledLinearRGBImage` is a type of its own, and why `sceneLinear` is `false` on it even at neutral levels and even at a black point of exactly zero; `preservesProportionalityToSceneRadiance` is the weaker, value-dependent fact, and it is derived rather than stored. The pair is one validated decision because `blackPoint < whitePoint` belongs to neither number alone, and its supported domain is derived from IEEE 754 rather than from photography: any finite ordered pair whose span and reciprocal are representable. Nothing is clamped, reordered or substituted. It is not tone mapping, not a curve, not contrast, not a gamma slider, not highlight or shadow recovery, not automatic levels and not per-channel. See `docs/decisions/0026-linear-levels.md`.
 
 Image orientation is a stage of its own, between the infrared channel/color transform and the display or export transform. It is **discrete geometry**: the eight standard orientations, applied as an exact permutation of whole pixels, lossless and with every component's bit pattern preserved. It is the only stage that changes where a pixel is, or that can exchange the image's width and height. See `docs/decisions/0009-application-owned-orientation.md`.
 
@@ -728,14 +738,14 @@ Do not use UI display names as the only persistent identity for referenced profi
 
 General photo editing is secondary.
 
-Initial useful controls may include:
+Two exist: **exposure** and the **black and white points**. Everything else in
+this list is a candidate, not a plan.
 
-- exposure
+- exposure — implemented, `docs/decisions/0017-interactive-exposure.md`
+- black point and white point — implemented, `docs/decisions/0026-linear-levels.md`
 - contrast
 - highlights
 - shadows
-- white point
-- black point
 - tone curve
 - saturation
 - vibrance
@@ -1160,7 +1170,7 @@ A successful early version should:
 5. apply IR-capable white balance without conventional Kelvin limitations
 6. apply a channel transform
 7. provide at least one useful IR filter/capture-profile workflow
-8. adjust basic exposure
+8. adjust basic exposure and the black and white points
 9. export a high-quality TIFF/JPEG with explicit output color handling
 10. reproduce the same versioned settings on another image
 
@@ -1242,6 +1252,29 @@ and neither the photograph sidecar (version 5) nor the creative-preset schema
 (version 1) changed, and that presets, export and the pipeline reuse themselves
 so the milestone adds no code below the menu, is
 `docs/decisions/0025-monochrome-channel-mix-authoring.md`.
+
+That a black point and a white point are the fifth canonical user adjustment
+and the first tone control, that their arithmetic is one shared primitive
+(`LinearLevels`) applied by one stage (`LinearLevelsApplier`) after exposure
+and before every destination's range policy, that exposure therefore left
+`DisplayPreviewRenderer` for `SceneLinearExposer` on the interactive path too
+so that a stage could be inserted between it and the clip, that both
+destination encoders consequently take the same `LeveledLinearRGBImage` from
+the same stages and differ only at resolution, range policy, bit depth and
+destination, that the stage does not clip because the destination does and
+counts what it destroyed, that the supported domain is derived from IEEE 754
+rather than from photography so a reversed pair is refused rather than swapped
+and no magnitude limit is imposed, that the pair is one validated adjustment
+because `black < white` belongs to neither number alone, that after the offset
+the values are linear-light but no longer scene-linear and the type says so
+even at neutral levels, that a levels edit reruns only the mix, the
+orientation, the exposure and itself, that the sidecar schema is at version 6
+with tested version 1 to 5 migrations to neutral levels proven pixel-neutral,
+that the creative-preset schema stays at version 1 because a preset is a
+channel-mix preset and not a develop recipe, and that contrast, curves,
+histograms, auto levels, highlight and shadow recovery, a gamma slider and
+per-channel levels are each explicitly deferred, is
+`docs/decisions/0026-linear-levels.md`.
 
 The verification tiers, the two fixture environment variables and why having a
 RAW file is not consent to decode it are in `docs/testing.md`.
@@ -1775,6 +1808,21 @@ Pause and reconsider when code begins to show any of these patterns:
 - a gain listing that walks the CFA cell itself, so it can describe a different set of planes than the estimator measured
 - an unused gain slot shown as `×1.000`, so a plane the sensor never fills reads as a measured plane needing no correction
 - plane labels read from the open document's metadata rather than from the preview whose gains they describe
+- a Levels stage that clips, clamps or normalises, so the shadows it was asked to open are destroyed by the operation that opened them
+- Levels arithmetic written a second time inside a destination encoder, rather than called from `LinearLevels`
+- Levels folded into exposure as one gain-and-offset, or composed into the channel-mix matrix, so each control changes what the other did
+- Levels applied before exposure, or inside the destination's clipping policy
+- post-Levels values still described, tagged or typed as scene-linear, when an offset has been subtracted
+- `sceneLinear` made value-dependent, so a stage licensed to subtract an offset answers "is this scene-linear?" differently per image
+- a photographic slider limit imposed as a persistence validity rule for a black or white point, rather than the representability rule
+- a reversed or equal levels pair silently swapped, nudged apart or clamped instead of refused
+- loose `blackPoint` and `whitePoint` fields on `ImageAdjustments`, so a record can exist in which `black < white` is false
+- a levels edit that reruns decode, normalisation, white balance, demosaicing, the camera-to-working transform or the preview reduction
+- a new levels setting composed onto a previously levelled buffer rather than applied to the exposed one
+- an exposure left inside `DisplayRenderSettings`, so the image an encoder receives can be exposed a second time silently
+- a destination error case kept after the stage that could raise it moved away
+- Levels added to `IRCreativePreset`, turning a channel-mix preset into a develop recipe by accident
+- neutral Levels described as "stage not traversed" when the implementation deliberately applied and recorded them
 - an expensive real-RAW suite enabling itself because a fixture happens to exist, so `swift test` costs minutes on one machine and seconds on another
 - fixture *location* and fixture *execution* decided by one setting, or by seventeen independent `ProcessInfo` lookups instead of one authority
 - an explicit request for the real-RAW suites answered with silent skips and a green run, so a misconfiguration reads as successful integration coverage

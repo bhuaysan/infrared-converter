@@ -172,19 +172,33 @@ records what it did and explicitly did not do.
   colour management, and no clamping. A CFA mosaic is never resized: averaging
   neighbouring mosaic samples averages across colour filters, so the reduction
   waits until every pixel carries all three channels.
-- **Display rendering** is exposure in the linear domain, hard display-range
-  clipping to `0...1`, the piecewise sRGB transfer function and 8-bit
-  quantisation — in that order, with the settings named at the call site and
-  the number of clipped samples recorded. It is deliberately **not** a tone
-  pipeline.
 - **Exposure** is the third user adjustment and the first continuous one: a
   slider (−4 to +4 EV, in twentieths of a stop) whose value is applied as
-  `× 2^EV` to the unclamped scene-linear image, before clipping, by the shared
-  `SceneLinearExposure` primitive. It reruns only the mix, orientation and
-  display stages; a drag is coalesced by the same renderer as every other
-  control, with no debounce. A sidecar may hold any finite value from −10 to
-  +10 EV; a value beyond the slider is shown as saved and not altered. See
+  `× 2^EV` to the unclamped scene-linear image by the shared
+  `SceneLinearExposure` primitive, in `SceneLinearExposer`. A drag is coalesced
+  by the same renderer as every other control, with no debounce. A sidecar may
+  hold any finite value from −10 to +10 EV; a value beyond the slider is shown
+  as saved and not altered. See
   [ADR 0017](docs/decisions/0017-interactive-exposure.md).
+- **Levels** are the fifth user adjustment: a black point and a white point,
+  applied as `(x − black) / (white − black)` per component, **after** exposure
+  and **before** any clipping, by the shared `LinearLevels` primitive in
+  `LinearLevelsApplier`. The pair is one validated decision, because
+  `black < white` belongs to neither number alone. Nothing here clips — a value
+  it pushes to `−0.2` or `1.4` reaches the destination's range policy intact,
+  which is the whole point of opening the shadows. The valid domain is IEEE 754
+  rather than photography: any finite ordered pair whose interval and
+  reciprocal are representable, so `black −0.25 / white 2.0` is an ordinary
+  setting. It is **not** tone mapping, a curve, contrast, a gamma slider, auto
+  levels or highlight recovery, and after the offset the values are still
+  linear-light but no longer proportional to scene radiance. See
+  [ADR 0026](docs/decisions/0026-linear-levels.md).
+- **Display rendering** is hard display-range clipping to `0...1`, the
+  piecewise sRGB transfer function and 8-bit quantisation — in that order, with
+  the settings named at the call site and the number of clipped samples
+  recorded. It is deliberately **not** a tone pipeline, and since Levels
+  arrived it no longer applies exposure either: exposure and levels are stages
+  of their own above it, so this stage is purely a destination.
 - **Export** is a second end path, and it starts again from the RAW file. See
   [Full-resolution export](#full-resolution-export) below.
 
@@ -192,7 +206,8 @@ What the app-owned pipeline puts on screen, for a freshly opened file with no
 saved decisions: the default centred neutral-patch white balance, bilinear
 demosaicing,
 the identity false-colour camera transform, an identity channel mix, the
-orientation the file's own metadata names, `0 EV`, hard clipping and sRGB.
+orientation the file's own metadata names, `0 EV`, neutral levels (black `0`,
+white `1`, which is the identity), hard clipping and sRGB.
 Those choices are made in the application layer, visibly, because no processing
 API has a default to make them.
 
@@ -243,7 +258,8 @@ PhotographProcessingState
       ├── whiteBalance   the default centred patch | a neutral region you picked
       ├── orientation    one of eight states, composed onto the file's own
       ├── channelMix     identity | red/blue swap | an explicit 3×3 matrix
-      └── exposure       a finite EV from −10 to +10, applied as × 2^EV
+      ├── exposure       a finite EV from −10 to +10, applied as × 2^EV
+      └── levels         a black point and a white point, applied after exposure
 ```
 
 A **capture profile** describes the camera, the sensor conversion and the
@@ -303,7 +319,7 @@ frame:
 ```text
 shared by every photograph using the profile   camera, conversion, filter, processing
 kept per photograph                            white balance patch, orientation,
-                                               channel mix, exposure
+                                               channel mix, exposure, levels
 ```
 
 Two photographs under one profile can have completely different neutral patches,
@@ -442,12 +458,16 @@ OLYMPUS.ORF.iradjustments.json     the user's decisions, and the only place they
 
 ```json
 {
-  "schemaVersion" : 5,
+  "schemaVersion" : 6,
   "captureProfileID" : "builtin.uncalibrated",
   "adjustments" : {
     "orientation" : "rotate90Clockwise",
     "channelMix" : { "kind" : "redBlueSwap" },
     "exposureEV" : 1.25,
+    "levels" : {
+      "blackPoint" : 0.05,
+      "whitePoint" : 1.2
+    },
     "whiteBalance" : {
       "kind" : "neutralPatch",
       "region" : {
@@ -468,18 +488,26 @@ every time, by the same estimator the export uses, so improving the estimator
 does not leave every saved photograph rendering by arithmetic that no longer
 exists. A file with no picked patch records `{ "kind" : "defaultNeutralPatch" }`.
 
+The levels pair is one key rather than two, because it is one decision: the
+invariant `blackPoint < whitePoint` belongs to neither number alone. Both
+fields are required, and a missing one, a non-finite bound or a reversed pair
+is refused rather than repaired — swapping the two would invert the photograph,
+which is a decision nobody made.
+
 Schema version 2 added `channelMix`, version 3 added `exposureEV`, version 4
-added `whiteBalance`, and version 5 added `captureProfileID` and moved the
-adjustments into their own object. The filename did not change. Older records
-still read and migrate to the identity mix, `0 EV`, the **default centred
-patch** and the **built-in uncalibrated profile** — the state they were
-actually saved in, rather than a guess about a missing field — and are written
-back at the current version the next time they are saved. That migration is
-proven pixel-neutral by tests that render a version 4 state and its migrated
-version 5 form and compare the buffers bit for bit. Reading rewrites nothing. A
-version this build does not know is refused outright rather than read around,
-because a setting whose omission would change the photograph must never be
-silently ignored.
+added `whiteBalance`, version 5 added `captureProfileID` and moved the
+adjustments into their own object, and version 6 added `levels`. The filename
+did not change. Older records still read and migrate to the identity mix,
+`0 EV`, the **default centred patch**, the **built-in uncalibrated profile**
+and **neutral levels** — the state they were actually saved in, rather than a
+guess about a missing field — and are written back at the current version the
+next time they are saved. Neutral levels are mathematically the identity, which
+is exactly what every build that wrote versions 1 to 5 applied, because none of
+them had a levels stage. That migration is proven pixel-neutral by tests that
+render an older state and its migrated form and compare the buffers bit for
+bit. Reading rewrites nothing. A version this build does not know is refused
+outright rather than read around, because a setting whose omission would change
+the photograph must never be silently ignored.
 
 Export adds no field and changes no schema. Exporting produces an artefact; it
 is not an edit.
@@ -504,6 +532,8 @@ convert
    ↓                             ImageOrienter       file + adjustments.orientation
    ↓                             SceneLinearExposer  adjustments.exposure
                                  ExposedSceneLinearRGBImage (still unclamped)
+   ↓                             LinearLevelsApplier adjustments.levels
+                                 LeveledLinearRGBImage (still unclamped)
    ↓                             ExportImageEncoder
 clip, sRGB, 16-bit quantisation  ExportEncodedImage (display referred)
    ↓                             TIFFExporter
@@ -522,9 +552,12 @@ at different preview resolutions produce byte-identical exports, because the
 export never learns what those resolutions were.
 
 Preview and export are also not two colour pipelines. They share the RAW front
-half, all three adjustment stages, the exposure arithmetic
-(`SceneLinearExposure`) and the transfer function (`SRGBTransferFunction`).
-They differ in exactly four places, each deliberate:
+half, all four adjustment stages, the exposure arithmetic
+(`SceneLinearExposure`), the levels arithmetic (`LinearLevels`) and the
+transfer function (`SRGBTransferFunction`) — and since Levels arrived they hand
+their two encoders the **same type**, `LeveledLinearRGBImage`, so the claim is
+structural rather than a matter of discipline. They differ in exactly four
+places, each deliberate:
 
 | | preview | export |
 | --- | --- | --- |
@@ -869,6 +902,19 @@ See [RAW/README.md](RAW/README.md) and [docs/testing.md](docs/testing.md).
   and below `0` is destroyed, and the provenance record says how many samples
   that was. There is no highlight recovery, no curve and no automatic
   exposure.
+- **Levels are the only tone control, and they are affine.** A black point and
+  a white point, nothing else. There is no contrast, no S-curve, no parametric
+  or arbitrary tone curve, no histogram, no auto levels or auto contrast, no
+  highlight or shadow recovery, no local contrast, clarity or dehaze, no gamma
+  slider, no per-channel levels and no separate monochrome levels. The sliders
+  reach `−0.5 … 1.5`; a hand-edited sidecar may hold any finite ordered pair
+  whose interval is representable, and such a value is shown as saved and not
+  altered. See [ADR 0026](docs/decisions/0026-linear-levels.md).
+- **After a non-zero black point the values are no longer scene-linear.** They
+  are still linear-light — no transfer function has been applied — but an
+  offset has been subtracted, so they are no longer proportional to the light
+  that reached the sensor. The type says so (`LeveledLinearRGBImage`), and the
+  provenance reports both facts separately.
 - **A sidecar this build cannot read stops the file from opening.** An
   unsupported schema version, an unknown orientation token or malformed JSON is
   reported and left untouched, never repaired and never silently replaced by
@@ -888,8 +934,10 @@ See [RAW/README.md](RAW/README.md) and [docs/testing.md](docs/testing.md).
   the reopen then starts from the state that was just saved.
 - **Saved state is one photograph's own, apart from the creative mix.** A
   channel mix can be saved as a named preset and applied to another photograph;
-  the white balance, the exposure and the orientation cannot, and there is no
-  recipe format that carries a whole processing state between files. A
+  the white balance, the exposure, the levels and the orientation cannot, and
+  there is no recipe format that carries a whole processing state between
+  files. Presets are deliberately still a **channel-mix** preset at schema
+  version 1, not a develop recipe. A
   photograph stores the **resolved** mix, never a reference to a preset, so
   renaming or deleting a preset changes nothing about an image developed with
   it. See [ADR 0024](docs/decisions/0024-reusable-creative-presets.md).
@@ -897,9 +945,9 @@ See [RAW/README.md](RAW/README.md) and [docs/testing.md](docs/testing.md).
   records, and departing from that is a manual act. There is no camera-model
   table, no filename heuristic and no automatic straightening — the E-PL3
   fixture records EXIF 1 and is shown sideways until someone rotates it.
-- **Four things are adjustable: the white balance, the orientation, the channel
-  mix and the exposure**, plus the capture profile, which is a selection rather
-  than an adjustment. The demosaic algorithm and the preview resolution are
+- **Five things are adjustable: the white balance, the orientation, the channel
+  mix, the exposure and the levels**, plus the capture profile, which is a
+  selection rather than an adjustment. The demosaic algorithm and the preview resolution are
   still fixed application-layer choices with no controls.
 - **No capture profile in this build is calibrated.** `builtin.uncalibrated`
   applies the identity false-colour axis assignment, which is what every

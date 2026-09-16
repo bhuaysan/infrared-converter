@@ -197,11 +197,26 @@ the same space, the same values, the same bit patterns
 pixels are now in VIEWING order; width/height may be swapped
 
                   ↓
+       one explicit SceneLinearExposure             ┐
+                  ↓                                 ├ SceneLinearExposer
+       exposure, in the linear domain: × 2^EV       ┘
+                  ↓
+       ExposedSceneLinearRGBImage                   ← still scene-linear
+                  ↓
+       one explicit LinearLevels                    ┐
+                  ↓                                 ├ LinearLevelsApplier
+       (x − black) × 1/(white − black)              ┘
+                  ↓
+       LeveledLinearRGBImage        ← linear-light, NOT scene-linear any more
+
+═══════════ ADJUSTED LINEAR-LIGHT DOMAIN ═══════════════
+no transfer function yet; still unclamped; an offset has been subtracted,
+so the values are no longer proportional to scene radiance
+
+                  ↓
        explicit DisplayRenderSettings              ┐
                   ↓                                │
-       exposure, in the linear domain              │
-                  ↓                                ├ DisplayPreviewRenderer
-       hard display-range clipping to 0...1        │
+       hard display-range clipping to 0...1        ├ DisplayPreviewRenderer
                   ↓                                │
        sRGB transfer function                      │
                   ↓                                │
@@ -339,11 +354,19 @@ defined against. See
 `docs/decisions/0025-monochrome-channel-mix-authoring.md`.
 
 Exposure joined the render half the same way. The display stage's
-`exposureEV` was always `0 EV` in the workspace; it is now the user's
-`ImageAdjustments.exposure`, passed unchanged, so the `× 2^EV` described under
-the display stage below acts on the unclamped mixed and oriented preview before
-the range policy. No stage was added and none moved. See
+`exposureEV` was always `0 EV` in the workspace; it became the user's
+`ImageAdjustments.exposure`, passed unchanged. See
 `docs/decisions/0017-interactive-exposure.md`.
+
+**Levels** then moved it. A black point and a white point have to sit *after*
+exposure and *before* clipping, and nothing can be inserted between two halves
+of one fused pass — so exposure left `DisplayPreviewRenderer` for
+`SceneLinearExposer`, where the export path had already been calling it, and
+levels follow it as `LinearLevelsApplier`. `DisplayRenderSettings` is therefore
+now what `ExportRenderSettings` already was, a range policy and an encoding,
+and the two destination encoders take the **same type** from the **same
+stages**. The sidecar is at schema version 6. See
+`docs/decisions/0026-linear-levels.md`.
 
 The **white balance** joined the adjustments differently, and it is the one
 that could not join the render half. It is a mosaic-domain stage upstream of
@@ -1132,26 +1155,109 @@ restores the **file's** orientation — not upright.
 
 See `docs/decisions/0010-user-owned-orientation-adjustment.md`.
 
-### Oriented scene-linear RGB → display-encoded preview
+### Oriented scene-linear RGB → exposed scene-linear RGB
+
+`SceneLinearExposer` multiplies. It takes an oriented scene-linear image and
+**one explicit `SceneLinearExposure`**, and returns scene-linear light:
+
+```text
+scale    = exp2(EV)                     computed once per image
+exposed  = Float(Double(sceneLinear) × scale)
+```
+
+A pure gain, so proportionality to scene radiance survives it. Nothing is
+clipped: a value lifted above `1` stays above `1`, which is what lets a later
+negative exposure bring it back. `0 EV` hands the input's buffer back rather
+than copying it, and still sweeps for non-finite values, so the output contract
+holds on both paths.
+
+Both halves of the applicability check are needed: `exp2(−infinity)` is `0`, a
+finite-looking multiplier that would render a black frame in silence.
+
+It used to live inside `DisplayPreviewRenderer`. It does not any more, because
+Levels have to sit between it and the clip. See
+`docs/decisions/0017-interactive-exposure.md` and
+`docs/decisions/0026-linear-levels.md`.
+
+### Exposed scene-linear RGB → levelled linear-light RGB
+
+`LinearLevelsApplier` applies the user's black and white points. It takes an
+exposed scene-linear image and **one explicit `LinearLevels`**:
+
+```text
+span     = whitePoint − blackPoint
+scale    = 1 / span                     computed once per image
+levelled = Float((Double(exposed) − blackPoint) × scale)
+```
+
+Applied identically to all three components; there are no per-channel levels
+and no way to ask for any. Black `0` / white `1` is the identity and hands the
+input's buffer back, bit for bit.
+
+#### This is where the values stop being scene-linear
+
+Exposure is a gain and cannot move the origin. Levels subtract an offset, so
+the result is **linear-light** — no transfer function has been applied, nothing
+has been curved or compressed — but no longer proportional to the light that
+reached the sensor. That is why the output is a different type:
+
+```text
+ExposedSceneLinearRGBImage    scene-linear
+LeveledLinearRGBImage         linear-light, not scene-linear
+```
+
+`processing.sceneLinear` is `false` here even at neutral levels and even at a
+black point of exactly zero: a reader asking "is this scene-linear data?" of a
+stage licensed to subtract an offset should get one answer. The weaker,
+value-dependent fact is `preservesProportionalityToSceneRadiance`, derived from
+the black point rather than stored.
+
+#### It does not clip
+
+A value the equation pushes to `−0.375` or `2.375` reaches the destination's
+range policy with its magnitude intact. That is the whole point of a black
+point above zero: if this stage clipped, the shadows it was asked to open would
+be destroyed by the very operation that opened them.
+
+#### The domain
+
+```text
+blackPoint finite      whitePoint finite      blackPoint < whitePoint
+span and 1/span both representable
+```
+
+Derived from IEEE 754 rather than from photography. No magnitude limit is
+imposed: `black −0.25 / white 2.0` is an ordinary setting, and
+`black −1e300 / white 1e300` maps `1.0` to `0.5` correctly. The last clause
+rules out the two failures a check on the endpoints alone would miss — a span
+that overflows to infinity, giving a scale of exactly `0` that renders black
+while every number stays finite, and a span so small its reciprocal overflows.
+A reversed pair is refused, never swapped; an equal pair is refused, never
+nudged apart.
+
+See `docs/decisions/0026-linear-levels.md`.
+
+### Levelled linear-light RGB → display-encoded preview
 
 `DisplayPreviewRenderer` is the first stage whose output is **not**
-proportional to light. It takes an oriented scene-linear image and **one
-explicit `DisplayRenderSettings`**, and returns bytes a monitor can be handed
-correctly.
+proportional to light in the display sense: it applies a transfer function. It
+takes a levelled linear-light image and **one explicit
+`DisplayRenderSettings`**, and returns bytes a monitor can be handed correctly.
 
 See `docs/decisions/0008-display-preview-rendering.md`.
 
 #### What it is, and what it is not
 
 ```text
-does:       exposure in the linear domain
-            hard display-range clipping to 0...1
+does:       hard display-range clipping to 0...1
             the piecewise sRGB transfer function
             deterministic quantisation to 8 bits
 
-does not:   tone mapping of any kind
+does not:   exposure — that is SceneLinearExposer, two stages upstream
+            levels — that is LinearLevelsApplier, one stage upstream
+            tone mapping of any kind
             highlight reconstruction
-            automatic exposure or any histogram
+            automatic exposure, automatic levels or any histogram
             contrast, saturation, curves, LUTs
             gamut mapping beyond the component-wise clip
             orientation, crop or resampling
@@ -1162,36 +1268,37 @@ it.
 
 #### The settings
 
-`DisplayRenderSettings` carries exactly three choices, all `let`:
+`DisplayRenderSettings` carries exactly two choices, both `let`:
 
 | Property | Today's values |
 | --- | --- |
-| `exposureEV` | any finite `Double`; `2^EV` must be finite too |
 | `rangePolicy` | `.hardClipToDisplayRange` |
 | `encoding` | `.sRGB` |
 
-There is **no default** on any entry point. `0 EV` is written at the call site,
-which is where a reader can audit it.
+There is **no default** on any entry point, and there is no `exposureEV`: the
+image these settings describe has already been exposed and levelled, so
+settings carrying an exposure would offer a second, silent application of it.
+The renderer cannot double-expose because it is not given an exposure. It is
+the same shape `ExportRenderSettings` has always had, for the same reason.
 
 #### The arithmetic, per component
 
 ```text
-1. exposure     exposed = Float(Double(sceneLinear) × exp2(EV))
-2. clipping     clipped = exposed < 0 ? 0 : (exposed > 1 ? 1 : exposed)
-3. encoding     encoded = clipped <= 0.0031308
+1. clipping     clipped = linear < 0 ? 0 : (linear > 1 ? 1 : linear)
+2. encoding     encoded = clipped <= 0.0031308
                             ? 12.92 × clipped
                             : 1.055 × clipped^(1/2.4) − 0.055
-4. quantisation sample  = round(encoded × 255)      half away from zero
+3. quantisation sample  = round(encoded × 255)      half away from zero
 ```
 
-The scale is computed once per image; the multiply widens to `Double` and
-narrows to `Float32` exactly once, the convention the two stages above already
-use. The encoding is evaluated in `Double`.
+Exposure and levels have already happened, each widening to `Double` and
+narrowing to `Float32` exactly once, the convention every stage above uses. The
+encoding is evaluated in `Double`.
 
-`pow(x, 1/2.2)` is **not** an acceptable substitute for step 3. It is a
+`pow(x, 1/2.2)` is **not** an acceptable substitute for step 2. It is a
 different curve, it differs most in the shadows, and it would make the bytes
 disagree with the sRGB profile they are then tagged with. The comparison in
-step 3 is `<=`, so the threshold itself takes the linear branch; the two
+step 2 is `<=`, so the threshold itself takes the linear branch; the two
 branches differ by about `3e-8` there, and picking one by fiat is the only way
 to make the boundary deterministic.
 
@@ -1213,20 +1320,21 @@ a render, and every clipped value is still in it.
 #### Exact failures rather than plausible numbers
 
 ```text
-non-finite EV, or a finite EV whose 2^EV is not finite  → nonFiniteExposure
-a NaN or infinite input coordinate                      → nonFiniteSceneLinearInput
-exposure overflowing Float32                            → nonFiniteExposedValue
+a NaN or infinite input coordinate                      → nonFiniteLinearInput
 geometry that does not add up, on either side           → invalidGeometry
 CoreGraphics declining to build an image                → displayImageUnavailable
 ```
 
-Both the EV and its scale are checked: `exp2(−infinity)` is `0`, a
-finite-looking multiplier that would render a black frame in silence.
+Three cases, not five. The two exposure cases left with the exposure, and are
+now `SceneLinearExposureError.nonFiniteExposure` and `.nonFiniteExposedValue`;
+`LinearLevelsError` carries the equivalents for the levels stage. An error case
+that cannot occur describes a stage that no longer exists, so they were removed
+rather than kept.
 
-An overflowing exposure is refused rather than left to the clip, because a
-sample that reached infinity would clip to `1` and arrive on screen as an
-ordinary white pixel that nothing downstream could distinguish from a
-legitimately bright one.
+An overflowing exposure or levels result is refused **upstream**, rather than
+left to this clip, because a sample that reached infinity would clip to `1` and
+arrive on screen as an ordinary white pixel that nothing downstream could
+distinguish from a legitimately bright one.
 
 #### Output
 
@@ -1260,10 +1368,12 @@ two colour spaces, two types, and no way to confuse them in a signature.
 
 #### Reprocessing
 
-`DisplayPreviewProcessedRAWImage` retains the scene-linear state, and
-`render(settings:replacing:)` reaches through it. Settings never compound:
-changing exposure re-renders from the channel-mixed scene-linear image, never
-from the 8-bit preview. Rendering an encoded buffer again would apply the transfer
+`DisplayPreviewProcessedRAWImage` retains the whole adjusted state, and
+`render(settings:replacing:)` reaches through it. Nothing ever compounds:
+changing the exposure re-renders from the **oriented** image through
+`SceneLinearExposer.apply(exposure:replacing:)`, and changing the levels from
+the **exposed** image through `LinearLevelsApplier.apply(levels:replacing:)` —
+never from the 8-bit preview. Rendering an encoded buffer again would apply the transfer
 function twice, compound quantisation, recover no clipped highlight — and look
 entirely plausible.
 
@@ -1281,6 +1391,8 @@ WorkingColorRGBImage                full resolution, scene-linear, pre-creative
     ↓  ImageOrienter                file orientation + adjustments.orientation
     ↓  SceneLinearExposer           adjustments.exposure
 ExposedSceneLinearRGBImage          extended linear sRGB, still unclamped
+    ↓  LinearLevelsApplier          adjustments.levels
+LeveledLinearRGBImage               linear-light, still unclamped
     ↓  ExportImageEncoder           clip → sRGB → 16-bit quantisation
 ExportEncodedImage
     ↓  TIFFExporter                 temp file → finalise → move
@@ -1298,7 +1410,10 @@ See [ADR 0018](decisions/0018-full-resolution-tiff-export.md).
 | channel mix | `IRChannelMixer` | the same |
 | orientation | `ImageOrienter` | the same |
 | exposure arithmetic | `SceneLinearExposure` | the same |
-| where exposure is applied | inside the display pass | `SceneLinearExposer`, its own stage |
+| where exposure is applied | `SceneLinearExposer` | the same |
+| levels arithmetic | `LinearLevels` | the same |
+| where levels are applied | `LinearLevelsApplier` | the same |
+| the encoder's input type | `LeveledLinearRGBImage` | the same |
 | range policy | `.hardClipToDisplayRange` | `.hardClipToExportRange` |
 | transfer function | `SRGBTransferFunction` | the same |
 | quantisation | `round(x × 255)` | `round(x × 65535)` |
@@ -1379,6 +1494,7 @@ RAW file's orientation across would rotate the photograph twice.
 | sRGB transfer function | **yes** |
 | Quantisation to 16 bits | **yes** |
 | Exposure | no — upstream, by `SceneLinearExposer`, and not reapplied |
+| Levels | no — upstream, by `LinearLevelsApplier`, and not reapplied |
 | Preview reduction | no — refused outright |
 | Tone mapping of any kind | no |
 | Highlight reconstruction | no |
@@ -1542,7 +1658,8 @@ transform rather than restated here.
 
 | Stage | Applied? |
 | --- | --- |
-| Exposure, in the linear domain | **yes** |
+| Exposure, in the linear domain | no — upstream, by `SceneLinearExposer` |
+| Levels | no — upstream, by `LinearLevelsApplier` |
 | Hard display-range clipping to `0...1` | **yes** |
 | sRGB transfer function | **yes** |
 | Quantisation to 8 bits | **yes** |
@@ -2180,7 +2297,8 @@ display-range clipping and sRGB encoding.
 | Buffer | 36 990 720 bytes |
 | Bytes per row | 12 168 |
 | Layout | 8 bits per component, three components `R G B`, no alpha |
-| Exposure | `0 EV` (×1) |
+| Exposure | `0 EV` (×1), applied upstream by `SceneLinearExposer` |
+| Levels | black `0`, white `1` — the identity, applied upstream by `LinearLevelsApplier` |
 | Range policy | hard display-range clipping to `0...1` |
 | Encoding | standard sRGB, tagged `CGColorSpace.sRGB` on the `CGImage` |
 | Non-finite intermediates | 0 |
@@ -2271,8 +2389,14 @@ of *those*, plus image quality:
   below.
 - **A real tone pipeline.** ADR 0008 decided a clip and an encode, and
   explicitly not Reinhard, filmic curves, shoulder/toe curves, local operators,
-  highlight reconstruction or automatic exposure. Those remain open, and the
-  fixture's clip counts are the argument for taking them on.
+  highlight reconstruction or automatic exposure. ADR 0026 has since added one
+  tone control — an affine black and white point, which is a remap rather than
+  a curve — and deferred every other by name: contrast, an S-curve, a
+  parametric or arbitrary tone curve, a histogram, auto levels, auto contrast,
+  highlight and shadow recovery, local contrast, clarity, dehaze, a gamma
+  slider, per-channel levels and a separate monochrome levels control. Those
+  remain open, and the fixture's clip counts are still the argument for taking
+  them on.
 - **Real gamut mapping.** Component-wise clipping to the unit cube is the
   primitive stand-in.
 - **Arbitrary-angle rotation, straightening, crop and perspective
