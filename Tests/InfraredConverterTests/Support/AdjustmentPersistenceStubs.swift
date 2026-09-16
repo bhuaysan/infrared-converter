@@ -203,7 +203,8 @@ final class StubPhotographProcessingStore: PhotographProcessingStore, @unchecked
     ///
     /// Every adjustment, because a write is the whole record: a summary that
     /// named only the orientation would show two different complete states as
-    /// the same string. The exposure is its exact `Double`, `0.0EV` included.
+    /// the same string. The exposure is its exact `Double`, `0.0EV` included,
+    /// and so are the two levels bounds.
     var writeSummary: [String] {
         lock.lock()
         defer { lock.unlock() }
@@ -213,7 +214,8 @@ final class StubPhotographProcessingStore: PhotographProcessingStore, @unchecked
             :\($0.state.adjustments.orientation.persistedToken)\
             :\($0.state.adjustments.channelMix.kind.rawValue)\
             :\($0.state.adjustments.exposure.ev)EV\
-            :\($0.state.adjustments.whiteBalance.kind.rawValue)
+            :\($0.state.adjustments.whiteBalance.kind.rawValue)\
+            :\($0.state.adjustments.levels.blackPoint)-\($0.state.adjustments.levels.whitePoint)
             """
         }
     }
