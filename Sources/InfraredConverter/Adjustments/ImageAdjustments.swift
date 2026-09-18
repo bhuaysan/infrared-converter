@@ -11,13 +11,14 @@ import Foundation
 ///
 /// ## Why a record rather than a property
 ///
-/// There are five adjustments today — the orientation correction, the creative
-/// channel mix, the exposure compensation, the infrared white balance and the
-/// black and white points — and this is why the model was a record from the
-/// first one. Every adjustment that
-/// follows, tone settings and crop among them, belongs beside them rather than
-/// as another unrelated field, and the set has to be serialisable **as a set**:
-/// a recipe is "all of these together", not one of them at a time.
+/// All photograph-local adjustments live in this one record — today the
+/// orientation correction, the creative channel mix, the exposure
+/// compensation, the infrared white balance and the black and white points —
+/// and this is why the model was a record from the first one. Every adjustment
+/// that follows, further tone settings and crop among them, belongs beside
+/// them rather than as another unrelated field, and the set has to be
+/// serialisable **as a set**: a recipe is "all of these together", not one of
+/// them at a time.
 ///
 /// The white balance is the first adjustment that is not applied to the
 /// retained reduced preview — it is upstream of demosaicing, so changing it
@@ -113,7 +114,7 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// it cannot be applied to the retained reduced preview and re-prepares
     /// that preview from the retained normalised mosaic instead. That is a
     /// scheduling fact, not a modelling one — it is a field of this record like
-    /// the other three, and one request still means one complete state.
+    /// the others, and one request still means one complete state.
     ///
     /// Its default is not the identity. `.defaultNeutralPatch` measures real
     /// samples and produces real multipliers; see `isDefault`.

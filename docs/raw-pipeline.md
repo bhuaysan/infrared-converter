@@ -163,14 +163,14 @@ returns — EXCEPT the normalised mosaic, which an open
 document retains so that a new neutral patch re-runs this
 half without re-reading the file. The reduced PRE-MIX buffer
 is what the workspace retains beside it, and everything
-below re-runs for the three adjustments that are downstream.
+below re-runs for the adjustments that are downstream.
 
 Two costs, two coalescing slots:
   HEAVY  a new white balance  → re-run from the retained
                                 mosaic, replacing the
                                 reduced buffer
   FAST   mix, orientation,    → re-run from the reduced
-         exposure              buffer, which is unchanged
+         exposure, levels      buffer, which is unchanged
 
                   ↓
        adjustments.channelMix → IRChannelMix       ┐
@@ -2412,16 +2412,17 @@ of *those*, plus image quality:
   photograph still stores the **resolved** mix rather than a reference, so
   nothing about a sidecar changed and a preset cannot reach back into an image
   already developed. What does not exist: a recipe format carrying a whole
-  processing state, reuse of a white balance, an exposure or an orientation
-  across images, a document format, watching a sidecar for external edits, and
-  undo/redo.
-- **Any adjustment beyond the four that exist.** The infrared white balance
-  (ADR 0019), orientation (ADR 0010), the creative channel mix (ADR 0016) and
-  exposure (ADR 0017) are user decisions with controls and a sidecar. The
-  camera-to-working transform and the demosaic algorithm are still fixed
-  application-layer choices with no controls, and the recipe format that would
-  hold all four at once is deliberately undefined — a creative preset carries
-  the mix alone, and deliberately not the other three.
+  processing state, reuse of a white balance, an exposure, an orientation or
+  a pair of levels across images, a document format, watching a sidecar for
+  external edits, and undo/redo.
+- **Any adjustment beyond the five that exist.** The infrared white balance
+  (ADR 0019), orientation (ADR 0010), the creative channel mix (ADR 0016),
+  exposure (ADR 0017) and the black and white points (ADR 0026) are user
+  decisions with controls and a sidecar. The camera-to-working transform and
+  the demosaic algorithm are still fixed application-layer choices with no
+  controls, and the recipe format that would
+  hold them all at once is deliberately undefined — a creative preset carries
+  the mix alone, and deliberately not the others.
 - **Every white-balance mode except a picked neutral patch.** Temperature and
   tint, manual per-plane gains, grey-world or any other automatic estimate, and
   per-camera or per-filter white-balance profiles (ADR 0019).

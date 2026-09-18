@@ -80,7 +80,7 @@ import Observation
 /// made for is still the one the user wants — so a superseded render can no
 /// more write the sidecar than it can reach the screen.
 ///
-/// ## Four adjustments and a profile, one state
+/// ## Every photograph adjustment and a profile, one state
 ///
 /// ```text
 /// captureProfile which camera-to-working processing the photograph gets
@@ -127,7 +127,7 @@ import Observation
 ///
 /// The white balance is the first adjustment that is **upstream of
 /// demosaicing**, so it cannot be applied to the retained reduced preview the
-/// way the other three are. It re-prepares that preview from the retained
+/// way the others are. It re-prepares that preview from the retained
 /// normalised mosaic:
 ///
 /// ```text
@@ -420,9 +420,9 @@ final class DocumentState {
 
         /// Everything this application owns about the photograph: the capture
         /// profile it is processed under, and the user's editing decisions —
-        /// white balance, orientation, channel mix and exposure. What the
-        /// sidecar held when the file was opened, plus whatever has been asked
-        /// for since.
+        /// white balance, orientation, channel mix, exposure and levels. What
+        /// the sidecar held when the file was opened, plus whatever has been
+        /// asked for since.
         ///
         /// This is the **requested** state, and it is what the controls show.
         /// While a render is pending it is ahead of `owned`, whose preview —
@@ -1234,10 +1234,10 @@ final class DocumentState {
     ///
     /// What follows is the ordinary lifecycle and nothing special. The
     /// photograph is opened with the new profile and the **saved adjustments
-    /// unchanged** — the white balance, orientation, channel mix and exposure
-    /// are the user's and a profile problem is no reason to touch them — the
-    /// owned pipeline renders it, and the sidecar is written once that render
-    /// has succeeded. A render that refuses writes nothing, as ever.
+    /// unchanged** — every one of them is the user's, and a profile problem is
+    /// no reason to touch any of them — the owned pipeline renders it, and the
+    /// sidecar is written once that render has succeeded. A render that refuses
+    /// writes nothing, as ever.
     func useUncalibratedCaptureProfile() {
         guard case .captureProfileUnusable(let url, _) = status else { return }
         open(url, captureProfileOverride: .builtinUncalibrated)
@@ -1838,7 +1838,7 @@ final class DocumentState {
     /// re-prepares.
     ///
     /// The first adjustment that is upstream of demosaicing, and it goes
-    /// through exactly the path the other three do: the complete record is
+    /// through exactly the path the others do: the complete record is
     /// updated, persistence becomes `.pending`, and one request goes to a
     /// coalescing slot. It is simply a different slot, because the work is a
     /// different cost. A burst of picks collapses to the newest patch, and the

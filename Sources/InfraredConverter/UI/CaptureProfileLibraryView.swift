@@ -111,7 +111,7 @@ struct CaptureProfileLibraryView: View {
                 A capture profile describes how a photograph was made — the camera, what was \
                 done to its sensor, and the filter. One profile can be used by any number of \
                 photographs; each photograph keeps its own white balance, rotation, channel \
-                mix and exposure.
+                mix, exposure and levels.
                 """)
                 .font(.caption)
                 .foregroundStyle(.secondary)

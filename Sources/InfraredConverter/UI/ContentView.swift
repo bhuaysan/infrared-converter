@@ -228,9 +228,9 @@ struct ContentView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         Text("""
-                            Your white balance, rotation, channel mix and exposure for \
-                            this photograph are kept exactly as they are. Only the \
-                            capture profile changes.
+                            Your white balance, rotation, channel mix, exposure and \
+                            levels for this photograph are kept exactly as they are. \
+                            Only the capture profile changes.
                             """)
                             .font(.caption)
                             .multilineTextAlignment(.center)
@@ -1008,8 +1008,8 @@ private struct WhiteBalanceControl: View {
             .labelStyle(.iconOnly)
             .buttonStyle(.borderless)
             .help("""
-                Return to the default centred patch — the orientation, the channel mix \
-                and the exposure are unchanged
+                Return to the default centred patch — the other adjustments are \
+                unchanged
                 """)
             .accessibilityLabel("Reset white balance to the default centred patch")
             .disabled(whiteBalance.isDefault)
@@ -1374,8 +1374,8 @@ private struct LevelsControl: View {
             .labelStyle(.iconOnly)
             .buttonStyle(.borderless)
             .help("""
-                Return the black and white points to 0 and 1 — the white balance, \
-                channel mix, exposure and orientation are unchanged
+                Return the black and white points to 0 and 1 — the other adjustments \
+                are unchanged
                 """)
             .accessibilityLabel("Reset levels")
             .disabled(levels.isIdentity)
@@ -1504,7 +1504,7 @@ private struct ExposureControl: View {
             }
             .labelStyle(.iconOnly)
             .buttonStyle(.borderless)
-            .help("Return the exposure to 0 EV — the channel mix and orientation are unchanged")
+            .help("Return the exposure to 0 EV — the other adjustments are unchanged")
             .accessibilityLabel("Reset exposure to zero")
             .disabled(exposure.isIdentity)
         }

@@ -295,7 +295,7 @@ struct WorkspacePreviewPipeline {
     /// ```
     ///
     /// The heavy interactive phase. It depends on exactly one of the user's
-    /// adjustments — the white balance — and on none of the other three: no
+    /// adjustments — the white balance — and on none of the others: no
     /// creative stage, no geometry and no display encoding runs here, so a
     /// rotation, a mix or a slider drag never reaches it.
     ///
@@ -699,7 +699,7 @@ struct WorkspacePreview {
     /// it is derived from the transform's own provenance rather than asserted.
     ///
     /// It is **provenance**, not an edit: the photograph-local decisions are
-    /// the four adjustments below it.
+    /// the adjustments below it.
     let captureProfile: IRCaptureProfile
     /// The white balance the user asked for, as the canonical adjustment
     /// rather than as the region or the gains it became.

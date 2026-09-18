@@ -376,9 +376,9 @@ A few things the library deliberately refuses:
 When a photograph does refuse because its profile is missing — or was made for
 another camera — the screen offers **Use Uncalibrated / Generic Instead**. That
 is an explicit edit, not a fallback: the photograph reopens under
-`builtin.uncalibrated` with your white balance, rotation, channel mix and
-exposure exactly as you left them, and the new selection is saved once it has
-actually rendered. See
+`builtin.uncalibrated` with your white balance, rotation, channel mix,
+exposure and levels exactly as you left them, and the new selection is saved
+once it has actually rendered. See
 [ADR 0021](docs/decisions/0021-user-capture-profile-library.md).
 
 ### Calibration — what exists, and what it deliberately does not
@@ -433,11 +433,13 @@ for why each of those is deliberate, and
 [the measurement protocol](docs/calibration-protocol.md) for what a person would
 actually have to do.
 
-### One record, four adjustments
+### One record for all photograph adjustments
 
-All four are fields of one record, and every request is that whole record —
-never one field. A burst across the controls therefore collapses to one newest
-complete state: nothing in between is rendered, put on screen or written. The
+The orientation, the creative channel mix, the exposure, the infrared white
+balance and the black and white points are fields of one record, and every
+request is that whole record — never one field. A burst across the controls
+therefore collapses to one newest complete state: nothing in between is
+rendered, put on screen or written. The
 record is saved together with the capture-profile reference, as one document
 record: one JSON sidecar beside the RAW file, written after exactly that state
 has rendered and read back before the first render on the next open. See
@@ -448,7 +450,7 @@ has rendered and read back before the first render on the next open. See
 The white balance is the one field that is not applied to the retained reduced
 preview — it is upstream of demosaicing — so changing it re-prepares that
 preview from the retained normalised mosaic. That is a scheduling difference
-and nothing else: it is a field like the other three, one request is still one
+and nothing else: it is a field like the others, one request is still one
 complete state, and the export still takes the whole record.
 
 ```text
@@ -1012,8 +1014,8 @@ See [RAW/README.md](RAW/README.md) and [docs/testing.md](docs/testing.md).
 - **A refused white balance replaces the preview with its error**, exactly as a
   refused rotation does. The requested patch stays in the controls and the
   sidecar keeps the last state that rendered, so picking elsewhere recovers;
-  but the previous picture is not kept on screen. That is one rule for all four
-  adjustments, and changing it should be changed for all four at once.
+  but the previous picture is not kept on screen. That is one rule for every
+  adjustment, and changing it should be changed for all of them at once.
 - **A document now holds two buffers, not one.** The normalised full-resolution
   mosaic is retained so a new patch costs no decode — about 49 MB on the E-PL3
   fixture — beside the 36 MB reduced preview. During a file switch made

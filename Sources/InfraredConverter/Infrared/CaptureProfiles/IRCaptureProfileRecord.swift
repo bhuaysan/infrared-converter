@@ -173,8 +173,9 @@ public enum PersistedIRCaptureProcessingBasis: Sendable, Equatable {
 /// ## What is not here
 ///
 /// No calibration data, because none exists. No recommended adjustments: a
-/// profile is capture context, and a photograph's white balance, orientation,
-/// channel mix and exposure live in its own sidecar. See
+/// profile is capture context, and a photograph's own adjustments — its white
+/// balance, orientation, channel mix, exposure and levels — live in its own
+/// sidecar. See
 /// `docs/decisions/0020-ir-capture-profile-foundation.md`, Decision 11.
 public struct IRCaptureProfileRecord: Codable, Sendable {
 
