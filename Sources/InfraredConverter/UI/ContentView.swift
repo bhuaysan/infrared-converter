@@ -88,6 +88,8 @@ struct ContentView: View {
                 Divider().frame(height: 18)
                 LevelsControl(documentState: documentState)
                 Divider().frame(height: 18)
+                ContrastControl(documentState: documentState)
+                Divider().frame(height: 18)
                 OrientationControls(documentState: documentState)
                 Spacer()
                 AdjustmentSaveStatus(documentState: documentState)
@@ -228,9 +230,8 @@ struct ContentView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         Text("""
-                            Your white balance, rotation, channel mix, exposure and \
-                            levels for this photograph are kept exactly as they are. \
-                            Only the capture profile changes.
+                            All your adjustments for this photograph are kept exactly \
+                            as they are. Only the capture profile changes.
                             """)
                             .font(.caption)
                             .multilineTextAlignment(.center)
@@ -629,6 +630,9 @@ private struct RAWInspectorView: View {
                 // own provenance — like the exposure row, and ahead of which
                 // the sliders sit while a render is pending.
                 row("Levels", Self.levelsDescription(preview))
+                // The curve the contrast stage applied, from the rendering's
+                // own provenance — like the two rows above it.
+                row("Contrast", Self.contrastDescription(preview))
                 row("Out-of-range", Self.clippingDescription(processing))
                 row("Encoding", "sRGB, 8 bit, no alpha")
                 Text("""
@@ -819,6 +823,24 @@ private struct RAWInspectorView: View {
         return preview.preservesProportionalityToSceneRadiance
             ? "\(numbers) — a gain; still scene-proportional"
             : "\(numbers) — affine; no longer scene-proportional"
+    }
+
+    /// The contrast curve the rendering actually applied, and what it means
+    /// for the values.
+    ///
+    /// Named honestly: a neutral curve is the identity, so it is described as
+    /// applied-and-identity rather than as not run. And any other amount costs
+    /// the linear-light claim, which is worth saying where a person can see
+    /// it.
+    private static func contrastDescription(_ preview: WorkspacePreview) -> String {
+        let curve = preview.renderedContrastCurve
+        let numbers = String(
+            format: "%+.0f (k = %.3f)", curve.amount == 0 ? 0 : curve.amount * 100,
+            curve.exponent
+        )
+        return curve.isIdentity
+            ? "\(numbers) — identity"
+            : "\(numbers) — global RGB tone curve; no longer linear-light"
     }
 
     /// How much the display-range clipping destroyed, as a count rather than
@@ -1308,6 +1330,87 @@ private struct ChannelMixControl: View {
 }
 
 
+/// The contrast control: a slider, the numeric value, and a reset.
+///
+/// It changes one field of `DocumentState`'s canonical adjustment record and
+/// nothing else. No view here evaluates a curve, touches a `CGImage` or knows
+/// what `2^amount` is: each slider write becomes a `UserContrastAdjustment`,
+/// the workspace asks its coalescing renderer for the complete state, and
+/// `GlobalContrastApplier` applies it below the retained scene-linear preview.
+///
+/// ## What the control shows
+///
+/// The **requested** amount, read from `DocumentState` — never the amount of
+/// the last preview that happened to be delivered. A drag that outruns the
+/// renderer therefore does not snap the thumb back to an older value while a
+/// render is pending; the inspector, which reads the preview's provenance, is
+/// the place that describes the image actually on screen.
+///
+/// ## The number is a control scale
+///
+/// `−100 … +100`, with no `%`. `+35` means an amount of `0.35`, which means a
+/// curve exponent of `2^0.35`; it does not mean 35 % of any physical quantity.
+/// See `ContrastControlScale`.
+///
+/// Deliberately absent: arbitrary curve points, a curve editor, a histogram,
+/// auto contrast, local contrast, clarity, per-channel curves and any
+/// luminance-weighted variant.
+private struct ContrastControl: View {
+    let documentState: DocumentState
+
+    var body: some View {
+        let contrast = documentState.contrastAdjustment
+
+        HStack(spacing: 6) {
+            Text("Contrast")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+
+            Slider(
+                value: Binding(
+                    get: { ContrastControlScale.sliderPosition(for: contrast) },
+                    set: { written in
+                        if let requested = ContrastControlScale.adjustment(
+                            forSliderValue: written,
+                            current: documentState.contrastAdjustment
+                        ) {
+                            documentState.setContrast(requested)
+                        }
+                    }
+                ),
+                in: ContrastControlScale.range
+            ) {
+                Text("Contrast")
+            }
+            .controlSize(.mini)
+            .frame(width: 150)
+            .help("""
+                Adjust global RGB contrast with a symmetric tone curve. 0 is neutral. \
+                Applied after the black and white points and before display clipping
+                """)
+
+            Text(ContrastControlScale.displayValue(for: contrast))
+                .font(.caption)
+                .monospacedDigit()
+                .frame(minWidth: 34, alignment: .trailing)
+                .help("The requested contrast, on a normalised −100 to +100 scale")
+
+            Button(action: documentState.resetContrast) {
+                Label("Reset Contrast", systemImage: "arrow.counterclockwise")
+            }
+            .labelStyle(.iconOnly)
+            .buttonStyle(.borderless)
+            .help("Return the contrast to 0 — the other adjustments are unchanged")
+            .accessibilityLabel("Reset contrast")
+            .disabled(contrast.isIdentity)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Contrast \(contrast.signedDescription)")
+        .disabled(!documentState.canAdjust)
+    }
+}
+
+
 /// The levels control: two sliders, their numeric values, and a reset.
 ///
 /// It changes one field of `DocumentState`'s canonical adjustment record and
@@ -1333,8 +1436,9 @@ private struct ChannelMixControl: View {
 /// rule belongs to `UserLevelsAdjustment` and is far wider. See
 /// `LevelsControlScale`.
 ///
-/// Deliberately absent: contrast, a tone curve, a histogram, auto levels, auto
-/// contrast, per-channel levels and a gamma slider.
+/// Deliberately absent: a histogram, auto levels, per-channel levels and a
+/// gamma slider. Contrast is its own control now, below this one; it is not a
+/// levels setting.
 private struct LevelsControl: View {
     let documentState: DocumentState
 

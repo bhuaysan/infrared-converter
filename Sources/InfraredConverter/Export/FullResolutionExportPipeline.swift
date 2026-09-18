@@ -24,6 +24,7 @@ public enum FullResolutionExportError: Error {
         case orientation
         case exposure
         case levels
+        case contrast
 
         public var diagnosticDescription: String {
             switch self {
@@ -31,6 +32,7 @@ public enum FullResolutionExportError: Error {
             case .orientation: return "the orientation"
             case .exposure: return "the exposure"
             case .levels: return "the black and white points"
+            case .contrast: return "the global contrast"
             }
         }
     }
@@ -83,12 +85,16 @@ extension FullResolutionExportError: LocalizedError {
 /// anything was clipped or quantised.
 ///
 /// It is the **same type** the interactive path hands its display renderer,
-/// which is the whole architectural claim of `docs/decisions/0026-linear-levels.md`:
-/// preview and export differ at resolution, range policy, bit depth and
-/// destination, and nowhere above that line.
+/// which is the whole architectural claim of
+/// `docs/decisions/0026-linear-levels.md` and, now, of
+/// `docs/decisions/0027-global-contrast-tone-curve.md`: preview and export
+/// differ at resolution, range policy, bit depth and destination, and nowhere
+/// above that line.
 public struct FullResolutionExportRender: Sendable {
-    /// The adjusted linear-light image, at the sensor's own resolution.
-    public let image: LeveledLinearRGBImage
+    /// The fully adjusted image, at the sensor's own resolution. Tone-curved,
+    /// so no longer linear-light encoded — and still unclamped and
+    /// unquantised.
+    public let image: ToneCurvedRGBImage
     /// The RAW-state metadata the chain was processed against.
     public let metadata: RAWMetadata
     /// The snapshot this was rendered from.
@@ -102,7 +108,7 @@ public struct FullResolutionExportRender: Sendable {
     public let estimate: RAWWhiteBalanceEstimate
 
     init(
-        image: LeveledLinearRGBImage,
+        image: ToneCurvedRGBImage,
         metadata: RAWMetadata,
         request: ExportRequest,
         estimate: RAWWhiteBalanceEstimate
@@ -142,6 +148,10 @@ public struct FullResolutionExportRender: Sendable {
     public var exposureEV: Double { image.processing.exposureEV }
     /// The levels the levels stage actually applied.
     public var levels: LinearLevels { image.processing.levels }
+    /// The contrast curve the contrast stage actually applied.
+    public var contrastCurve: GlobalContrastCurve { image.processing.curve }
+    public var contrastAmount: Double { image.processing.contrastAmount }
+    public var contrastExponent: Double { image.processing.contrastExponent }
     public var blackPoint: Double { image.processing.blackPoint }
     public var whitePoint: Double { image.processing.whitePoint }
 }
@@ -162,6 +172,7 @@ public struct FullResolutionExportRender: Sendable {
 ///     ↓  SceneLinearExposer           adjustments.exposure
 /// ExposedSceneLinearRGBImage
 ///     ↓  LinearLevelsApplier          adjustments.levels
+///     ↓  GlobalContrastApplier        adjustments.contrast
 /// LeveledLinearRGBImage               ← the full-resolution render
 ///     ↓  ExportImageEncoder           clip, sRGB, 16-bit quantisation
 /// ExportEncodedImage
@@ -277,17 +288,17 @@ public struct FullResolutionExportPipeline: Sendable {
         }
 
         // The adjustments are applied in their own scope so that the working,
-        // mixed and oriented buffers — each the size of a full-resolution
-        // Float32 RGB image — become unreachable as soon as the exposed
-        // result exists.
-        let exposed = try Self.applyAdjustments(
+        // mixed, oriented, exposed and levelled buffers — each the size of a
+        // full-resolution Float32 RGB image — become unreachable as soon as
+        // the curved result exists.
+        let adjusted = try Self.applyAdjustments(
             to: prepared,
             adjustments: request.adjustments,
             cancellation: cancellation
         )
 
         return FullResolutionExportRender(
-            image: exposed,
+            image: adjusted,
             metadata: prepared.metadata,
             request: request,
             estimate: prepared.estimate
@@ -344,21 +355,23 @@ public struct FullResolutionExportPipeline: Sendable {
 
     // MARK: - The adjustable stages
 
-    /// Mix, then orientation, then exposure, then levels — the same four
-    /// stages the interactive preview runs, in the same order, from the same
-    /// values.
+    /// Mix, then orientation, then exposure, then levels, then contrast —
+    /// the same five stages the interactive preview runs, in the same order,
+    /// from the same values.
     ///
     /// The order is fixed and is not a matter of taste: the mix is a colour
     /// operation on a scene-linear representation, the orientation is discrete
     /// geometry, exposure is a gain on light, and levels are an affine remap
-    /// of the result. Colour, then geometry, then exposure, then levels —
-    /// matching the preview exactly, because the claim this path makes is that
-    /// the two are the same rendering.
+    /// of the result, and the contrast curve is the one nonlinear operation,
+    /// which needs the black and white points to exist before its fixed points
+    /// mean anything. Colour, then geometry, then exposure, then levels, then
+    /// the curve — matching the preview exactly, because the claim this path
+    /// makes is that the two are the same rendering.
     private static func applyAdjustments(
         to prepared: PreparedWorkingImage,
         adjustments: ImageAdjustments,
         cancellation: ProcessingCancellation
-    ) throws -> LeveledLinearRGBImage {
+    ) throws -> ToneCurvedRGBImage {
         // The bare-image overloads throughout: the wrapper overloads keep the
         // whole upstream chain reachable through `source`, and at full
         // resolution that is several hundred megabytes nobody needs.
@@ -408,8 +421,9 @@ public struct FullResolutionExportPipeline: Sendable {
             )
         }
 
+        let leveled: LeveledLinearRGBImage
         do {
-            return try LinearLevelsApplier().apply(
+            leveled = try LinearLevelsApplier().apply(
                 to: exposed,
                 levels: LinearLevels(adjustments.levels),
                 cancellation: cancellation
@@ -419,6 +433,20 @@ public struct FullResolutionExportPipeline: Sendable {
         } catch {
             throw FullResolutionExportError.adjustmentProcessingFailed(
                 stage: .levels, underlying: error
+            )
+        }
+
+        do {
+            return try GlobalContrastApplier().apply(
+                to: leveled,
+                curve: GlobalContrastCurve(adjustments.contrast),
+                cancellation: cancellation
+            )
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw FullResolutionExportError.adjustmentProcessingFailed(
+                stage: .contrast, underlying: error
             )
         }
     }

@@ -145,7 +145,7 @@ struct DisplayPreviewCGImageAdapterTests {
     func inconsistentGeometryIsRefused() {
         let processing = DisplayPreviewProcessing(
             settings: DisplayPreviewTestData.settings,
-            levelsProcessing: DisplayPreviewTestData.levelsProcessing(),
+            contrastProcessing: DisplayPreviewTestData.contrastProcessing(),
             clippedLowSampleCount: 0,
             clippedHighSampleCount: 0
         )

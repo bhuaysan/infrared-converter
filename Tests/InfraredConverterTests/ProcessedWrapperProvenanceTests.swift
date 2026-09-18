@@ -127,25 +127,40 @@ struct ProcessedWrapperProvenanceTests {
             == decoded.mosaic)
         #expect(leveled.url == decoded.url)
 
-        // Stage 9 mints DisplayPreviewProcessedRAWImage over that.
+        // Stage 9 mints ToneCurvedProcessedRAWImage over that.
+        let curved = try GlobalContrastApplier().apply(
+            to: leveled, curve: GlobalContrastCurve(amount: 0.5)
+        )
+        #expect(curved.leveledImage == leveled.image)
+        #expect(curved.exposedImage == exposed.image)
+        #expect(curved.orientedImage == oriented.image)
+        #expect(curved.channelMixedImage == mixed.image)
+        #expect(
+            curved.source.source.source.source.source.source.source.source.source.mosaic
+                == decoded.mosaic
+        )
+        #expect(curved.url == decoded.url)
+
+        // Stage 10 mints DisplayPreviewProcessedRAWImage over that.
         let preview = try DisplayPreviewRenderer().render(
-            leveled,
+            curved,
             settings: DisplayRenderSettings(
                 rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
             )
         )
+        #expect(preview.toneCurvedImage == curved.image)
         #expect(preview.leveledImage == leveled.image)
         #expect(preview.exposedImage == exposed.image)
         #expect(preview.orientedImage == oriented.image)
         #expect(preview.channelMixedImage == mixed.image)
         #expect(preview.workingColorImage == working.image)
         #expect(
-            preview.source.source.source.source.source.source.source.source.source.mosaic
-                == decoded.mosaic
+            preview.source.source.source.source.source.source.source.source.source
+                .source.mosaic == decoded.mosaic
         )
         #expect(preview.url == decoded.url)
 
-        // The provenance record reaches back through all seven stages upstream
+        // The provenance record reaches back through all eight stages upstream
         // of the display one, and the display record reaches through it.
         #expect(preview.processing.mixSource == .redBlueSwap)
         #expect(preview.processing.whiteBalanceGains == gains)
@@ -154,6 +169,10 @@ struct ProcessedWrapperProvenanceTests {
         #expect(preview.processing.whitePoint == 0.95)
         #expect(preview.processing.levelsApplied)
         #expect(!preview.processing.preservesProportionalityToSceneRadiance)
+        #expect(preview.processing.contrastApplied)
+        #expect(preview.processing.toneCurveApplied)
+        #expect(preview.processing.contrastAmount == 0.5)
+        #expect(!preview.processing.preservesLinearLightEncoding)
         #expect(preview.processing.appliedOrientation == .rotated90Clockwise)
         #expect(preview.orientation == .rotated90Clockwise)
 

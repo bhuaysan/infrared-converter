@@ -355,10 +355,10 @@ struct WorkspaceCreativePresetTests {
         // says so — read from the encoded bytes rather than from the model's
         // own constant, so a bug that changed what is actually emitted would
         // still be caught.
-        #expect(PhotographProcessingState.currentSchemaVersion == 6)
+        #expect(PhotographProcessingState.currentSchemaVersion == 7)
         let data = try JSONEncoder().encode(saved)
         let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        #expect(object?["schemaVersion"] as? Int == 6)
+        #expect(object?["schemaVersion"] as? Int == 7)
 
         guard let adjustments = object?["adjustments"] as? [String: Any],
               let channelMix = adjustments["channelMix"] as? [String: Any]

@@ -89,6 +89,7 @@ import Observation
 /// channelMix     the creative infrared remix: identity, red/blue swap, matrix
 /// exposure       compensation in EV, applied as × 2^EV by its own stage
 /// levels         a black point and a white point, applied after exposure
+/// contrast       one global RGB tone curve, applied after the levels
 /// ```
 ///
 /// The profile is a **selection**, not an adjustment, and it is the other half
@@ -420,9 +421,9 @@ final class DocumentState {
 
         /// Everything this application owns about the photograph: the capture
         /// profile it is processed under, and the user's editing decisions —
-        /// white balance, orientation, channel mix, exposure and levels. What
-        /// the sidecar held when the file was opened, plus whatever has been
-        /// asked for since.
+        /// white balance, orientation, channel mix, exposure, levels and
+        /// contrast. What the sidecar held when the file was opened, plus
+        /// whatever has been asked for since.
         ///
         /// This is the **requested** state, and it is what the controls show.
         /// While a render is pending it is ahead of `owned`, whose preview —
@@ -1087,6 +1088,14 @@ final class DocumentState {
     var levelsAdjustment: UserLevelsAdjustment {
         guard case .decoded(let loaded) = status else { return .neutral }
         return loaded.adjustments.levels
+    }
+
+    /// The user's global contrast for the open file — the **requested**
+    /// amount, ahead of the rendered preview while a render is pending — or
+    /// `.neutral` when nothing is open.
+    var contrastAdjustment: UserContrastAdjustment {
+        guard case .decoded(let loaded) = status else { return .neutral }
+        return loaded.adjustments.contrast
     }
 
     /// The user's infrared white balance for the open file — the
@@ -1831,6 +1840,40 @@ final class DocumentState {
     /// levels never changed. It is itself a decision and is saved once it has
     /// rendered, and it leaves the other adjustments exactly as they were.
     func resetLevels() { setLevels(.neutral) }
+
+    // MARK: - Contrast adjustment
+
+    /// Chooses the global contrast and re-renders.
+    ///
+    /// As cheap as the levels: it is applied by the stage below them, so it
+    /// re-runs the mix, the orientation, the exposure, the levels and its own
+    /// curve and nothing above them. No decode, no normalisation, no white
+    /// balance, no demosaic, no camera-to-working conversion and no reduction.
+    ///
+    /// It goes through exactly the path the other five adjustments do: the
+    /// complete record is updated, persistence becomes `.pending`, and one
+    /// request goes to the coalescing renderer. A slider drag is a burst of
+    /// such calls; the renderer collapses it to the newest state, and only
+    /// that state can be installed or written. There is no timer, no debounce
+    /// and no contrast-specific queue here, deliberately.
+    ///
+    /// No arithmetic happens here either. The amount is already validated by
+    /// its type, and what it does to a pixel is `GlobalContrastCurve`'s
+    /// business.
+    ///
+    /// Asking for the contrast already in force does nothing at all.
+    func setContrast(_ contrast: UserContrastAdjustment) {
+        adjust { $0.contrast = contrast }
+    }
+
+    /// Returns the contrast to `0`, and changes nothing else.
+    ///
+    /// Exactly the neutral amount, whose exponent is `2^0 = 1` and whose curve
+    /// is therefore the identity over the whole extended domain — so the
+    /// downstream input becomes the one that would have been produced had the
+    /// contrast never changed. It is itself a decision and is saved once it
+    /// has rendered, and it leaves the other adjustments exactly as they were.
+    func resetContrast() { setContrast(.neutral) }
 
     // MARK: - White-balance adjustment
 

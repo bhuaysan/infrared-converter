@@ -32,18 +32,20 @@ struct DisplayPreviewRendererPolicyTests {
         )
     }
 
-    /// The same image, exposed and levelled, as the renderer now receives it.
-    /// Both identity stages hand the buffer back untouched, so at the defaults
-    /// these are the same numbers `spreadImage()` holds.
+    /// The same image, exposed, levelled and tone-curved, as the renderer now
+    /// receives it. All three identity stages hand the buffer back untouched,
+    /// so at the defaults these are the same numbers `spreadImage()` holds.
     static func spreadLeveled(
         processing: ImageOrientationProcessing? = nil,
         exposureEV: Double = 0,
         blackPoint: Double = 0,
-        whitePoint: Double = 1
-    ) throws -> LeveledLinearRGBImage {
+        whitePoint: Double = 1,
+        contrastAmount: Double = 0
+    ) throws -> ToneCurvedRGBImage {
         try DisplayPreviewTestData.develop(
             spreadImage(processing: processing),
-            exposureEV: exposureEV, blackPoint: blackPoint, whitePoint: whitePoint
+            exposureEV: exposureEV, blackPoint: blackPoint, whitePoint: whitePoint,
+            contrastAmount: contrastAmount
         )
     }
 
@@ -110,11 +112,11 @@ struct DisplayPreviewRendererPolicyTests {
 
         // The same probe value, once among dark neighbours and once among
         // bright ones.
-        let dark = DisplayPreviewTestData.leveledImage(
+        let dark = DisplayPreviewTestData.toneCurvedImage(
             width: 2, height: 1,
             values: [probe, 0.01, 0.01, 0.02, 0.01, 0.005]
         )
-        let bright = DisplayPreviewTestData.leveledImage(
+        let bright = DisplayPreviewTestData.toneCurvedImage(
             width: 2, height: 1,
             values: [probe, 0.99, 0.97, 0.95, 1.0, 0.98]
         )
@@ -168,7 +170,7 @@ struct DisplayPreviewRendererPolicyTests {
         ]
         for (green, blue) in companions {
             let rendered = try renderer.render(
-                DisplayPreviewTestData.leveledPixel(probe, green, blue), settings: settings
+                DisplayPreviewTestData.toneCurvedPixel(probe, green, blue), settings: settings
             )
             #expect(rendered.bytes[0] == expected, "companions \(green), \(blue)")
         }
@@ -238,14 +240,19 @@ struct DisplayPreviewRendererPolicyTests {
         #expect(!processing.sceneLinear)
         #expect(!processing.toneMappingApplied)
         #expect(!processing.automaticExposureApplied)
-        #expect(!processing.contrastApplied)
         #expect(!processing.saturationApplied)
         #expect(!processing.highlightReconstructionApplied)
         #expect(!processing.sharpeningApplied)
 
-        // What it did not do, but something upstream did: the orientation
-        // stage ran before this one, and this record forwards that rather
-        // than claiming it.
+        // What it did not do, but something upstream did: the contrast and
+        // orientation stages ran before this one, and this record forwards
+        // that rather than claiming it. `contrastApplied` is true even though
+        // the amount is neutral — the stage was traversed.
+        #expect(processing.contrastApplied)
+        #expect(processing.contrastAmount == 0)
+        #expect(!processing.histogramRead)
+        #expect(!processing.automaticContrastApplied)
+        #expect(!processing.localContrastApplied)
         #expect(processing.orientationApplied)
         #expect(processing.appliedOrientation == .upright)
         #expect(!processing.orientationSwappedDimensions)

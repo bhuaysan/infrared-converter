@@ -39,6 +39,13 @@ struct ProcessingCancellationTests {
         )
     }
 
+    static func toneCurved() -> ToneCurvedRGBImage {
+        let values = (0..<(rows * columns * 3)).map { Float($0) / 10_000 }
+        return DisplayPreviewTestData.toneCurvedImage(
+            width: columns, height: rows, values: values
+        )
+    }
+
     // MARK: - The default is unchanged behaviour
 
     @Test("A stage with no cancellation signal behaves exactly as before")
@@ -83,9 +90,15 @@ struct ProcessingCancellationTests {
         )
         #expect(levelsProbe.pollCount == 1 + Self.columns)
 
+        let contrastProbe = CancellationProbe()
+        let curved = try GlobalContrastApplier().apply(
+            to: leveled, curve: .neutral, cancellation: contrastProbe.cancellation
+        )
+        #expect(contrastProbe.pollCount == 1 + Self.columns)
+
         let rendererProbe = CancellationProbe()
         _ = try DisplayPreviewRenderer().render(
-            leveled,
+            curved,
             settings: DisplayPreviewTestData.settings,
             cancellation: rendererProbe.cancellation
         )
@@ -164,7 +177,7 @@ struct ProcessingCancellationTests {
         let probe = CancellationProbe(cancelAfterPolls: 1)
         #expect(throws: CancellationError.self) {
             try DisplayPreviewRenderer().render(
-                Self.leveled(),
+                Self.toneCurved(),
                 settings: DisplayPreviewTestData.settings,
                 cancellation: probe.cancellation
             )
@@ -177,7 +190,7 @@ struct ProcessingCancellationTests {
         let probe = CancellationProbe(cancelAfterPolls: 4)
         #expect(throws: CancellationError.self) {
             try DisplayPreviewRenderer().render(
-                Self.leveled(),
+                Self.toneCurved(),
                 settings: DisplayPreviewTestData.settings,
                 cancellation: probe.cancellation
             )
@@ -192,7 +205,7 @@ struct ProcessingCancellationTests {
         let probe = CancellationProbe(cancelAfterPolls: 5)
         let result = Result {
             try DisplayPreviewRenderer().render(
-                Self.leveled(),
+                Self.toneCurved(),
                 settings: DisplayPreviewTestData.settings,
                 cancellation: probe.cancellation
             )

@@ -27,6 +27,8 @@ import Foundation
 /// ExposedSceneLinearRGBImage
 ///     ↓  LinearLevelsApplier (adjustments.levels)
 /// LeveledLinearRGBImage                      ← linear-light, not scene-linear
+///     ↓  GlobalContrastApplier (adjustments.contrast)
+/// ToneCurvedRGBImage                         ← no longer linear-light
 ///     ↓  DisplayPreviewRenderer (hard clipping, sRGB, 8-bit)
 /// DisplayEncodedPreviewImage
 ///     ↓  DisplayPreviewCGImageAdapter
@@ -94,7 +96,8 @@ import Foundation
 ///                → RETAIN the pre-mix reduced preview
 ///
 /// render         retained pre-mix preview → channel mix → orientation
-///                → exposure → levels → display (range policy, encoding)
+///                → exposure → levels → contrast
+///                → display (range policy, encoding)
 /// ```
 ///
 /// Three phases rather than two, and the new line is the white balance. It sits
@@ -393,9 +396,11 @@ struct WorkspacePreviewPipeline {
     /// retained pre-mix preview
     ///   → IRChannelMixer      adjustments.channelMix
     ///   → ImageOrienter       the file's orientation + adjustments.orientation
+    ///   → SceneLinearExposer    adjustments.exposure
+    ///   → LinearLevelsApplier   adjustments.levels
+    ///   → GlobalContrastApplier adjustments.contrast
     ///   → DisplayPreviewRenderer
-    ///                         exposureEV = adjustments.exposure
-    ///                         range policy and encoding unchanged
+    ///                           range policy and encoding only
     /// ```
     ///
     /// The interactive half, and the only half any adjustment reruns.
@@ -420,9 +425,12 @@ struct WorkspacePreviewPipeline {
     /// precedes levels because they are different decisions: a gain and an
     /// affine remap, and folding them together would make each control change
     /// what the other one did. Colour, then geometry, then exposure, then
-    /// levels, then encoding.
+    /// levels, then encoding. Levels precede the contrast curve because the
+    /// curve's fixed points — `0`, `0.5` and `1` — mean nothing until
+    /// something has said where black and white are, so the curve comes last
+    /// of the adjustments and first before the destination.
     ///
-    /// All five stages poll `cancellation`, so a superseded re-render stops
+    /// All six stages poll `cancellation`, so a superseded re-render stops
     /// inside the pass rather than at the end of it. A cancelled call throws
     /// `CancellationError` and produces no preview; it is the caller's job to
     /// tell that apart from a stage refusing the image.
@@ -440,7 +448,8 @@ struct WorkspacePreviewPipeline {
     ///
     /// - Throws: `PreviewReductionError`, `IRProcessingError`,
     ///   `OrientationError`, `SceneLinearExposureError`, `LinearLevelsError`,
-    ///   `DisplayRenderingError`, or `CancellationError`.
+    ///   `GlobalContrastError`, `DisplayRenderingError`, or
+    ///   `CancellationError`.
     func render(
         _ source: Source,
         captureProfile: IRCaptureProfile,
@@ -492,8 +501,17 @@ struct WorkspacePreviewPipeline {
             cancellation: cancellation
         )
 
+        // The first nonlinear operation in the pipeline, and the last stage
+        // before the destination. The export path calls the identical one with
+        // the identical value.
+        let curved = try GlobalContrastApplier().apply(
+            to: leveled,
+            curve: GlobalContrastCurve(adjustments.contrast),
+            cancellation: cancellation
+        )
+
         let encoded = try DisplayPreviewRenderer().render(
-            leveled,
+            curved,
             settings: Self.displaySettings,
             cancellation: cancellation
         )
@@ -511,6 +529,7 @@ struct WorkspacePreviewPipeline {
             channelMixAdjustment: adjustments.channelMix,
             exposureAdjustment: adjustments.exposure,
             levelsAdjustment: adjustments.levels,
+            contrastAdjustment: adjustments.contrast,
             resolution: source.resolution,
             sourcePixelWidth: source.preview.width,
             sourcePixelHeight: source.preview.height,
@@ -770,6 +789,13 @@ struct WorkspacePreview {
     /// so the two always hold the same pair. Two facts, for the same reason
     /// `exposureAdjustment` is two.
     let levelsAdjustment: UserLevelsAdjustment
+    /// The global contrast the user asked for, as the canonical adjustment.
+    ///
+    /// The curve that was **rendered** is `processing.contrastCurve` — see
+    /// `renderedContrastCurve` — and the pipeline passes one to the other
+    /// unchanged, so the two always hold the same amount. Two facts, for the
+    /// same reason `levelsAdjustment` is two.
+    let contrastAdjustment: UserContrastAdjustment
     /// What resolution these pixels are, what full resolution they were
     /// reduced from, by which policy and by which method.
     ///
@@ -810,6 +836,14 @@ struct WorkspacePreview {
     /// The levels the levels stage actually applied, from the rendering's own
     /// provenance.
     var renderedLevels: LinearLevels { processing.levels }
+    /// The curve the contrast stage actually applied, from the rendering's own
+    /// provenance. What the inspector shows.
+    var renderedContrastCurve: GlobalContrastCurve { processing.contrastCurve }
+    /// Whether the rendered curve left the values linear-light encoded — true
+    /// exactly when the contrast amount is `0`.
+    var preservesLinearLightEncoding: Bool {
+        processing.preservesLinearLightEncoding
+    }
     /// Whether the rendered levels left the values proportional to scene
     /// radiance — true exactly when the black point is `0`.
     var preservesProportionalityToSceneRadiance: Bool {

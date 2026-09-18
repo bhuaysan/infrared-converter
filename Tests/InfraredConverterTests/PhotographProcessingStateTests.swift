@@ -32,7 +32,7 @@ struct PhotographProcessingStateTests {
         #expect(state.captureProfile == .builtinUncalibrated)
         #expect(state.adjustments == .none)
         #expect(state.isDefault)
-        #expect(PhotographProcessingState.currentSchemaVersion == 6)
+        #expect(PhotographProcessingState.currentSchemaVersion == 7)
     }
 
     /// The document-level default is both halves, and either one can answer no.
@@ -62,7 +62,7 @@ struct PhotographProcessingStateTests {
                     adjustments: ImageAdjustments(orientation: .quarterTurnRight)
                 )
             )
-                == #"{"adjustments":{"channelMix":{"kind":"identity"},"exposureEV":0,"levels":{"blackPoint":0,"whitePoint":1},"orientation":"rotate90Clockwise","whiteBalance":{"kind":"defaultNeutralPatch"}},"captureProfileID":"builtin.uncalibrated","schemaVersion":6}"#
+                == #"{"adjustments":{"channelMix":{"kind":"identity"},"contrast":0,"exposureEV":0,"levels":{"blackPoint":0,"whitePoint":1},"orientation":"rotate90Clockwise","whiteBalance":{"kind":"defaultNeutralPatch"}},"captureProfileID":"builtin.uncalibrated","schemaVersion":7}"#
         )
 
         // The profile is a bare string: matching is exact and its parts are a
@@ -77,7 +77,7 @@ struct PhotographProcessingStateTests {
                     )
                 )
             )
-                == #"{"adjustments":{"channelMix":{"kind":"redBlueSwap"},"exposureEV":1.25,"levels":{"blackPoint":0,"whitePoint":1},"orientation":"none","whiteBalance":{"kind":"defaultNeutralPatch"}},"captureProfileID":"user.epl3-720nm","schemaVersion":6}"#
+                == #"{"adjustments":{"channelMix":{"kind":"redBlueSwap"},"contrast":0,"exposureEV":1.25,"levels":{"blackPoint":0,"whitePoint":1},"orientation":"none","whiteBalance":{"kind":"defaultNeutralPatch"}},"captureProfileID":"user.epl3-720nm","schemaVersion":7}"#
         )
 
         // A built-in mix's nine numbers are derived from its token and are
@@ -319,7 +319,7 @@ struct PhotographProcessingStateTests {
         let decoded = try Self.decode(json)
         #expect(
             try Self.encoded(decoded)
-                == #"{"adjustments":{"channelMix":{"kind":"identity"},"exposureEV":0,"levels":{"blackPoint":0,"whitePoint":1},"orientation":"rotate180","whiteBalance":{"kind":"defaultNeutralPatch"}},"captureProfileID":"builtin.uncalibrated","schemaVersion":6}"#
+                == #"{"adjustments":{"channelMix":{"kind":"identity"},"contrast":0,"exposureEV":0,"levels":{"blackPoint":0,"whitePoint":1},"orientation":"rotate180","whiteBalance":{"kind":"defaultNeutralPatch"}},"captureProfileID":"builtin.uncalibrated","schemaVersion":7}"#
         )
         let reread = try JSONDecoder().decode(
             PhotographProcessingState.self, from: try Self.encoder.encode(decoded)
@@ -496,12 +496,12 @@ struct PhotographProcessingStateTests {
 
     @Test(
         "A newer schema version is refused rather than partly applied",
-        arguments: [7, 8, 99]
+        arguments: [8, 9, 99]
     )
     func aNewerSchemaVersionIsRefused(version: Int) {
         #expect(
             throws: PhotographProcessingStateError.unsupportedSchemaVersion(
-                found: version, supported: 6
+                found: version, supported: 7
             )
         ) {
             try Self.decode(
@@ -519,7 +519,7 @@ struct PhotographProcessingStateTests {
     func anImpossibleSchemaVersionIsRefused(version: Int) {
         #expect(
             throws: PhotographProcessingStateError.unsupportedSchemaVersion(
-                found: version, supported: 6
+                found: version, supported: 7
             )
         ) {
             try Self.decode(#"{"schemaVersion":\#(version),"orientation":"none"}"#)
@@ -651,13 +651,13 @@ struct PhotographProcessingStateTests {
     @Test("The record's refusals carry readable reasons")
     func theRefusalsAreInformative() {
         let version = PhotographProcessingStateError.unsupportedSchemaVersion(
-            found: 9, supported: 6
+            found: 10, supported: 7
         )
         #expect(version.errorDescription?.isEmpty == false)
-        #expect(version.failureReason?.contains("9") == true)
+        #expect(version.failureReason?.contains("10") == true)
 
         let older = PhotographProcessingStateError.unsupportedSchemaVersion(
-            found: 0, supported: 6
+            found: 0, supported: 7
         )
         #expect(older.failureReason?.contains("no version") == true)
 

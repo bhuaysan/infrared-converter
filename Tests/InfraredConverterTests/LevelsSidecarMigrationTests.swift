@@ -119,12 +119,12 @@ struct LevelsSidecarMigrationTests {
     }
 
     @Test(
-        "A migrated record is written back at version 6, with its neutral levels",
+        "A migrated record is written back at the current version, with its neutral levels",
         arguments: LevelsSidecarMigrationTests.historical
     )
     func aMigratedRecordIsWrittenAtVersionSix(record: (version: Int, json: String)) throws {
         let written = try Self.encoded(try Self.decode(record.json))
-        #expect(written.contains(#""schemaVersion":6"#))
+        #expect(written.contains(#""schemaVersion":7"#))
         #expect(written.contains(#""levels":{"blackPoint":0,"whitePoint":1}"#))
         // Reading rewrote nothing: the migration happened in memory, and this
         // is the first time the newer shape exists at all.
@@ -272,13 +272,13 @@ struct LevelsSidecarMigrationTests {
     // MARK: - Versions this build does not read
 
     @Test(
-        "A version above 6 is refused outright, never read around",
-        arguments: [7, 8, 42]
+        "A version above the current one is refused outright, never read around",
+        arguments: [8, 9, 42]
     )
     func aNewerVersionIsRefused(version: Int) {
         #expect(
             throws: PhotographProcessingStateError.unsupportedSchemaVersion(
-                found: version, supported: 6
+                found: version, supported: 7
             )
         ) {
             try Self.decode(
@@ -294,7 +294,7 @@ struct LevelsSidecarMigrationTests {
 
     @Test("Six is the version this build writes, and the highest it reads")
     func sixIsTheCurrentVersion() {
-        #expect(PhotographProcessingState.currentSchemaVersion == 6)
+        #expect(PhotographProcessingState.currentSchemaVersion == 7)
         #expect(
             PhotographProcessingState.PersistedSchemaVersion.current
                 == PhotographProcessingState.PersistedSchemaVersion.allCases.max(by: {
@@ -352,7 +352,10 @@ struct LevelsSidecarMigrationTests {
             to: oriented, exposure: SceneLinearExposure(migrated.adjustments.exposure)
         )
         let preMilestone = try DisplayPreviewRenderer().render(
-            try LinearLevelsApplier().apply(to: exposed, levels: .neutral),
+            try GlobalContrastApplier().apply(
+                to: try LinearLevelsApplier().apply(to: exposed, levels: .neutral),
+                curve: .neutral
+            ),
             settings: WorkspacePreviewPipeline.displaySettings
         )
 

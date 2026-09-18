@@ -270,7 +270,7 @@ struct JSONSidecarPhotographProcessingStoreTests {
             // under "adjustments", with the state it migrated to.
             try Self.store.save(loaded, for: sandbox.raw)
             let text = try sandbox.sidecarText()
-            #expect(text.contains("\"schemaVersion\" : 6"))
+            #expect(text.contains("\"schemaVersion\" : 7"))
             #expect(text.contains("\"levels\""))
             #expect(text.contains("\"blackPoint\" : 0"))
             #expect(text.contains("\"whitePoint\" : 1"))
@@ -286,7 +286,7 @@ struct JSONSidecarPhotographProcessingStoreTests {
 
     // MARK: - Schema versions 3 and 4, through a real file
 
-    @Test("A version 2 sidecar loads at 0 EV and the default patch, and saves as version 6")
+    @Test("A version 2 sidecar loads at 0 EV and the default patch, and saves as version 7")
     func aVersionTwoSidecarMigrates() throws {
         try Self.withSandbox { sandbox in
             let original = """
@@ -305,7 +305,7 @@ struct JSONSidecarPhotographProcessingStoreTests {
 
             try Self.store.save(loaded, for: sandbox.raw)
             let text = try sandbox.sidecarText()
-            #expect(text.contains("\"schemaVersion\" : 6"))
+            #expect(text.contains("\"schemaVersion\" : 7"))
             #expect(text.contains("\"levels\""))
             #expect(text.contains("\"blackPoint\" : 0"))
             #expect(text.contains("\"whitePoint\" : 1"))
@@ -822,7 +822,7 @@ struct JSONSidecarPhotographProcessingStoreTests {
 
     /// The other half of the same story: once that migrated value is actually
     /// saved, the file catches up to the current, nested wire format.
-    @Test("Saving a migrated version 4 state writes the version 6 nested shape")
+    @Test("Saving a migrated version 4 state writes the version 7 nested shape")
     func savingAMigratedVersionFourStateWritesVersionFive() throws {
         try Self.withSandbox { sandbox in
             try sandbox.writeSidecar(
@@ -840,7 +840,7 @@ struct JSONSidecarPhotographProcessingStoreTests {
 
             try Self.store.save(loaded, for: sandbox.raw)
             let text = try sandbox.sidecarText()
-            #expect(text.contains("\"schemaVersion\" : 6"))
+            #expect(text.contains("\"schemaVersion\" : 7"))
             #expect(text.contains("\"levels\""))
             #expect(text.contains("\"blackPoint\" : 0"))
             #expect(text.contains("\"whitePoint\" : 1"))

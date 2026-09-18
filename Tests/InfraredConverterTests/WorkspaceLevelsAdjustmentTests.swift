@@ -543,7 +543,7 @@ struct WorkspaceLevelsAdjustmentTests {
                 with: Data(contentsOf: JSONSidecarPhotographProcessingStore.sidecarURL(for: raw))
             ) as? [String: Any]
         )
-        #expect(object["schemaVersion"] as? Int == 6)
+        #expect(object["schemaVersion"] as? Int == 7)
         let adjustments = try #require(object["adjustments"] as? [String: Any])
         let levels = try #require(adjustments["levels"] as? [String: Any])
         #expect(levels["blackPoint"] as? Double == 0.05)

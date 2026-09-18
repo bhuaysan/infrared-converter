@@ -13,7 +13,8 @@ import Foundation
 ///
 /// All photograph-local adjustments live in this one record — today the
 /// orientation correction, the creative channel mix, the exposure
-/// compensation, the infrared white balance and the black and white points —
+/// compensation, the infrared white balance, the black and white points and
+/// the global contrast —
 /// and this is why the model was a record from the first one. Every adjustment
 /// that follows, further tone settings and crop among them, belongs beside
 /// them rather than as another unrelated field, and the set has to be
@@ -134,6 +135,22 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// See `docs/decisions/0026-linear-levels.md`.
     public var levels: UserLevelsAdjustment
 
+    /// The global contrast the user chose. `.neutral` is `0`, whose curve
+    /// exponent is `2^0 = 1` — mathematically the identity.
+    ///
+    /// Applied as `x^k / (x^k + (1−x)^k)` by `GlobalContrastApplier`, **after**
+    /// the levels and **before** whichever destination range policy follows.
+    /// The first deliberately **nonlinear** operation in the pipeline: after
+    /// it the values are still working-space RGB, but they are no longer
+    /// linear-light encoded, which is why the stage's output has a type of its
+    /// own.
+    ///
+    /// It is a global RGB tone curve and nothing more: not luminance contrast,
+    /// not local contrast, not clarity, not a gamma slider, not automatic, and
+    /// not per-channel. Nothing derives it from the image — no histogram is
+    /// built or read. See `docs/decisions/0027-global-contrast-tone-curve.md`.
+    public var contrast: UserContrastAdjustment
+
     /// Builds a record of the user's decisions at this build's schema version.
     ///
     /// There is deliberately no version parameter. See `schemaVersion`.
@@ -142,13 +159,15 @@ public struct ImageAdjustments: Equatable, Sendable {
         channelMix: UserChannelMixAdjustment = .identity,
         exposure: UserExposureAdjustment = .neutral,
         whiteBalance: UserWhiteBalanceAdjustment = .defaultNeutralPatch,
-        levels: UserLevelsAdjustment = .neutral
+        levels: UserLevelsAdjustment = .neutral,
+        contrast: UserContrastAdjustment = .neutral
     ) {
         self.orientation = orientation
         self.channelMix = channelMix
         self.exposure = exposure
         self.whiteBalance = whiteBalance
         self.levels = levels
+        self.contrast = contrast
     }
 
     /// A freshly opened file's adjustments: the user has decided nothing.
@@ -168,6 +187,7 @@ public struct ImageAdjustments: Equatable, Sendable {
     /// exposure       exactly 0 EV
     /// whiteBalance   the application's default centred neutral patch
     /// levels         black 0, white 1
+    /// contrast       exactly 0
     /// ```
     ///
     /// ## It replaced `isIdentity`, and the difference matters
@@ -221,5 +241,6 @@ public struct ImageAdjustments: Equatable, Sendable {
             && exposure == .neutral
             && whiteBalance == .defaultNeutralPatch
             && levels == .neutral
+            && contrast == .neutral
     }
 }

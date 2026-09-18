@@ -26,11 +26,10 @@ import Foundation
 public struct DisplayPreviewProcessing: Equatable, Sendable {
     /// The exact settings that were applied: range policy and encoding.
     public let settings: DisplayRenderSettings
-    /// Provenance of the `LeveledLinearRGBImage` this stage consumed, carried
-    /// forward so the whole chain from unpacked samples to here is readable
-    /// from one record — including the levels, the exposure and the
-    /// orientation, all of which happened upstream and not here.
-    public let levelsProcessing: LinearLevelsProcessing
+    /// Provenance of the `ToneCurvedRGBImage` this stage consumed, carried
+    /// whole so that an encoded preview's record is the entire history of its
+    /// pixels rather than only its last step.
+    public let contrastProcessing: GlobalContrastProcessing
     /// How many **components** (not pixels) were below `0` after exposure and
     /// were replaced by `0`.
     ///
@@ -59,14 +58,16 @@ public struct DisplayPreviewProcessing: Equatable, Sendable {
     /// No tone mapping of any kind: no Reinhard, no filmic curve, no shoulder
     /// or toe, no local operator. Clipping is not tone mapping.
     public let toneMappingApplied: Bool = false
-    /// No automatic exposure and no automatic levels. No histogram was read,
-    /// no mean or percentile was computed, and nothing was normalised to a
-    /// maximum. The exposure and the levels are the ones a person chose, and
-    /// both were applied upstream.
+    /// No automatic exposure, no automatic levels and no automatic contrast.
+    /// No histogram was read, no mean or percentile was computed, and nothing
+    /// was normalised to a maximum. The exposure, the levels and the contrast
+    /// are the ones a person chose, and all three were applied upstream.
+    ///
+    /// `contrastApplied` is deliberately **not** here any more: a contrast
+    /// curve is now a real stage, and this record forwards what that stage did
+    /// rather than claiming it did nothing.
     public let automaticExposureApplied: Bool = false
     public let automaticLevelsApplied: Bool = false
-    /// No contrast adjustment.
-    public let contrastApplied: Bool = false
     /// No saturation or vibrance adjustment.
     public let saturationApplied: Bool = false
     /// No highlight reconstruction. Clipped highlights were destroyed, not
@@ -77,6 +78,32 @@ public struct DisplayPreviewProcessing: Equatable, Sendable {
     /// Exposure was applied — **upstream**, by `SceneLinearExposer`, not here.
     /// `true` even at `0 EV`: traversing that stage and asking for `×1` is a
     /// different fact from never applying exposure at all.
+    /// Provenance of the levelled image the contrast stage consumed.
+    /// Forwarded rather than stored a second time.
+    public var levelsProcessing: LinearLevelsProcessing {
+        contrastProcessing.levelsProcessing
+    }
+
+    /// The contrast curve that was applied upstream, by
+    /// `GlobalContrastApplier`. `true` even at amount `0`.
+    public var contrastApplied: Bool { contrastProcessing.contrastApplied }
+    public var toneCurveApplied: Bool { contrastProcessing.toneCurveApplied }
+    /// The curve that was applied.
+    public var contrastCurve: GlobalContrastCurve { contrastProcessing.curve }
+    public var contrastAmount: Double { contrastProcessing.contrastAmount }
+    public var contrastExponent: Double { contrastProcessing.contrastExponent }
+    /// Whether that curve happens to leave the values linear-light encoded —
+    /// true exactly when the amount is `0`.
+    public var preservesLinearLightEncoding: Bool {
+        contrastProcessing.preservesLinearLightEncoding
+    }
+    /// Nothing about the curve was derived from the image.
+    public var histogramRead: Bool { contrastProcessing.histogramRead }
+    public var automaticContrastApplied: Bool {
+        contrastProcessing.automaticContrastApplied
+    }
+    public var localContrastApplied: Bool { contrastProcessing.localContrastApplied }
+
     public var exposureApplied: Bool { levelsProcessing.exposureApplied }
     /// Levels were applied — **upstream**, by `LinearLevelsApplier`, not here.
     /// `true` even at black `0` / white `1`, for the same reason.
@@ -190,12 +217,12 @@ public struct DisplayPreviewProcessing: Equatable, Sendable {
     /// module-internal.
     public init(
         settings: DisplayRenderSettings,
-        levelsProcessing: LinearLevelsProcessing,
+        contrastProcessing: GlobalContrastProcessing,
         clippedLowSampleCount: Int,
         clippedHighSampleCount: Int
     ) {
         self.settings = settings
-        self.levelsProcessing = levelsProcessing
+        self.contrastProcessing = contrastProcessing
         self.clippedLowSampleCount = clippedLowSampleCount
         self.clippedHighSampleCount = clippedHighSampleCount
     }
@@ -469,13 +496,13 @@ public struct DisplayPreviewProcessedRAWImage: Sendable {
     /// with the unoriented channel-mixed image on its own `.source`, the
     /// pre-mix working image below that, and the camera-native image and the
     /// mosaics below that again.
-    public let source: LeveledProcessedRAWImage
+    public let source: ToneCurvedProcessedRAWImage
     /// The display-encoded preview.
     public let image: DisplayEncodedPreviewImage
 
     /// Module-internal, deliberately: only `DisplayPreviewRenderer` pairs a
     /// scene-linear state with the preview it rendered from it.
-    init(source: LeveledProcessedRAWImage, image: DisplayEncodedPreviewImage) {
+    init(source: ToneCurvedProcessedRAWImage, image: DisplayEncodedPreviewImage) {
         self.source = source
         self.image = image
     }
@@ -483,7 +510,8 @@ public struct DisplayPreviewProcessedRAWImage: Sendable {
     /// The levelled linear-light image the settings were applied to,
     /// untouched by rendering. Changing the range policy or the encoding must
     /// always start here.
-    public var leveledImage: LeveledLinearRGBImage { source.image }
+    public var toneCurvedImage: ToneCurvedRGBImage { source.image }
+    public var leveledImage: LeveledLinearRGBImage { source.leveledImage }
     /// The exposed, un-levelled image. Changing the levels starts here.
     public var exposedImage: ExposedSceneLinearRGBImage { source.exposedImage }
     /// The oriented, un-exposed image. Changing the exposure starts here.

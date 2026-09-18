@@ -185,6 +185,54 @@ enum DisplayPreviewTestData {
         leveledImage(width: 1, height: 1, values: [red, green, blue])
     }
 
+    /// Provenance for a tone-curved image — what the display renderer now
+    /// consumes — over the whole upstream chain.
+    static func contrastProcessing(
+        contrastAmount: Double = 0,
+        blackPoint: Double = 0,
+        whitePoint: Double = 1,
+        exposureEV: Double = 0,
+        orientation: RAWImageOrientation = .upright,
+        mix: IRChannelMix = .identity,
+        transform: RAWCameraToWorkingColorTransform = .sensorRGBIdentityFalseColor,
+        gains: RAWWhiteBalanceGains = RAWWhiteBalanceGains(
+            plane0: 2, plane1: 1, plane2: 3, plane3: 1
+        ),
+        whiteLevel: UInt32 = 4095
+    ) -> GlobalContrastProcessing {
+        GlobalContrastProcessing(
+            curve: GlobalContrastCurve(amount: contrastAmount),
+            levelsProcessing: levelsProcessing(
+                blackPoint: blackPoint, whitePoint: whitePoint,
+                exposureEV: exposureEV, orientation: orientation, mix: mix,
+                transform: transform, gains: gains, whiteLevel: whiteLevel
+            )
+        )
+    }
+
+    /// A tone-curved image from interleaved `R G B` values: what the display
+    /// renderer actually consumes.
+    static func toneCurvedImage(
+        width: Int,
+        height: Int,
+        values: [Float],
+        processing: GlobalContrastProcessing? = nil
+    ) -> ToneCurvedRGBImage {
+        ToneCurvedRGBImage(
+            width: width,
+            height: height,
+            values: values,
+            processing: processing ?? contrastProcessing()
+        )
+    }
+
+    /// One tone-curved pixel, for hand-computable arithmetic.
+    static func toneCurvedPixel(
+        _ red: Float, _ green: Float, _ blue: Float
+    ) -> ToneCurvedRGBImage {
+        toneCurvedImage(width: 1, height: 1, values: [red, green, blue])
+    }
+
     /// The two adjustment stages the display renderer no longer performs, run
     /// by the **production** stages.
     ///
@@ -192,21 +240,26 @@ enum DisplayPreviewTestData {
     /// quantisation can still be written in terms of a scene-linear input and
     /// an exposure, and so that what it feeds the renderer is what the
     /// workspace would feed it — not a hand-assembled buffer that happens to
-    /// look similar. Nothing here reimplements exposure or levels.
+    /// look similar. Nothing here reimplements exposure, levels or the curve.
     static func develop(
         _ image: OrientedSceneLinearRGBImage,
         exposureEV: Double = 0,
         blackPoint: Double = 0,
         whitePoint: Double = 1,
+        contrastAmount: Double = 0,
         cancellation: ProcessingCancellation = .none
-    ) throws -> LeveledLinearRGBImage {
-        try LinearLevelsApplier().apply(
-            to: SceneLinearExposer().apply(
-                to: image,
-                exposure: SceneLinearExposure(ev: exposureEV),
+    ) throws -> ToneCurvedRGBImage {
+        try GlobalContrastApplier().apply(
+            to: LinearLevelsApplier().apply(
+                to: SceneLinearExposer().apply(
+                    to: image,
+                    exposure: SceneLinearExposure(ev: exposureEV),
+                    cancellation: cancellation
+                ),
+                levels: LinearLevels(blackPoint: blackPoint, whitePoint: whitePoint),
                 cancellation: cancellation
             ),
-            levels: LinearLevels(blackPoint: blackPoint, whitePoint: whitePoint),
+            curve: GlobalContrastCurve(amount: contrastAmount),
             cancellation: cancellation
         )
     }
@@ -216,11 +269,13 @@ enum DisplayPreviewTestData {
         _ red: Float, _ green: Float, _ blue: Float,
         exposureEV: Double = 0,
         blackPoint: Double = 0,
-        whitePoint: Double = 1
-    ) throws -> LeveledLinearRGBImage {
+        whitePoint: Double = 1,
+        contrastAmount: Double = 0
+    ) throws -> ToneCurvedRGBImage {
         try develop(
             pixel(red, green, blue),
-            exposureEV: exposureEV, blackPoint: blackPoint, whitePoint: whitePoint
+            exposureEV: exposureEV, blackPoint: blackPoint, whitePoint: whitePoint,
+            contrastAmount: contrastAmount
         )
     }
 
@@ -231,20 +286,22 @@ enum DisplayPreviewTestData {
         rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
     )
 
-    /// The interactive render chain's last three stages, run in order by the
-    /// **production** types: exposure, levels, then display encoding.
+    /// The interactive render chain's last four stages, run in order by the
+    /// **production** types: exposure, levels, contrast, then display
+    /// encoding.
     ///
-    /// The display renderer no longer applies exposure — `SceneLinearExposer`
-    /// and `LinearLevelsApplier` are stages of their own, between the
-    /// orientation and the encoder — so a suite whose subject is clipping,
-    /// encoding or quantisation needs all three to get from a scene-linear
-    /// input to a preview. This composes them exactly as
+    /// The display renderer no longer applies exposure — `SceneLinearExposer`,
+    /// `LinearLevelsApplier` and `GlobalContrastApplier` are stages of their
+    /// own, between the orientation and the encoder — so a suite whose subject
+    /// is clipping, encoding or quantisation needs all four to get from a
+    /// scene-linear input to a preview. This composes them exactly as
     /// `WorkspacePreviewPipeline.render` does, and reimplements none of them.
     static func renderPreview(
         _ image: OrientedSceneLinearRGBImage,
         exposureEV: Double = 0,
         blackPoint: Double = 0,
         whitePoint: Double = 1,
+        contrastAmount: Double = 0,
         cancellation: ProcessingCancellation = .none
     ) throws -> DisplayEncodedPreviewImage {
         try DisplayPreviewRenderer().render(
@@ -253,6 +310,7 @@ enum DisplayPreviewTestData {
                 exposureEV: exposureEV,
                 blackPoint: blackPoint,
                 whitePoint: whitePoint,
+                contrastAmount: contrastAmount,
                 cancellation: cancellation
             ),
             settings: settings,

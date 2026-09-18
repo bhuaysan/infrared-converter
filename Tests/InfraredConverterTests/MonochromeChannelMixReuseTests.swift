@@ -32,7 +32,7 @@ struct MonochromeChannelMixReuseTests {
     /// would make every older client refuse files it can read perfectly well.
     @Test("The photograph sidecar schema is still version 5")
     func theSidecarSchemaIsUnchanged() {
-        #expect(PhotographProcessingState.currentSchemaVersion == 6)
+        #expect(PhotographProcessingState.currentSchemaVersion == 7)
     }
 
     /// The exact persisted shape: the existing `matrix` token and nine
@@ -47,7 +47,7 @@ struct MonochromeChannelMixReuseTests {
 
         #expect(json.contains("\"kind\":\"matrix\""))
         #expect(json.contains("[1.5,-0.25,0.125,1.5,-0.25,0.125,1.5,-0.25,0.125]"))
-        #expect(json.contains("\"schemaVersion\":6"))
+        #expect(json.contains("\"schemaVersion\":7"))
 
         // No monochrome field, key or token anywhere in the record — in any
         // casing a field name could have taken.

@@ -1,6 +1,6 @@
 import Foundation
 
-/// The display boundary: `LeveledLinearRGBImage` →
+/// The display boundary: `ToneCurvedRGBImage` →
 /// `DisplayEncodedPreviewImage`, by hard display-range clipping, the sRGB
 /// transfer function and deterministic quantisation.
 ///
@@ -23,7 +23,7 @@ import Foundation
 ///       ↓
 /// LinearLevelsApplier            (x − black) / (white − black) — ADR 0026
 ///       ↓
-/// LeveledLinearRGBImage          linear-light, no longer scene-linear
+/// ToneCurvedRGBImage             tone-curved, no longer linear-light
 ///       │
 ///       │  explicit DisplayRenderSettings
 ///       ↓
@@ -78,7 +78,7 @@ import Foundation
 /// subtracted an offset. That changes nothing about this stage's arithmetic —
 /// clipping and a transfer function care about the range, not about
 /// proportionality to radiance — but it is why the parameter is a
-/// `LeveledLinearRGBImage` and not an `OrientedSceneLinearRGBImage`.
+/// `ToneCurvedRGBImage` and not an `OrientedSceneLinearRGBImage`.
 ///
 /// What the stage does **not** assume is that the values are good. Whether
 /// they mean anything colourimetrically for an infrared capture is the
@@ -151,7 +151,7 @@ public struct DisplayPreviewRenderer: Sendable {
     ///   was superseded. The two are deliberately distinct types: one says the
     ///   image could not be encoded, the other says nobody wants it.
     public func render(
-        _ image: LeveledLinearRGBImage,
+        _ image: ToneCurvedRGBImage,
         settings: DisplayRenderSettings,
         cancellation: ProcessingCancellation = .none
     ) throws -> DisplayEncodedPreviewImage {
@@ -268,7 +268,7 @@ public struct DisplayPreviewRenderer: Sendable {
             bytes: bytes,
             processing: DisplayPreviewProcessing(
                 settings: settings,
-                levelsProcessing: image.processing,
+                contrastProcessing: image.processing,
                 clippedLowSampleCount: clippedLow,
                 clippedHighSampleCount: clippedHigh
             )
@@ -283,7 +283,7 @@ public struct DisplayPreviewRenderer: Sendable {
     /// carries everything needed to restart from any upstream stage, without
     /// converting, demosaicing or decoding again.
     public func render(
-        _ processed: LeveledProcessedRAWImage,
+        _ processed: ToneCurvedProcessedRAWImage,
         settings: DisplayRenderSettings,
         cancellation: ProcessingCancellation = .none
     ) throws -> DisplayPreviewProcessedRAWImage {
@@ -297,7 +297,7 @@ public struct DisplayPreviewRenderer: Sendable {
     /// scene-linear image it was produced from.
     ///
     /// Previews never compound: new settings are applied to the
-    /// `LeveledLinearRGBImage`, never to the already-encoded bytes. That is
+    /// `ToneCurvedRGBImage`, never to the already-encoded bytes. That is
     /// structural — this reaches through `previous.source` and never touches
     /// `previous.image`. Re-rendering an encoded preview would apply the
     /// transfer function twice, compound quantisation, and be unable to

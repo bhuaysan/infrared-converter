@@ -258,7 +258,11 @@ struct FullResolutionExportLevelsTests {
         #expect(rendered.whitePoint == 1.2)
         #expect(rendered.levels == LinearLevels(blackPoint: 0.05, whitePoint: 1.2))
         #expect(rendered.image.processing.levelsApplied)
-        #expect(rendered.image.processing.linearLightEncoded)
+        // The rendered image is now the contrast stage's output, and a tone
+        // curve has been evaluated on it — so it makes no linear-light claim.
+        // The levels stage's own record, one link upstream, still does.
+        #expect(!rendered.image.processing.linearLightEncoded)
+        #expect(rendered.image.processing.levelsProcessing.linearLightEncoded)
         // Not scene-linear any more, and the record says so rather than
         // leaving it to be inferred from the black point.
         #expect(!rendered.image.processing.sceneLinear)
@@ -305,6 +309,7 @@ struct FullResolutionExportLevelsTests {
             case .orientation: return "orientation"
             case .exposure: return "exposure"
             case .levels: return "levels"
+            case .contrast: return "contrast"
             }
         }
         #expect(describe(.levels) == "levels")
@@ -316,19 +321,22 @@ struct FullResolutionExportLevelsTests {
     /// pre-destination value**, before either quantisation can hide a
     /// difference.
     ///
-    /// Both encoders take a `LeveledLinearRGBImage`. Building one and handing
-    /// it to each in turn is not a comparison of two pipelines but a
-    /// comparison of two destinations, which is exactly what the architecture
-    /// claims they are.
+    /// Both encoders take a `ToneCurvedRGBImage`. Building one and handing it
+    /// to each in turn is not a comparison of two pipelines but a comparison
+    /// of two destinations, which is exactly what the architecture claims they
+    /// are.
     @Test("Both destinations consume the same levelled value, and only encode it differently")
     func bothDestinationsShareTheLevelledValue() throws {
         let values: [Float] = [-0.25, 0, 0.125, 0.5, 0.9, 1, 1.5, 0.25, 0.75]
-        let levelled = try LinearLevelsApplier().apply(
-            to: try SceneLinearExposer().apply(
-                to: DisplayPreviewTestData.image(width: 3, height: 1, values: values),
-                exposure: SceneLinearExposure(ev: 0.5)
+        let levelled = try GlobalContrastApplier().apply(
+            to: try LinearLevelsApplier().apply(
+                to: try SceneLinearExposer().apply(
+                    to: DisplayPreviewTestData.image(width: 3, height: 1, values: values),
+                    exposure: SceneLinearExposure(ev: 0.5)
+                ),
+                levels: LinearLevels(blackPoint: 0.1, whitePoint: 0.9)
             ),
-            levels: LinearLevels(blackPoint: 0.1, whitePoint: 0.9)
+            curve: .neutral
         )
 
         let preview = try DisplayPreviewRenderer().render(

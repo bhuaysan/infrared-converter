@@ -116,28 +116,28 @@ struct DisplayPreviewRendererTests {
 
         // Below zero and zero produce the same byte, and it is 0.
         let negative = try renderer.render(
-            DisplayPreviewTestData.leveledPixel(-5, -0.001, -0.0), settings: settings
+            DisplayPreviewTestData.toneCurvedPixel(-5, -0.001, -0.0), settings: settings
         )
         #expect(Array(negative.bytes) == [0, 0, 0])
         let zero = try renderer.render(
-            DisplayPreviewTestData.leveledPixel(0, 0, 0), settings: settings
+            DisplayPreviewTestData.toneCurvedPixel(0, 0, 0), settings: settings
         )
         #expect(Array(zero.bytes) == [0, 0, 0])
 
         // Above one and one produce the same byte, and it is 255.
         let above = try renderer.render(
-            DisplayPreviewTestData.leveledPixel(1.0001, 5, 1e30), settings: settings
+            DisplayPreviewTestData.toneCurvedPixel(1.0001, 5, 1e30), settings: settings
         )
         #expect(Array(above.bytes) == [255, 255, 255])
         let one = try renderer.render(
-            DisplayPreviewTestData.leveledPixel(1, 1, 1), settings: settings
+            DisplayPreviewTestData.toneCurvedPixel(1, 1, 1), settings: settings
         )
         #expect(Array(one.bytes) == [255, 255, 255])
 
         // A value inside the range reaches the encoder unchanged: 0.25 encodes
         // to the same byte whether or not any clipping code touched it.
         let inside = try renderer.render(
-            DisplayPreviewTestData.leveledPixel(0.25, 0.25, 0.25), settings: settings
+            DisplayPreviewTestData.toneCurvedPixel(0.25, 0.25, 0.25), settings: settings
         )
         let expected = DisplayPreviewTestData.referenceQuantize(
             DisplayPreviewTestData.referenceEncode(0.25)
@@ -418,7 +418,7 @@ struct DisplayPreviewRendererTests {
     @Test("Out-of-bounds coordinates return nil rather than trapping")
     func accessorsRefuseOutOfBounds() throws {
         let rendered = try DisplayPreviewRenderer().render(
-            DisplayPreviewTestData.leveledImage(
+            DisplayPreviewTestData.toneCurvedImage(
                 width: 2, height: 2, values: [Float](repeating: 0.5, count: 12)
             ),
             settings: DisplayPreviewTestData.settings
@@ -449,7 +449,7 @@ struct DisplayPreviewRendererTests {
             bytes: Data(count: 12),
             processing: DisplayPreviewProcessing(
                 settings: DisplayPreviewTestData.settings,
-                levelsProcessing: DisplayPreviewTestData.levelsProcessing(),
+                contrastProcessing: DisplayPreviewTestData.contrastProcessing(),
                 clippedLowSampleCount: 0,
                 clippedHighSampleCount: 0
             )

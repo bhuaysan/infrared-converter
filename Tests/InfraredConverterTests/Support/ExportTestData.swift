@@ -110,6 +110,29 @@ enum ExportTestData {
         )
     }
 
+    /// A tone-curved image, ready for the encoder — the type both
+    /// destinations now take.
+    static func toneCurved(
+        width: Int,
+        height: Int,
+        values: [Float],
+        exposureEV: Double = 0,
+        blackPoint: Double = 0,
+        whitePoint: Double = 1,
+        contrastAmount: Double = 0,
+        orientation: RAWImageOrientation = .upright,
+        mix: IRChannelMix = .identity
+    ) throws -> ToneCurvedRGBImage {
+        try GlobalContrastApplier().apply(
+            to: leveled(
+                width: width, height: height, values: values,
+                exposureEV: exposureEV, blackPoint: blackPoint,
+                whitePoint: whitePoint, orientation: orientation, mix: mix
+            ),
+            curve: GlobalContrastCurve(amount: contrastAmount)
+        )
+    }
+
     /// A levelled image whose provenance says it came from a reduced preview.
     static func leveledFromPreview(
         width: Int,
@@ -119,6 +142,19 @@ enum ExportTestData {
         try LinearLevelsApplier().apply(
             to: exposedFromPreview(width: width, height: height, values: values),
             levels: .neutral
+        )
+    }
+
+    /// A tone-curved image whose provenance says it came from a reduced
+    /// preview.
+    static func toneCurvedFromPreview(
+        width: Int,
+        height: Int,
+        values: [Float]
+    ) throws -> ToneCurvedRGBImage {
+        try GlobalContrastApplier().apply(
+            to: leveledFromPreview(width: width, height: height, values: values),
+            curve: .neutral
         )
     }
 
@@ -136,8 +172,8 @@ enum ExportTestData {
         UInt16((encoded * 65535).rounded())
     }
 
-    /// One scene-linear component through exposure, levels and the whole
-    /// export boundary, written from the specification.
+    /// One scene-linear component through exposure, levels, the contrast
+    /// curve and the whole export boundary, written from the specification.
     ///
     /// Each stage narrows to `Float32` exactly once, matching the production
     /// convention, so this oracle reproduces the rounding the pipeline
@@ -146,12 +182,31 @@ enum ExportTestData {
         sceneLinear: Float,
         exposureEV: Double = 0,
         blackPoint: Double = 0,
-        whitePoint: Double = 1
+        whitePoint: Double = 1,
+        contrastAmount: Double = 0
     ) -> UInt16 {
         let exposed = Float(Double(sceneLinear) * exp2(exposureEV))
         let leveled = Float((Double(exposed) - blackPoint) * (1 / (whitePoint - blackPoint)))
-        let clipped = min(max(Double(leveled), 0), 1)
+        let curved = referenceContrast(leveled, amount: contrastAmount)
+        let clipped = min(max(Double(curved), 0), 1)
         return referenceQuantize(referenceEncode(clipped))
+    }
+
+    /// The global contrast curve, written from the specification rather than
+    /// called from `GlobalContrastCurve`.
+    ///
+    /// ```text
+    /// k = 2^amount
+    /// f(x) = x                          x <= 0 or x >= 1
+    /// f(x) = x^k / (x^k + (1-x)^k)      otherwise
+    /// ```
+    static func referenceContrast(_ value: Float, amount: Double) -> Float {
+        guard value > 0, value < 1 else { return value }
+        let k = exp2(amount)
+        let x = Double(value)
+        let a = pow(x, k)
+        let b = pow(1 - x, k)
+        return Float(a / (a + b))
     }
 
     // MARK: - Temporary directories

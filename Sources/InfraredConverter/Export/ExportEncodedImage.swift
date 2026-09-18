@@ -9,10 +9,9 @@ import Foundation
 public struct ExportImageProcessing: Equatable, Sendable {
     /// The range policy and encoding this image was produced with.
     public let settings: ExportRenderSettings
-    /// The adjusted linear-light state it was produced from — the same type
-    /// the display path's record carries, because both encoders consume the
-    /// same image.
-    public let levelsProcessing: LinearLevelsProcessing
+    /// The adjusted state it was produced from — the same type the display
+    /// path's record carries, because both encoders consume the same image.
+    public let contrastProcessing: GlobalContrastProcessing
     /// How many components the range policy clipped to `0`.
     public let clippedLowSampleCount: Int
     /// How many components the range policy clipped to `1`.
@@ -30,7 +29,7 @@ public struct ExportImageProcessing: Equatable, Sendable {
     public let highlightReconstructionApplied: Bool = false
     public let automaticExposureApplied: Bool = false
     public let automaticLevelsApplied: Bool = false
-    public let contrastApplied: Bool = false
+    public let automaticContrastApplied: Bool = false
     public let saturationApplied: Bool = false
     public let sharpeningApplied: Bool = false
     public let resampled: Bool = false
@@ -38,12 +37,12 @@ public struct ExportImageProcessing: Equatable, Sendable {
 
     public init(
         settings: ExportRenderSettings,
-        levelsProcessing: LinearLevelsProcessing,
+        contrastProcessing: GlobalContrastProcessing,
         clippedLowSampleCount: Int,
         clippedHighSampleCount: Int
     ) {
         self.settings = settings
-        self.levelsProcessing = levelsProcessing
+        self.contrastProcessing = contrastProcessing
         self.clippedLowSampleCount = clippedLowSampleCount
         self.clippedHighSampleCount = clippedHighSampleCount
     }
@@ -58,6 +57,28 @@ public struct ExportImageProcessing: Equatable, Sendable {
     /// source outright — and kept as a readable fact so an export's own record
     /// says so rather than leaving it to be inferred.
     public var reducedForPreview: Bool { levelsProcessing.reducedForPreview }
+
+    /// Provenance of the levelled image the contrast stage consumed.
+    /// Forwarded rather than stored a second time.
+    public var levelsProcessing: LinearLevelsProcessing {
+        contrastProcessing.levelsProcessing
+    }
+
+    /// A global contrast curve was applied upstream, by
+    /// `GlobalContrastApplier`. `true` even at amount `0`.
+    public var contrastApplied: Bool { contrastProcessing.contrastApplied }
+    public var toneCurveApplied: Bool { contrastProcessing.toneCurveApplied }
+    /// The curve that was applied.
+    public var contrastCurve: GlobalContrastCurve { contrastProcessing.curve }
+    public var contrastAmount: Double { contrastProcessing.contrastAmount }
+    public var contrastExponent: Double { contrastProcessing.contrastExponent }
+    /// Whether that curve happens to leave the values linear-light encoded —
+    /// true exactly when the amount is `0`.
+    public var preservesLinearLightEncoding: Bool {
+        contrastProcessing.preservesLinearLightEncoding
+    }
+    public var histogramRead: Bool { contrastProcessing.histogramRead }
+    public var localContrastApplied: Bool { contrastProcessing.localContrastApplied }
 
     /// Levels were applied upstream, by `LinearLevelsApplier`. `true` even at
     /// black `0` / white `1`.

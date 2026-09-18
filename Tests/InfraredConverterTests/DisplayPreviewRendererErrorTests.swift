@@ -145,7 +145,7 @@ struct DisplayPreviewRendererErrorTests {
     func inconsistentGeometryIsRefused() {
         let renderer = DisplayPreviewRenderer()
         // Declares 2×2 (12 values) and holds 9.
-        let short = DisplayPreviewTestData.leveledImage(
+        let short = DisplayPreviewTestData.toneCurvedImage(
             width: 2, height: 2, values: [Float](repeating: 0.5, count: 9)
         )
         #expect {
@@ -155,7 +155,7 @@ struct DisplayPreviewRendererErrorTests {
             return true
         }
 
-        let empty = DisplayPreviewTestData.leveledImage(width: 0, height: 4, values: [])
+        let empty = DisplayPreviewTestData.toneCurvedImage(width: 0, height: 4, values: [])
         #expect {
             _ = try renderer.render(empty, settings: DisplayPreviewTestData.settings)
         } throws: { error in

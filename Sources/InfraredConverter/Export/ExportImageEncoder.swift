@@ -55,12 +55,12 @@ extension ExportEncodingError: LocalizedError {
     }
 }
 
-/// The export boundary: `LeveledLinearRGBImage` →
+/// The export boundary: `ToneCurvedRGBImage` →
 /// `ExportEncodedImage`, by hard export-range clipping, the sRGB transfer
 /// function and deterministic 16-bit quantisation.
 ///
 /// ```text
-/// LeveledLinearRGBImage         linear-light, mixed, oriented, exposed, levelled
+/// ToneCurvedRGBImage            mixed, oriented, exposed, levelled, curved
 ///       │
 ///       │  explicit ExportRenderSettings
 ///       ↓
@@ -119,29 +119,30 @@ extension ExportEncodingError: LocalizedError {
 public struct ExportImageEncoder: Sendable {
     public init() {}
 
-    /// Encodes an adjusted linear-light image into 16-bit export samples.
+    /// Encodes an adjusted working-space image into 16-bit export samples.
     ///
     /// The **same type** the display renderer takes, produced by the **same
     /// stages** from the **same adjustment values**. The two encoders differ
     /// in range policy, bit depth and destination, and in nothing else.
     ///
     /// - Parameters:
-    ///   - image: linear-light working-space coordinates with every canonical
-    ///     adjustment already applied. Not mutated and not clamped.
+    ///   - image: working-space coordinates with every canonical adjustment
+    ///     already applied, the last of them a nonlinear tone curve. Not
+    ///     mutated and not clamped.
     ///   - settings: range policy and encoding. Required — there is
     ///     deliberately no default.
     ///   - cancellation: polled once here and once per row.
     /// - Throws: `ExportEncodingError`, or `CancellationError` when the work
     ///   was superseded.
     public func encode(
-        _ image: LeveledLinearRGBImage,
+        _ image: ToneCurvedRGBImage,
         settings: ExportRenderSettings,
         cancellation: ProcessingCancellation = .none
     ) throws -> ExportEncodedImage {
         guard image.isGeometryConsistent else {
             throw ExportEncodingError.invalidGeometry(
                 reason: """
-                    Levelled linear RGB geometry \(image.width)x\(image.height) needs \
+                    Tone-curved RGB geometry \(image.width)x\(image.height) needs \
                     \(image.expectedValueCount.map(String.init) ?? "an unrepresentable number of") \
                     values, buffer holds \(image.values.count).
                     """
@@ -251,7 +252,7 @@ public struct ExportImageEncoder: Sendable {
             samples: samples,
             processing: ExportImageProcessing(
                 settings: settings,
-                levelsProcessing: image.processing,
+                contrastProcessing: image.processing,
                 clippedLowSampleCount: clippedLow,
                 clippedHighSampleCount: clippedHigh
             )

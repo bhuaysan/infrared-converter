@@ -211,10 +211,33 @@ struct PublicProcessingSurfaceTests {
         _ = leveled.metadata
         #expect(leveled.url == decoded.url)
 
+        let curved: ToneCurvedProcessedRAWImage = try GlobalContrastApplier()
+            .apply(to: leveled, curve: .neutral)
+        _ = curved.source
+        _ = curved.image
+        _ = curved.leveledImage
+        _ = curved.exposedImage
+        _ = curved.orientedImage
+        _ = curved.channelMixedImage
+        _ = curved.workingColorImage
+        _ = curved.demosaicedImage
+        _ = curved.whiteBalancedMosaic
+        _ = curved.linearMosaic
+        _ = curved.processing
+        _ = curved.curve
+        _ = curved.levels
+        _ = curved.exposure
+        _ = curved.orientation
+        _ = curved.mix
+        _ = curved.cameraToWorkingTransform
+        _ = curved.metadata
+        #expect(curved.url == decoded.url)
+
         let preview: DisplayPreviewProcessedRAWImage = try DisplayPreviewRenderer()
-            .render(leveled, settings: settings)
+            .render(curved, settings: settings)
         _ = preview.source
         _ = preview.image
+        _ = preview.toneCurvedImage
         _ = preview.leveledImage
         _ = preview.exposedImage
         _ = preview.orientedImage
@@ -235,8 +258,8 @@ struct PublicProcessingSurfaceTests {
 
         // The whole chain is readable from the last wrapper alone.
         #expect(
-            preview.source.source.source.source.source.source.source.source.source.mosaic
-                == decoded.mosaic
+            preview.source.source.source.source.source.source.source.source.source
+                .source.mosaic == decoded.mosaic
         )
         #expect(mixed.image.isGeometryConsistent)
         #expect(mixed.processing.whiteBalanceApplied)
@@ -303,7 +326,9 @@ struct PublicProcessingSurfaceTests {
                 settings: DisplayRenderSettings(
                     rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
                 ),
-                levelsProcessing: LinearLevelsProcessing(
+                contrastProcessing: GlobalContrastProcessing(
+                    curve: .neutral,
+                    levelsProcessing: LinearLevelsProcessing(
                     levels: .neutral,
                     exposureProcessing: SceneLinearExposureProcessing(
                         exposure: .neutral,
@@ -330,6 +355,7 @@ struct PublicProcessingSurfaceTests {
                         )
                     )
                         )
+                    )
                     )
                 ),
                 clippedLowSampleCount: 0,

@@ -118,9 +118,12 @@ struct DisplayPreviewRendererFixtureTests {
             rangePolicy: .hardClipToDisplayRange,
             encoding: .sRGB
         )
-        let leveled = try LinearLevelsApplier().apply(
-            to: try SceneLinearExposer().apply(to: oriented, exposure: .neutral),
-            levels: .neutral
+        let leveled = try GlobalContrastApplier().apply(
+            to: try LinearLevelsApplier().apply(
+                to: try SceneLinearExposer().apply(to: oriented, exposure: .neutral),
+                levels: .neutral
+            ),
+            curve: .neutral
         )
 
         let start = DispatchTime.now().uptimeNanoseconds
@@ -154,6 +157,8 @@ struct DisplayPreviewRendererFixtureTests {
         #expect(processing.levelsApplied)
         #expect(processing.blackPoint == 0)
         #expect(processing.whitePoint == 1)
+        #expect(processing.contrastApplied)
+        #expect(processing.contrastAmount == 0)
         #expect(processing.displayRangeClippingApplied)
         #expect(processing.displayEncodingApplied)
         #expect(processing.quantized)
@@ -301,20 +306,29 @@ struct DisplayPreviewRendererFixtureTests {
             rangePolicy: .hardClipToDisplayRange, encoding: .sRGB
         )
 
+        // The renderer's input is the curved wrapper; the curve is neutral
+        // throughout, so this test's subject stays the exposure.
+        func rendered(_ leveled: LeveledProcessedRAWImage) throws
+            -> DisplayPreviewProcessedRAWImage {
+            try renderer.render(
+                try GlobalContrastApplier().apply(to: leveled, curve: .neutral),
+                settings: settings
+            )
+        }
+
         let neutralExposure = try exposer.apply(to: oriented, exposure: .neutral)
-        let neutral = try renderer.render(
-            try leveler.apply(to: neutralExposure, levels: .neutral), settings: settings
+        let neutral = try rendered(
+            try leveler.apply(to: neutralExposure, levels: .neutral)
         )
         // Replacing the exposure restarts from the oriented image, which is
         // where the adjustment now lives.
-        let brightened = try renderer.render(
+        let brightened = try rendered(
             try leveler.apply(
                 to: try exposer.apply(
                     exposure: SceneLinearExposure(ev: 1), replacing: neutralExposure
                 ),
                 levels: .neutral
-            ),
-            settings: settings
+            )
         )
 
         // Re-rendering started from the same scene-linear image, not from the
@@ -368,11 +382,14 @@ struct DisplayPreviewRendererFixtureTests {
             _ mix: IRChannelMix
         ) throws -> DisplayPreviewProcessedRAWImage {
             try renderer.render(
-                try LinearLevelsApplier().apply(
-                    to: try SceneLinearExposer().apply(
-                        to: try Self.orientedFixture(mix: mix), exposure: .neutral
+                try GlobalContrastApplier().apply(
+                    to: try LinearLevelsApplier().apply(
+                        to: try SceneLinearExposer().apply(
+                            to: try Self.orientedFixture(mix: mix), exposure: .neutral
+                        ),
+                        levels: .neutral
                     ),
-                    levels: .neutral
+                    curve: .neutral
                 ),
                 settings: settings
             )

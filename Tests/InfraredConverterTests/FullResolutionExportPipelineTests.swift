@@ -70,7 +70,13 @@ struct FullResolutionExportPipelineTests {
         // that depends on the value. The weaker, value-dependent fact is
         // available separately — and here it is true, because black is 0.
         #expect(!rendered.image.processing.sceneLinear)
-        #expect(rendered.image.processing.linearLightEncoded)
+        // And not linear-light either, for the same kind of reason one stage
+        // further down: the contrast stage is licensed to evaluate a curve, so
+        // its answer does not depend on the amount. The value-dependent fact
+        // is separate, and here it is true, because the amount is 0.
+        #expect(!rendered.image.processing.linearLightEncoded)
+        #expect(rendered.image.processing.preservesLinearLightEncoding)
+        #expect(rendered.image.processing.levelsProcessing.linearLightEncoded)
         #expect(rendered.image.processing.preservesProportionalityToSceneRadiance)
         #expect(rendered.image.processing.exposureProcessing.sceneLinear)
         #expect(!rendered.image.processing.clamped)

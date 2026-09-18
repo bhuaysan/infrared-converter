@@ -51,7 +51,8 @@ struct WorkspaceLevelsPipelineTests {
         adjustments: ImageAdjustments
     ) throws -> DisplayEncodedPreviewImage {
         try DisplayPreviewRenderer().render(
-            try LinearLevelsApplier().apply(
+            try GlobalContrastApplier().apply(
+              to: try LinearLevelsApplier().apply(
                 to: try SceneLinearExposer().apply(
                     to: try ImageOrienter().apply(
                         to: try IRChannelMixer().apply(to: source.preview, mix: mix),
@@ -60,6 +61,8 @@ struct WorkspaceLevelsPipelineTests {
                     exposure: SceneLinearExposure(adjustments.exposure)
                 ),
                 levels: LinearLevels(adjustments.levels)
+              ),
+              curve: GlobalContrastCurve(adjustments.contrast)
             ),
             settings: WorkspacePreviewPipeline.displaySettings
         )
@@ -192,7 +195,7 @@ struct WorkspaceLevelsPipelineTests {
             levels: LinearLevels(pair)
         )
         let reversed = try DisplayPreviewRenderer().render(
-            DisplayPreviewTestData.leveledImage(
+            DisplayPreviewTestData.toneCurvedImage(
                 width: levelledFirst.width,
                 height: levelledFirst.height,
                 values: levelledFirst.values.map { Float(Double($0) * 2) }
@@ -264,7 +267,8 @@ struct WorkspaceLevelsPipelineTests {
         // And the clip that follows makes the first two indistinguishable,
         // which is exactly why it must not happen upstream.
         let encoded = try DisplayPreviewRenderer().render(
-            levelled, settings: WorkspacePreviewPipeline.displaySettings
+            try GlobalContrastApplier().apply(to: levelled, curve: .neutral),
+            settings: WorkspacePreviewPipeline.displaySettings
         )
         #expect(Array(encoded.bytes) == [0, 0, 0])
         #expect(encoded.processing.clippedLowSampleCount == 2)

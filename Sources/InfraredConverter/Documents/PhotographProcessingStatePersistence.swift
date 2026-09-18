@@ -25,10 +25,11 @@ import Foundation
 /// requires a new schema version, and an older client must refuse that version
 /// rather than read around it.**
 ///
-/// The rule has now been applied five times rather than merely written down.
+/// The rule has now been applied six times rather than merely written down.
 /// `channelMix` raised the version from 1 to 2, `exposureEV` from 2 to 3,
-/// `whiteBalance` from 3 to 4, `captureProfileID` from 4 to 5, and `levels`
-/// from 5 to 6 — none was slipped into an older version as an optional field.
+/// `whiteBalance` from 3 to 4, `captureProfileID` from 4 to 5, `levels` from 5
+/// to 6 and `contrast` from 6 to 7 — none was slipped into an older version as
+/// an optional field.
 ///
 /// `levels` is the clearest case the rule has had. A build that ignored it
 /// would render a photograph with the black point the user pulled up sitting
@@ -88,11 +89,14 @@ extension PhotographProcessingState {
         /// `captureProfileID`, and the five adjustments nested under
         /// `adjustments` — `levels` being the new one.
         case levels = 6
+        /// `captureProfileID`, and the six adjustments nested under
+        /// `adjustments` — `contrast` being the new one.
+        case contrast = 7
 
         /// The version this build writes. Named explicitly, so adding a case
         /// does not by itself change what is written; a test asserts that it
         /// is the highest case.
-        static let current = PersistedSchemaVersion.levels
+        static let current = PersistedSchemaVersion.contrast
 
         /// The first version any build of this project wrote.
         static let first = PersistedSchemaVersion.orientationOnly
@@ -105,7 +109,7 @@ extension PhotographProcessingState {
         var storesAdjustmentsAtTopLevel: Bool {
             switch self {
             case .orientationOnly, .channelMix, .exposure, .whiteBalance: return true
-            case .captureProfile, .levels: return false
+            case .captureProfile, .levels, .contrast: return false
             }
         }
     }
@@ -116,6 +120,34 @@ extension PhotographProcessingState {
 
 // MARK: - The wire format
 
+/// ## Version 7 adds `contrast`
+///
+/// ```text
+/// v6                                     v7
+/// {                                      {
+///   "schemaVersion": 6,                    "schemaVersion": 7,
+///   "captureProfileID": "…",               "captureProfileID": "…",
+///   "adjustments": {                       "adjustments": {
+///     …,                                     …,
+///     "levels": {                            "levels": {
+///       "blackPoint": 0.05,                    "blackPoint": 0.05,
+///       "whitePoint": 1.2                      "whitePoint": 1.2
+///     }                                      },
+///   }                                        "contrast": 0.35
+/// }                                        }
+///                                        }
+/// ```
+///
+/// A bare number rather than an object, for the reason `exposureEV` is one:
+/// the decision *is* one number. The exponent `k = 2^amount` is deliberately
+/// not written beside it — it is derived, and a record carrying both could
+/// disagree with itself.
+///
+/// The field is required at version 7 and refused before it. A build that
+/// ignored it would render a photograph with the contrast a person applied
+/// sitting back at neutral, would say nothing, and would then write the record
+/// back without the field, destroying the edit.
+///
 /// ## Version 6 adds `levels`, inside the nesting version 5 introduced
 ///
 /// ```text
@@ -200,6 +232,7 @@ extension PhotographProcessingState: Codable {
         case exposureEV
         case whiteBalance
         case levels
+        case contrast
     }
 
     /// Reads a persisted record, refusing anything it cannot fully understand
@@ -229,9 +262,18 @@ extension PhotographProcessingState: Codable {
     /// v2   + channelMix     → 0 EV, default patch, builtin.uncalibrated
     /// v3   + exposureEV     → default patch, builtin.uncalibrated
     /// v4   + whiteBalance   → builtin.uncalibrated, neutral levels
-    /// v5   + captureProfileID, adjustments nested   → neutral levels
-    /// v6   + levels          → read as written
+    /// v5   + captureProfileID, adjustments nested   → neutral levels, contrast 0
+    /// v6   + levels          → contrast 0
+    /// v7   + contrast        → read as written
     /// ```
+    ///
+    /// Version 6 migrates to **neutral** contrast — amount `0`, whose curve
+    /// exponent is exactly `1` — and that is a migration rather than a default
+    /// for the reason every other one is: it is what the absent field meant.
+    /// Every build that wrote version 6 had no contrast stage at all, so a
+    /// version 6 photograph renders after this milestone exactly as it did
+    /// before it, and a test compares the buffers rather than taking that on
+    /// trust.
     ///
     /// Version 5 migrates to **neutral** levels — black `0`, white `1` — and
     /// that is a migration rather than a default for the same reason the
@@ -280,8 +322,8 @@ extension PhotographProcessingState: Codable {
                 adjustments: try Self.adjustments(in: flat, schemaVersion: schema)
             )
 
-        case .captureProfile, .levels:
-            // One authority per field. A version 5 or 6 record that also carries
+        case .captureProfile, .levels, .contrast:
+            // One authority per field. A version 5, 6 or 7 record that also carries
             // adjustments at the top level says two things about one
             // photograph, and there is no reading of it that is not a guess.
             for key in AdjustmentKeys.allCases {
@@ -313,7 +355,7 @@ extension PhotographProcessingState: Codable {
     ///
     /// Nothing else is possible: no in-memory record carries any other version,
     /// which is what makes every publicly constructible value round-trip. A
-    /// migrated version 1 to 5 record is therefore written back as version 6
+    /// migrated version 1 to 6 record is therefore written back as version 7
     /// the next time it is saved — with the built-in uncalibrated profile it
     /// was migrated to, which is the state it was already in. Reading rewrites
     /// nothing: an older record is upgraded on disk only when the user's next
@@ -331,6 +373,7 @@ extension PhotographProcessingState: Codable {
         try nested.encode(adjustments.exposure, forKey: .exposureEV)
         try nested.encode(adjustments.whiteBalance, forKey: .whiteBalance)
         try nested.encode(adjustments.levels, forKey: .levels)
+        try nested.encode(adjustments.contrast, forKey: .contrast)
     }
 
     // MARK: - Reading the version
@@ -364,7 +407,7 @@ extension PhotographProcessingState: Codable {
     /// container holds them, and supplies the historical meaning of the ones it
     /// does not.
     ///
-    /// Versions 1 to 5 predate a field each. Such a record describes a
+    /// Versions 1 to 6 predate a field each. Such a record describes a
     /// photograph that was rendered with no remapping, at `0 EV`, and
     /// white-balanced from the application's centred neutral patch — which is
     /// what the workspace always did. Those are the states the record was
@@ -393,18 +436,21 @@ extension PhotographProcessingState: Codable {
             try refuse(.exposureEV, in: container, schemaVersion: version)
             try refuse(.whiteBalance, in: container, schemaVersion: version)
             try refuse(.levels, in: container, schemaVersion: version)
+            try refuse(.contrast, in: container, schemaVersion: version)
             return ImageAdjustments(
                 orientation: orientation,
                 channelMix: .identity,
                 exposure: .neutral,
                 whiteBalance: .defaultNeutralPatch,
-                levels: .neutral
+                levels: .neutral,
+                contrast: .neutral
             )
 
         case .channelMix:
             try refuse(.exposureEV, in: container, schemaVersion: version)
             try refuse(.whiteBalance, in: container, schemaVersion: version)
             try refuse(.levels, in: container, schemaVersion: version)
+            try refuse(.contrast, in: container, schemaVersion: version)
             return ImageAdjustments(
                 orientation: orientation,
                 channelMix: try require(
@@ -413,12 +459,14 @@ extension PhotographProcessingState: Codable {
                 ),
                 exposure: .neutral,
                 whiteBalance: .defaultNeutralPatch,
-                levels: .neutral
+                levels: .neutral,
+                contrast: .neutral
             )
 
         case .exposure:
             try refuse(.whiteBalance, in: container, schemaVersion: version)
             try refuse(.levels, in: container, schemaVersion: version)
+            try refuse(.contrast, in: container, schemaVersion: version)
             return ImageAdjustments(
                 orientation: orientation,
                 channelMix: try require(
@@ -430,7 +478,8 @@ extension PhotographProcessingState: Codable {
                     in: container, schemaVersion: version
                 ),
                 whiteBalance: .defaultNeutralPatch,
-                levels: .neutral
+                levels: .neutral,
+                contrast: .neutral
             )
 
         case .whiteBalance, .captureProfile:
@@ -439,6 +488,7 @@ extension PhotographProcessingState: Codable {
             // this was called. Neither has levels — and neither build had a
             // levels stage, so neutral is what they applied.
             try refuse(.levels, in: container, schemaVersion: version)
+            try refuse(.contrast, in: container, schemaVersion: version)
             return ImageAdjustments(
                 orientation: orientation,
                 channelMix: try require(
@@ -453,10 +503,14 @@ extension PhotographProcessingState: Codable {
                     UserWhiteBalanceAdjustment.self, .whiteBalance,
                     in: container, schemaVersion: version
                 ),
-                levels: .neutral
+                levels: .neutral,
+                contrast: .neutral
             )
 
         case .levels:
+            // Version 6 carries levels but predates the contrast curve, and
+            // the build that wrote it applied none. Neutral is what it did.
+            try refuse(.contrast, in: container, schemaVersion: version)
             return ImageAdjustments(
                 orientation: orientation,
                 channelMix: try require(
@@ -473,6 +527,32 @@ extension PhotographProcessingState: Codable {
                 ),
                 levels: try require(
                     UserLevelsAdjustment.self, .levels,
+                    in: container, schemaVersion: version
+                ),
+                contrast: .neutral
+            )
+
+        case .contrast:
+            return ImageAdjustments(
+                orientation: orientation,
+                channelMix: try require(
+                    UserChannelMixAdjustment.self, .channelMix,
+                    in: container, schemaVersion: version
+                ),
+                exposure: try require(
+                    UserExposureAdjustment.self, .exposureEV,
+                    in: container, schemaVersion: version
+                ),
+                whiteBalance: try require(
+                    UserWhiteBalanceAdjustment.self, .whiteBalance,
+                    in: container, schemaVersion: version
+                ),
+                levels: try require(
+                    UserLevelsAdjustment.self, .levels,
+                    in: container, schemaVersion: version
+                ),
+                contrast: try require(
+                    UserContrastAdjustment.self, .contrast,
                     in: container, schemaVersion: version
                 )
             )

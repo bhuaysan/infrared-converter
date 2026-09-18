@@ -165,7 +165,7 @@ struct IRCaptureProfileRecordTests {
     @Test("The profile schema version is independent of the sidecar's")
     func theProfileSchemaVersionIsIndependentOfTheSidecars() {
         #expect(IRCaptureProfile.currentSchemaVersion == 1)
-        #expect(PhotographProcessingState.currentSchemaVersion == 6)
+        #expect(PhotographProcessingState.currentSchemaVersion == 7)
         #expect(
             IRCaptureProfile.currentSchemaVersion
                 != PhotographProcessingState.currentSchemaVersion

@@ -88,19 +88,39 @@ struct DisplayPreviewProvenanceTests {
         )
     }
 
+    /// The display stage's actual input now: the levelled wrapper with the
+    /// contrast curve applied over it.
+    static func curved(
+        mix: IRChannelMix = .identity,
+        orientation: RAWImageOrientation = .upright,
+        exposureEV: Double = 0,
+        blackPoint: Double = 0,
+        whitePoint: Double = 1,
+        contrastAmount: Double = 0
+    ) throws -> ToneCurvedProcessedRAWImage {
+        try GlobalContrastApplier().apply(
+            to: try leveled(
+                mix: mix, orientation: orientation, exposureEV: exposureEV,
+                blackPoint: blackPoint, whitePoint: whitePoint
+            ),
+            curve: GlobalContrastCurve(amount: contrastAmount)
+        )
+    }
+
     @Test("The display stage mints its wrapper over the exact state it consumed")
     func theStageMintsItsWrapper() throws {
-        let leveled = try Self.leveled(
+        let curved = try Self.curved(
             mix: .redBlueSwap, orientation: .rotated90Clockwise
         )
-        let oriented = leveled.source.source
+        let oriented = curved.source.source.source
         let preview = try DisplayPreviewRenderer().render(
-            leveled, settings: DisplayPreviewTestData.settings
+            curved, settings: DisplayPreviewTestData.settings
         )
 
         // Each hop reaches the state that actually produced the next one.
-        #expect(preview.leveledImage == leveled.image)
-        #expect(preview.exposedImage == leveled.exposedImage)
+        #expect(preview.toneCurvedImage == curved.image)
+        #expect(preview.leveledImage == curved.leveledImage)
+        #expect(preview.exposedImage == curved.exposedImage)
         #expect(preview.orientedImage == oriented.image)
         #expect(preview.channelMixedImage == oriented.channelMixedImage)
         #expect(preview.workingColorImage == oriented.workingColorImage)
@@ -118,19 +138,21 @@ struct DisplayPreviewProvenanceTests {
         #expect(preview.image.height == oriented.channelMixedImage.width)
 
         // And the decoded UInt16 mosaic is reachable from the last wrapper
-        // alone — now nine sources down, because exposure and levels each
-        // added a link to the chain.
+        // alone — now ten sources down, because exposure, levels and the
+        // contrast curve each added a link to the chain.
         #expect(
-            preview.source.source.source.source.source.source.source.source.source.mosaic
-                == Self.decoded().mosaic
+            preview.source.source.source.source.source.source.source.source.source
+                .source.mosaic == Self.decoded().mosaic
         )
     }
 
     @Test("The whole chain is readable back from the rendered preview")
     func theChainIsReadableFromTheResult() throws {
-        let leveled = try Self.leveled(mix: .redBlueSwap, exposureEV: 1.5)
+        let curved = try Self.curved(
+            mix: .redBlueSwap, exposureEV: 1.5, contrastAmount: 0.25
+        )
         let settings = DisplayPreviewTestData.settings
-        let preview = try DisplayPreviewRenderer().render(leveled, settings: settings)
+        let preview = try DisplayPreviewRenderer().render(curved, settings: settings)
         let processing = preview.processing
 
         #expect(processing.settings == settings)
@@ -142,6 +164,14 @@ struct DisplayPreviewProvenanceTests {
         #expect(processing.levelsApplied)
         #expect(processing.blackPoint == 0)
         #expect(processing.whitePoint == 1)
+        // And so is the contrast curve, one stage further down.
+        #expect(processing.contrastApplied)
+        #expect(processing.toneCurveApplied)
+        #expect(processing.contrastAmount == 0.25)
+        #expect(!processing.preservesLinearLightEncoding)
+        #expect(!processing.histogramRead)
+        #expect(!processing.automaticContrastApplied)
+        #expect(!processing.localContrastApplied)
         #expect(processing.mixSource == .redBlueSwap)
         #expect(preview.mix == .redBlueSwap)
         #expect(processing.cameraToWorkingTransformSource == .sensorRGBIdentityFalseColor)
@@ -165,7 +195,7 @@ struct DisplayPreviewProvenanceTests {
     @Test("A wrapper forwards its own image's provenance, never a second copy")
     func provenanceIsForwardedNotCopied() throws {
         let preview = try DisplayPreviewRenderer().render(
-            try Self.leveled(), settings: DisplayPreviewTestData.settings
+            try Self.curved(), settings: DisplayPreviewTestData.settings
         )
         #expect(preview.processing == preview.image.processing)
         #expect(preview.settings == preview.image.processing.settings)
@@ -194,7 +224,11 @@ struct DisplayPreviewProvenanceTests {
             _ exposed: ExposedProcessedRAWImage
         ) throws -> DisplayPreviewProcessedRAWImage {
             try renderer.render(
-                try leveler.apply(to: exposed, levels: .neutral), settings: settings
+                try GlobalContrastApplier().apply(
+                    to: try leveler.apply(to: exposed, levels: .neutral),
+                    curve: .neutral
+                ),
+                settings: settings
             )
         }
 
@@ -248,16 +282,24 @@ struct DisplayPreviewProvenanceTests {
         let renderer = DisplayPreviewRenderer()
         let settings = DisplayPreviewTestData.settings
 
+        // The renderer's input is the curved wrapper; the curve is neutral
+        // throughout, so this suite's subject stays the levels.
+        func rendered(_ leveled: LeveledProcessedRAWImage) throws
+            -> DisplayPreviewProcessedRAWImage {
+            try renderer.render(
+                try GlobalContrastApplier().apply(to: leveled, curve: .neutral),
+                settings: settings
+            )
+        }
+
         let neutral = try leveler.apply(to: exposed, levels: .neutral)
         let lifted = try leveler.apply(
             levels: LinearLevels(blackPoint: 0.1, whitePoint: 0.9), replacing: neutral
         )
         let back = try leveler.apply(levels: .neutral, replacing: lifted)
 
-        #expect(try renderer.render(back, settings: settings).image.bytes
-            == (try renderer.render(neutral, settings: settings)).image.bytes)
-        #expect(try renderer.render(lifted, settings: settings).image.bytes
-            != (try renderer.render(neutral, settings: settings)).image.bytes)
+        #expect(try rendered(back).image.bytes == (try rendered(neutral)).image.bytes)
+        #expect(try rendered(lifted).image.bytes != (try rendered(neutral)).image.bytes)
 
         // A second levels setting applied to the first result is the second
         // setting over the exposed image, not the composition of the two.
@@ -313,12 +355,15 @@ struct DisplayPreviewProvenanceTests {
             _ mixed: IRChannelMixedProcessedRAWImage
         ) throws -> DisplayPreviewProcessedRAWImage {
             try renderer.render(
-                try LinearLevelsApplier().apply(
-                    to: try SceneLinearExposer().apply(
-                        to: try orienter.apply(to: mixed, orientation: .upright),
-                        exposure: .neutral
+                try GlobalContrastApplier().apply(
+                    to: try LinearLevelsApplier().apply(
+                        to: try SceneLinearExposer().apply(
+                            to: try orienter.apply(to: mixed, orientation: .upright),
+                            exposure: .neutral
+                        ),
+                        levels: .neutral
                     ),
-                    levels: .neutral
+                    curve: .neutral
                 ),
                 settings: settings
             )

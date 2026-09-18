@@ -149,6 +149,19 @@ public enum ImageAdjustmentError: Error, Equatable {
     case levelsSpanNotRepresentable(
         blackPoint: Double, whitePoint: Double, span: Double, scale: Double
     )
+    /// A contrast amount is NaN or an infinity.
+    ///
+    /// Never read as neutral: a value we could not use and a deliberate
+    /// decision to leave the contrast alone are different facts.
+    case nonFiniteContrastAdjustment(amount: Double)
+    /// A contrast amount is finite and outside the range a record may hold.
+    ///
+    /// Refused rather than clamped, for the reason an out-of-range exposure is
+    /// — a clamped amount renders a different photograph from the one the
+    /// record describes. Unlike the levels bounds, this range is part of the
+    /// control's definition rather than a consequence of what the arithmetic
+    /// can represent; the curve evaluates perfectly well beyond it.
+    case contrastAdjustmentOutOfRange(amount: Double, supported: ClosedRange<Double>)
 }
 
 extension ImageAdjustmentError: LocalizedError {
@@ -192,6 +205,10 @@ extension ImageAdjustmentError: LocalizedError {
             return "The saved black point is not below the saved white point."
         case .levelsSpanNotRepresentable:
             return "The saved black and white points are too far apart, or too close together."
+        case .nonFiniteContrastAdjustment:
+            return "The saved contrast is not a finite number."
+        case .contrastAdjustmentOutOfRange:
+            return "The saved contrast is outside the supported range."
         }
     }
 
@@ -310,6 +327,19 @@ extension ImageAdjustmentError: LocalizedError {
                 and finite, but the interval between them measures \(span) and scales by \
                 \(scale). One of those is not a finite number, so the levels cannot be \
                 applied to any pixel.
+                """
+        case .nonFiniteContrastAdjustment(let amount):
+            return """
+                The contrast amount is \(amount), which is not a finite number. It is \
+                reported rather than treated as neutral, because a value we could not use \
+                and a deliberate decision to leave the contrast alone are different facts.
+                """
+        case .contrastAdjustmentOutOfRange(let amount, let supported):
+            return """
+                The contrast amount is \(amount); a saved amount must lie between \
+                \(supported.lowerBound) and \(supported.upperBound). That range is part of \
+                what this control is, not a limit of the arithmetic. It is refused rather \
+                than clamped, because a clamped amount would render a different photograph.
                 """
         }
     }

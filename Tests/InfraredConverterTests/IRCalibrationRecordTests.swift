@@ -875,7 +875,7 @@ struct IRCalibrationRecordTests {
     func schemaIndependence() {
         #expect(IRCalibration.currentSchemaVersion == 2)
         #expect(IRCaptureProfile.currentSchemaVersion == 1)
-        #expect(PhotographProcessingState.currentSchemaVersion == 6)
+        #expect(PhotographProcessingState.currentSchemaVersion == 7)
         // The calibration counter has now moved on its own, which is the
         // property this test exists to hold: the profile and the sidecar did
         // not move with it.
