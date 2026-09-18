@@ -355,11 +355,28 @@ enum DisplayPreviewTestData {
         sceneLinear: Float,
         exposureEV: Double,
         blackPoint: Double = 0,
-        whitePoint: Double = 1
+        whitePoint: Double = 1,
+        contrastAmount: Double = 0
     ) -> UInt8 {
         let exposed = Float(Double(sceneLinear) * exp2(exposureEV))
         let leveled = Float((Double(exposed) - blackPoint) * (1 / (whitePoint - blackPoint)))
-        let clipped = min(max(Double(leveled), 0), 1)
+        let curved = referenceContrast(leveled, amount: contrastAmount)
+        let clipped = min(max(Double(curved), 0), 1)
         return referenceQuantize(referenceEncode(clipped))
+    }
+
+    /// The global contrast curve, written from the specification rather than
+    /// called from `GlobalContrastCurve`.
+    ///
+    /// ```text
+    /// k = 2^amount
+    /// f(x) = x                          x <= 0 or x >= 1
+    /// f(x) = x^k / (x^k + (1-x)^k)      otherwise
+    /// ```
+    static func referenceContrast(_ value: Float, amount: Double) -> Float {
+        guard value > 0, value < 1 else { return value }
+        let k = exp2(amount)
+        let x = Double(value)
+        return Float(pow(x, k) / (pow(x, k) + pow(1 - x, k)))
     }
 }

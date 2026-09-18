@@ -215,7 +215,8 @@ final class StubPhotographProcessingStore: PhotographProcessingStore, @unchecked
             :\($0.state.adjustments.channelMix.kind.rawValue)\
             :\($0.state.adjustments.exposure.ev)EV\
             :\($0.state.adjustments.whiteBalance.kind.rawValue)\
-            :\($0.state.adjustments.levels.blackPoint)-\($0.state.adjustments.levels.whitePoint)
+            :\($0.state.adjustments.levels.blackPoint)-\($0.state.adjustments.levels.whitePoint)\
+            :\($0.state.adjustments.contrast.amount)C
             """
         }
     }

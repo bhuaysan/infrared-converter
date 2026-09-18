@@ -202,7 +202,7 @@ enum WorkspaceStubs {
 
     /// Waits until the workspace has a rendered preview for one **complete**
     /// adjustment state: the orientation, the channel mix, the exposure, the
-    /// white balance and the levels.
+    /// white balance, the levels and the contrast.
     ///
     /// Every field is compared, and that is the point rather than thoroughness
     /// for its own sake: a matcher that ignored one of them would match the
@@ -213,7 +213,8 @@ enum WorkspaceStubs {
     /// `IRChannelMix` the stage applied, so an `.explicit` matrix equal to a
     /// built-in is not mistaken for the built-in. The exposure and the levels
     /// are each compared both as requested and as rendered, so a preview whose
-    /// two disagree is never mistaken for a match. The white balance is
+    /// two disagree is never mistaken for a match, and the contrast is
+    /// compared the same way. The white balance is
     /// compared as the decision the source was **prepared with**, which is the
     /// one term a render cannot change: a preview matching it is a preview of
     /// the right pixels, not merely of the right request.
@@ -231,6 +232,8 @@ enum WorkspaceStubs {
                 && $0.whiteBalanceAdjustment == adjustments.whiteBalance
                 && $0.levelsAdjustment == adjustments.levels
                 && $0.renderedLevels == LinearLevels(adjustments.levels)
+                && $0.contrastAdjustment == adjustments.contrast
+                && $0.renderedContrastCurve == GlobalContrastCurve(adjustments.contrast)
         }
     }
 

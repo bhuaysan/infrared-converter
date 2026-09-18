@@ -231,7 +231,7 @@ struct WorkspaceExposureAdjustmentTests {
         #expect(log.renders == [.none, newest])
         // Written: the newest, once.
         #expect(log.saves == [newest])
-        #expect(store.writeSummary == ["exposure-adjustment.orf:builtin.uncalibrated:none:identity:1.5EV:defaultNeutralPatch:0.0-1.0"])
+        #expect(store.writeSummary == ["exposure-adjustment.orf:builtin.uncalibrated:none:identity:1.5EV:defaultNeutralPatch:0.0-1.0:0.0C"])
         for intermediate in requested.dropLast() {
             #expect(!log.renders.contains(intermediate))
             #expect(!log.saves.contains(intermediate))
@@ -539,7 +539,7 @@ struct WorkspaceExposureAdjustmentTests {
         // A's complete newest state reached A's sidecar, and only A's.
         #expect(store.saved(for: Self.url) == held)
         #expect(store.saved(for: Self.otherURL) == nil)
-        #expect(store.writeSummary == ["exposure-adjustment.orf:builtin.uncalibrated:none:identity:1.2EV:defaultNeutralPatch:0.0-1.0"])
+        #expect(store.writeSummary == ["exposure-adjustment.orf:builtin.uncalibrated:none:identity:1.2EV:defaultNeutralPatch:0.0-1.0:0.0C"])
 
         // A's preview never landed in B.
         let stillB = try Self.preview(state)

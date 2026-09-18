@@ -756,7 +756,7 @@ struct WorkspaceChannelMixAdjustmentTests {
         // A's decision reached A's sidecar, and only A's.
         #expect(store.saved(for: Self.url) == held)
         #expect(store.saved(for: Self.otherURL) == nil)
-        #expect(store.writeSummary == ["mix-adjustment.orf:builtin.uncalibrated:none:redBlueSwap:0.0EV:defaultNeutralPatch:0.0-1.0"])
+        #expect(store.writeSummary == ["mix-adjustment.orf:builtin.uncalibrated:none:redBlueSwap:0.0EV:defaultNeutralPatch:0.0-1.0:0.0C"])
 
         // A's preview never landed in B: B is still showing B, at B's size,
         // with B's own identity mix.
