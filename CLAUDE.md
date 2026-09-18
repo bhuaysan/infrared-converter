@@ -240,7 +240,7 @@ source + adjustments
 
 This architecture must make undo/redo, presets, recipes, batch processing, parameter comparison, and sidecars possible without modifying source data.
 
-The sidecar is the first of those to exist. It holds the photograph's complete application-owned processing state — the **capture-profile reference** and the adjustments together, today the white-balance choice, the orientation correction, the creative channel mix, the exposure and the black and white points — and it is written and read as a whole, never field by field. A RAW file is an immutable input — never rewritten, appended to, re-tagged or replaced — and a user's decisions live in one application-owned JSON file beside it, named by one rule in one place. It is read **before** the file is decoded, so the first render is already the saved state; it is written only after a state has rendered successfully and is still the current one; and a record it cannot understand stops the open rather than becoming a default state. See `docs/decisions/0013-adjustment-sidecar.md` and `docs/decisions/0020-ir-capture-profile-foundation.md`.
+The sidecar is the first of those to exist. It holds the photograph's complete application-owned processing state — the **capture-profile reference** and the adjustments together, today the white-balance choice, the orientation correction, the creative channel mix, the exposure, the black and white points and the global contrast — and it is written and read as a whole, never field by field. A RAW file is an immutable input — never rewritten, appended to, re-tagged or replaced — and a user's decisions live in one application-owned JSON file beside it, named by one rule in one place. It is read **before** the file is decoded, so the first render is already the saved state; it is written only after a state has rendered successfully and is still the current one; and a record it cannot understand stops the open rather than becoming a default state. See `docs/decisions/0013-adjustment-sidecar.md` and `docs/decisions/0020-ir-capture-profile-foundation.md`.
 
 Two kinds of state live there, and keeping them apart is the point:
 
@@ -350,6 +350,8 @@ Exposure
         ↓
 Levels (black point, white point)
         ↓
+Global Contrast Tone Curve
+        ↓
 Display or Export Transform
         ↓
 Preview / Export
@@ -363,7 +365,7 @@ The camera/sensor interpretation stage — the camera-to-working transform — i
 
 The working representation is established **before** the infrared channel/color transform, not after it. That ordering was originally hypothesised the other way round; implementation showed that a creative channel mix is only meaningful once the RGB axes it remixes are defined, so the stage operates inside the working representation and leaves it unchanged. See `docs/decisions/0006-working-color-space.md` and `docs/decisions/0007-infrared-channel-mixing.md`.
 
-The pipeline's "Display or Export Transform" step is implemented as **two separate boundaries**, and no tone *mapping* exists at either — a destination clips, encodes and quantises, and nothing more. The display boundary — hard display-range clipping, the sRGB transfer function, 8-bit quantisation — is `docs/decisions/0008-display-preview-rendering.md`. The export boundary — hard export-range clipping, the same transfer function, 16-bit quantisation — is `docs/decisions/0018-full-resolution-tiff-export.md`. They share the arithmetic that is genuinely one rule (`SceneLinearExposure`, `LinearLevels`, `SRGBTransferFunction`), they take the **same input type**, `LeveledLinearRGBImage`, and each owns its own range policy, bit depth and destination. Neither may reuse the other's buffer, and an export must never start from the 8-bit preview.
+The pipeline's "Display or Export Transform" step is implemented as **two separate boundaries**, and no tone *mapping* exists at either — a destination clips, encodes and quantises, and nothing more. The display boundary — hard display-range clipping, the sRGB transfer function, 8-bit quantisation — is `docs/decisions/0008-display-preview-rendering.md`. The export boundary — hard export-range clipping, the same transfer function, 16-bit quantisation — is `docs/decisions/0018-full-resolution-tiff-export.md`. They share the arithmetic that is genuinely one rule (`SceneLinearExposure`, `LinearLevels`, `SRGBTransferFunction`), they take the **same input type** — `ToneCurvedRGBImage` since the contrast curve was added, `LeveledLinearRGBImage` before it — and each owns its own range policy, bit depth and destination. Neither may reuse the other's buffer, and an export must never start from the 8-bit preview.
 
 Exposure used to be applied inside the display boundary. It is not any more: levels have to sit between exposure and the clip, and nothing can be inserted between two halves of one fused pass. `DisplayRenderSettings` therefore carries a range policy and an encoding and nothing a user chooses, exactly as `ExportRenderSettings` always has. See `docs/decisions/0026-linear-levels.md`.
 
@@ -376,6 +378,36 @@ Exposure is the third user adjustment. Its arithmetic is `SceneLinearExposure` �
 The black and white points are the fifth user adjustment, and the first tone control. Their arithmetic is `LinearLevels` — `(x − blackPoint) × 1/(whitePoint − blackPoint)`, applied identically to every RGB component, in the linear domain — and that one primitive is the only place it is written. `LinearLevelsApplier` runs it **after** exposure and **before** whichever range policy follows, on both paths, and its output is the one type both destination encoders take. It does not clip: clipping belongs to the destination, downstream, where it is counted.
 
 After the offset the values are **linear-light but no longer scene-linear** — no transfer function has been applied, but they are no longer proportional to the light that reached the sensor. That is why `LeveledLinearRGBImage` is a type of its own, and why `sceneLinear` is `false` on it even at neutral levels and even at a black point of exactly zero; `preservesProportionalityToSceneRadiance` is the weaker, value-dependent fact, and it is derived rather than stored. The pair is one validated decision because `blackPoint < whitePoint` belongs to neither number alone, and its supported domain is derived from IEEE 754 rather than from photography: any finite ordered pair whose span and reciprocal are representable. Nothing is clamped, reordered or substituted. It is not tone mapping, not a curve, not contrast, not a gamma slider, not highlight or shadow recovery, not automatic levels and not per-channel. See `docs/decisions/0026-linear-levels.md`.
+
+The global contrast is the sixth user adjustment, the second tone control, and
+the pipeline's **first deliberately nonlinear operation**. Its arithmetic is
+`GlobalContrastCurve` — `k = 2^amount`, then `x^k / (x^k + (1−x)^k)` strictly
+inside `0…1` and `x` unchanged outside it, applied identically to every RGB
+component — and that one primitive is the only place it is written.
+`GlobalContrastApplier` runs it **after** levels and **before** whichever range
+policy follows, on both paths, and its output is the one type both destination
+encoders now take.
+
+The curve has three exact fixed points (`0`, `0.5`, `1`), is strictly monotone
+inside the unit interval, is symmetric about the midpoint, and is the identity
+bit for bit at amount `0`. Values at or below `0` and at or above `1` pass
+through **unchanged**: the curve is not extrapolated past the endpoints — `x^k`
+for negative `x` is not a real number, and `abs`, a sign-preserving power or a
+reflection would each be an invention — and nothing is clamped, so clipping
+stays where it belongs, at the destination, where it is counted.
+
+After the curve the values are **no longer linear-light encoded**. That is why
+`ToneCurvedRGBImage` is a type of its own, and why `linearLightEncoded` is
+`false` on it even at amount `0`; `preservesLinearLightEncoding` is the weaker,
+value-dependent fact, and it is derived rather than stored. The `−1 … +1`
+domain is part of the **control's definition** rather than a consequence of the
+arithmetic, which is the opposite of the levels bounds; a value outside it is
+refused, never clamped. Because it is a per-component curve it changes channel
+ratios and therefore colour appearance, and nothing compensates for that — a
+hidden saturation correction would be a second operation. It is not luminance
+contrast, not Lab or HSL lightness, not perceptual contrast, not local contrast,
+not clarity, not a gamma slider, not automatic and not per-channel; no histogram
+is built or read. See `docs/decisions/0027-global-contrast-tone-curve.md`.
 
 Image orientation is a stage of its own, between the infrared channel/color transform and the display or export transform. It is **discrete geometry**: the eight standard orientations, applied as an exact permutation of whole pixels, lossless and with every component's bit pattern preserved. It is the only stage that changes where a pixel is, or that can exchange the image's width and height. See `docs/decisions/0009-application-owned-orientation.md`.
 
@@ -738,15 +770,15 @@ Do not use UI display names as the only persistent identity for referenced profi
 
 General photo editing is secondary.
 
-Two exist: **exposure** and the **black and white points**. Everything else in
-this list is a candidate, not a plan.
+Three exist: **exposure**, the **black and white points**, and one **global
+contrast curve**. Everything else in this list is a candidate, not a plan.
 
 - exposure — implemented, `docs/decisions/0017-interactive-exposure.md`
 - black point and white point — implemented, `docs/decisions/0026-linear-levels.md`
-- contrast
+- contrast — implemented, `docs/decisions/0027-global-contrast-tone-curve.md`
 - highlights
 - shadows
-- tone curve
+- an editable tone curve with arbitrary control points
 - saturation
 - vibrance
 - crop
@@ -1170,7 +1202,7 @@ A successful early version should:
 5. apply IR-capable white balance without conventional Kelvin limitations
 6. apply a channel transform
 7. provide at least one useful IR filter/capture-profile workflow
-8. adjust basic exposure and the black and white points
+8. adjust basic exposure, the black and white points and the global contrast
 9. export a high-quality TIFF/JPEG with explicit output color handling
 10. reproduce the same versioned settings on another image
 
@@ -1274,7 +1306,37 @@ that the creative-preset schema stays at version 1 because a preset is a
 channel-mix preset and not a develop recipe, and that contrast, curves,
 histograms, auto levels, highlight and shadow recovery, a gamma slider and
 per-channel levels are each explicitly deferred, is
-`docs/decisions/0026-linear-levels.md`.
+`docs/decisions/0026-linear-levels.md`. Contrast is no longer among them; see
+below.
+
+That a global contrast curve is the sixth canonical user adjustment and the
+pipeline's first deliberately nonlinear operation, that its arithmetic is one
+shared primitive (`GlobalContrastCurve`, `k = 2^amount` and
+`x^k / (x^k + (1−x)^k)`) applied by one stage (`GlobalContrastApplier`) after
+the levels and before every destination's range policy, that the curve was
+chosen for four properties it guarantees at every amount — identity at `0`,
+exact fixed points at `0`, `0.5` and `1`, strict monotonicity and symmetry
+about the midpoint — rather than for how it looks, that a linear slope about
+the midpoint was rejected because it needs a clamp and the clamp destroys
+exactly the headroom this pipeline carries, that values outside `0…1` pass
+through bit for bit and are neither extrapolated nor clipped, that the
+`−1 … +1` domain is the control's own definition rather than a limit of the
+arithmetic — the opposite of the levels domain — and is refused rather than
+clamped, that the stage's output is `ToneCurvedRGBImage` which makes no
+linear-light claim value-independently while `preservesLinearLightEncoding` is
+derived, that both destination encoders consequently take that one type and
+still differ only at resolution, range policy, bit depth and destination, that
+the curve is global and per-component so it changes channel ratios and no
+hidden saturation correction compensates, that the `−100 … +100` control scale
+is a normalised amount and not a percentage of any physical quantity, that the
+sidecar schema is at version 7 with tested version 1 to 6 migrations to neutral
+contrast proven pixel-neutral on both paths, that the creative-preset schema
+stays at version 1 because a preset is a channel-mix preset and not a develop
+recipe, and that arbitrary control points, curve editing, per-channel curves,
+luminance-only contrast, histograms, auto contrast, local contrast, clarity,
+dehaze, saturation, LUTs, a gamma control and filmic or HDR mapping are each
+explicitly deferred, is
+`docs/decisions/0027-global-contrast-tone-curve.md`.
 
 The verification tiers, the two fixture environment variables and why having a
 RAW file is not consent to decode it are in `docs/testing.md`.
@@ -1823,6 +1885,22 @@ Pause and reconsider when code begins to show any of these patterns:
 - a destination error case kept after the stage that could raise it moved away
 - Levels added to `IRCreativePreset`, turning a channel-mix preset into a develop recipe by accident
 - neutral Levels described as "stage not traversed" when the implementation deliberately applied and recorded them
+- a contrast curve extrapolated past `0` or `1`, or an `abs`, sign-preserving power or reflection invented so that negative coordinates have somewhere to go
+- a contrast stage that clamps into `0…1` before evaluating, or clips after it, so the headroom the pipeline carries is destroyed by the control meant to shape it
+- the curve arithmetic written a second time inside a destination encoder, or `pow`, `exp2` or a midpoint appearing anywhere but `GlobalContrastCurve`
+- `2^amount` recomputed per component rather than once per curve value, so preview and export can round differently at the same input
+- a post-curve image still described, tagged or typed as linear-light, when a nonlinear function has been evaluated on it
+- `linearLightEncoded` made value-dependent, so a stage licensed to evaluate a curve answers "has a curve been evaluated?" differently per image
+- a contrast amount whose `−1 … +1` bound is presented as a limit of the arithmetic, or one silently clamped instead of refused
+- the exponent `k` stored in the adjustment or written to the sidecar beside the amount, so a record can disagree with itself
+- contrast applied before exposure or before the levels, so the curve's fixed points refer to a black and white point nobody has chosen yet
+- a new contrast amount composed onto an already-curved buffer — two of these curves compose into a shape no single amount could produce
+- a per-channel contrast parameter, or a monochrome, luminance or Lab variant added beside the one global curve
+- a luminance weighting used to "preserve brightness" through the curve, or a saturation correction added to compensate for the channel ratios it changes
+- a histogram, percentile or mean read to choose a contrast amount, or any automatic contrast
+- a contrast slider's display value labelled with `%`, or read as a percentage of slope or luminance
+- a contrast edit that reruns decode, normalisation, white balance, demosaicing, the camera-to-working transform or the preview reduction
+- Contrast added to `IRCreativePreset`, turning a channel-mix preset into a develop recipe by accident
 - an expensive real-RAW suite enabling itself because a fixture happens to exist, so `swift test` costs minutes on one machine and seconds on another
 - fixture *location* and fixture *execution* decided by one setting, or by seventeen independent `ProcessInfo` lookups instead of one authority
 - an explicit request for the real-RAW suites answered with silent skips and a green run, so a misconfiguration reads as successful integration coverage

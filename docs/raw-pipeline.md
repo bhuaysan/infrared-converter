@@ -170,7 +170,8 @@ Two costs, two coalescing slots:
                                 mosaic, replacing the
                                 reduced buffer
   FAST   mix, orientation,    → re-run from the reduced
-         exposure, levels      buffer, which is unchanged
+         exposure, levels,     buffer, which is unchanged
+         contrast
 
                   ↓
        adjustments.channelMix → IRChannelMix       ┐
@@ -214,6 +215,19 @@ no transfer function yet; still unclamped; an offset has been subtracted,
 so the values are no longer proportional to scene radiance
 
                   ↓
+       one explicit GlobalContrastCurve             ┐
+                  ↓                                 ├ GlobalContrastApplier
+       x^k / (x^k + (1−x)^k) inside 0…1, k = 2^c    │
+       x unchanged outside it                       ┘
+                  ↓
+       ToneCurvedRGBImage           ← NOT linear-light any more
+
+═══════════ ADJUSTED WORKING-RGB DOMAIN ════════════════
+a nonlinear curve has been evaluated, so no linear claim survives;
+still the same primaries and white point; still unclamped; still
+not transfer-encoded and not quantised
+
+                  ↓
        explicit DisplayRenderSettings              ┐
                   ↓                                │
        hard display-range clipping to 0...1        ├ DisplayPreviewRenderer
@@ -233,9 +247,7 @@ sRGB-encoded UInt8; clipped; NOT scene-linear
        CoreGraphics / SwiftUI
 
                   ↓
-       [FUTURE: tone mapping / contrast / curves]
-                  ↓
-       [FUTURE: export]
+       [FUTURE: arbitrary curves / histogram / local contrast]
 ```
 
 The scene-linear representations are **not consumed** by the display stage,
@@ -1237,12 +1249,93 @@ nudged apart.
 
 See `docs/decisions/0026-linear-levels.md`.
 
-### Levelled linear-light RGB → display-encoded preview
+### Levelled linear-light RGB → tone-curved working RGB
+
+`GlobalContrastApplier` applies the user's global contrast. It takes a levelled
+linear-light image and **one explicit `GlobalContrastCurve`**:
+
+```text
+k = 2^amount                            computed once per image
+
+f(x) = x                                x ≤ 0  or  x ≥ 1
+f(x) = x^k / (x^k + (1 − x)^k)          0 < x < 1
+```
+
+Evaluated in `Double` and narrowed to `Float` once per component, and applied
+identically to all three; there are no per-channel curves and no way to ask for
+one. Amount `0` gives `k = 1`, is branched on rather than computed, and hands
+the input's buffer back bit for bit — signed zeros and subnormals included.
+
+#### The curve's contract
+
+```text
+identity at 0          f(x) = x over the whole extended domain
+three fixed points     f(0) = 0, f(0.5) = 0.5, f(1) = 1, exactly
+strictly monotone      inside 0…1; no tone inverts
+symmetric              f(1 − x) = 1 − f(x), to within rounding
+```
+
+`f(0.5)` is exact rather than approximate because `x` and `1 − x` are the same
+number there, so `a / (a + b)` is `a / 2a`.
+
+#### This is where the values stop being linear-light
+
+Every stage above this one is a permutation, a matrix on colour coordinates, a
+gain or an affine remap — none of which bends the scale. A tone curve does:
+
+```text
+LeveledLinearRGBImage         linear-light, not scene-linear
+ToneCurvedRGBImage            neither; a curve has been evaluated
+```
+
+`processing.linearLightEncoded` is `false` here even at amount `0`, for the
+reason `sceneLinear` is `false` at neutral levels: a reader asking "has a curve
+been evaluated on this data?" of a stage licensed to evaluate one should get
+one answer. The weaker, value-dependent fact is `preservesLinearLightEncoding`,
+derived from the amount rather than stored.
+
+#### It does not clip, and it does not extrapolate
+
+Values at or below `0` and at or above `1` are returned **unchanged, bit for
+bit**. The S-curve is not continued past the endpoints — `x^k` for negative `x`
+is not a real number, and `abs`, a sign-preserving power or a reflection would
+each be an invention — and nothing is clamped, so `−0.25` and `−0.5` stay
+distinct until the destination destroys the distinction and counts it.
+
+#### The domain
+
+```text
+amount finite      −1 ≤ amount ≤ +1        (UserContrastAdjustment)
+exponent finite and > 0                    (GlobalContrastCurve)
+```
+
+The first is **the control's definition**, not a limit of the arithmetic: the
+curve evaluates perfectly well at `k = 2^5`. That is the opposite of the levels
+domain, which is derived from what IEEE 754 can represent. The second is the
+arithmetic's own floor, checked separately so a curve built from a raw amount —
+by a test, or a future recipe — is not measured against a slider's opinion.
+
+#### What it is not
+
+It is a **global RGB tone curve** and nothing else: not luminance contrast
+(none is computed, and infrared false-colour channels carry no visible-light
+luminance to weight), not Lab or HSL lightness, not perceptual, not local
+contrast, clarity, texture or dehaze — every component is evaluated from its
+own value and no neighbourhood is read — not automatic, and not a calibration.
+No histogram is built or read.
+
+Being per-component, it **does not preserve channel ratios**, so colour
+appearance changes. Nothing compensates for that: a saturation correction would
+be a second operation nobody asked for.
+
+See `docs/decisions/0027-global-contrast-tone-curve.md`.
+
+### Tone-curved working RGB → display-encoded preview
 
 `DisplayPreviewRenderer` is the first stage whose output is **not**
 proportional to light in the display sense: it applies a transfer function. It
-takes a levelled linear-light image and **one explicit
-`DisplayRenderSettings`**, and returns bytes a monitor can be handed correctly.
+takes a tone-curved image and **one explicit `DisplayRenderSettings`**, and
+returns bytes a monitor can be handed correctly.
 
 See `docs/decisions/0008-display-preview-rendering.md`.
 
@@ -1253,8 +1346,9 @@ does:       hard display-range clipping to 0...1
             the piecewise sRGB transfer function
             deterministic quantisation to 8 bits
 
-does not:   exposure — that is SceneLinearExposer, two stages upstream
-            levels — that is LinearLevelsApplier, one stage upstream
+does not:   exposure — that is SceneLinearExposer, three stages upstream
+            levels — that is LinearLevelsApplier, two stages upstream
+            contrast — that is GlobalContrastApplier, one stage upstream
             tone mapping of any kind
             highlight reconstruction
             automatic exposure, automatic levels or any histogram
@@ -1371,9 +1465,14 @@ two colour spaces, two types, and no way to confuse them in a signature.
 `DisplayPreviewProcessedRAWImage` retains the whole adjusted state, and
 `render(settings:replacing:)` reaches through it. Nothing ever compounds:
 changing the exposure re-renders from the **oriented** image through
-`SceneLinearExposer.apply(exposure:replacing:)`, and changing the levels from
-the **exposed** image through `LinearLevelsApplier.apply(levels:replacing:)` —
-never from the 8-bit preview. Rendering an encoded buffer again would apply the transfer
+`SceneLinearExposer.apply(exposure:replacing:)`, changing the levels from the
+**exposed** image through `LinearLevelsApplier.apply(levels:replacing:)`, and
+changing the contrast from the **levelled** image through
+`GlobalContrastApplier.apply(curve:replacing:)` — never from the 8-bit preview.
+Contrast is the one where composing would be worst: two affine maps compose
+into a third affine map, so a chained levels result is at least *some* valid
+levels setting, but two of these curves compose into a shape no single amount
+could produce, while provenance records one that did not. Rendering an encoded buffer again would apply the transfer
 function twice, compound quantisation, recover no clipped highlight — and look
 entirely plausible.
 
@@ -1393,6 +1492,8 @@ WorkingColorRGBImage                full resolution, scene-linear, pre-creative
 ExposedSceneLinearRGBImage          extended linear sRGB, still unclamped
     ↓  LinearLevelsApplier          adjustments.levels
 LeveledLinearRGBImage               linear-light, still unclamped
+    ↓  GlobalContrastApplier        adjustments.contrast
+ToneCurvedRGBImage                  not linear-light, still unclamped
     ↓  ExportImageEncoder           clip → sRGB → 16-bit quantisation
 ExportEncodedImage
     ↓  TIFFExporter                 temp file → finalise → move
@@ -1413,7 +1514,9 @@ See [ADR 0018](decisions/0018-full-resolution-tiff-export.md).
 | where exposure is applied | `SceneLinearExposer` | the same |
 | levels arithmetic | `LinearLevels` | the same |
 | where levels are applied | `LinearLevelsApplier` | the same |
-| the encoder's input type | `LeveledLinearRGBImage` | the same |
+| contrast arithmetic | `GlobalContrastCurve` | the same |
+| where contrast is applied | `GlobalContrastApplier` | the same |
+| the encoder's input type | `ToneCurvedRGBImage` | the same |
 | range policy | `.hardClipToDisplayRange` | `.hardClipToExportRange` |
 | transfer function | `SRGBTransferFunction` | the same |
 | quantisation | `round(x × 255)` | `round(x × 65535)` |
@@ -1495,6 +1598,7 @@ RAW file's orientation across would rotate the photograph twice.
 | Quantisation to 16 bits | **yes** |
 | Exposure | no — upstream, by `SceneLinearExposer`, and not reapplied |
 | Levels | no — upstream, by `LinearLevelsApplier`, and not reapplied |
+| Contrast curve | no — upstream, by `GlobalContrastApplier`, and not reapplied |
 | Preview reduction | no — refused outright |
 | Tone mapping of any kind | no |
 | Highlight reconstruction | no |
@@ -1660,6 +1764,7 @@ transform rather than restated here.
 | --- | --- |
 | Exposure, in the linear domain | no — upstream, by `SceneLinearExposer` |
 | Levels | no — upstream, by `LinearLevelsApplier` |
+| Contrast curve | no — upstream, by `GlobalContrastApplier` |
 | Hard display-range clipping to `0...1` | **yes** |
 | sRGB transfer function | **yes** |
 | Quantisation to 8 bits | **yes** |

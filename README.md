@@ -193,12 +193,32 @@ records what it did and explicitly did not do.
   levels or highlight recovery, and after the offset the values are still
   linear-light but no longer proportional to scene radiance. See
   [ADR 0026](docs/decisions/0026-linear-levels.md).
+- **Contrast** is the sixth user adjustment, and the pipeline's first
+  deliberately nonlinear operation: one global RGB tone curve,
+  `x^k / (x^k + (1−x)^k)` with `k = 2^amount`, applied per component **after**
+  the levels and **before** any clipping, by the shared `GlobalContrastCurve`
+  primitive in `GlobalContrastApplier`. It has three exact fixed points — `0`,
+  `0.5` and `1` — it is strictly monotone and symmetric about the midpoint, and
+  at amount `0` it is the identity bit for bit. Values outside `0…1` pass
+  through **untouched**: the curve is not extrapolated past the endpoints and
+  nothing is clamped, so `−0.25` stays `−0.25`. The amount's `−1 … +1` domain
+  is part of the control's definition rather than a limit of the arithmetic,
+  and a value outside it is refused rather than clamped. Because it is a
+  per-component curve it can change channel ratios and therefore colour
+  appearance; nothing compensates for that, because a hidden saturation
+  correction would be a second operation. It is **not** luminance contrast, Lab
+  or HSL lightness, perceptual contrast, local contrast, clarity, a gamma
+  slider or automatic — no histogram is built or read. After it the values are
+  no longer linear-light encoded, which is why the stage's output has a type of
+  its own. See
+  [ADR 0027](docs/decisions/0027-global-contrast-tone-curve.md).
 - **Display rendering** is hard display-range clipping to `0...1`, the
   piecewise sRGB transfer function and 8-bit quantisation — in that order, with
   the settings named at the call site and the number of clipped samples
   recorded. It is deliberately **not** a tone pipeline, and since Levels
-  arrived it no longer applies exposure either: exposure and levels are stages
-  of their own above it, so this stage is purely a destination.
+  arrived it no longer applies exposure either: exposure, levels and the
+  contrast curve are stages of their own above it, so this stage is purely a
+  destination.
 - **Export** is a second end path, and it starts again from the RAW file. See
   [Full-resolution export](#full-resolution-export) below.
 
@@ -207,7 +227,8 @@ saved decisions: the default centred neutral-patch white balance, bilinear
 demosaicing,
 the identity false-colour camera transform, an identity channel mix, the
 orientation the file's own metadata names, `0 EV`, neutral levels (black `0`,
-white `1`, which is the identity), hard clipping and sRGB.
+white `1`, which is the identity), neutral contrast (amount `0`, whose curve
+exponent is `1` — also the identity), hard clipping and sRGB.
 Those choices are made in the application layer, visibly, because no processing
 API has a default to make them.
 
@@ -259,7 +280,8 @@ PhotographProcessingState
       ├── orientation    one of eight states, composed onto the file's own
       ├── channelMix     identity | red/blue swap | an explicit 3×3 matrix
       ├── exposure       a finite EV from −10 to +10, applied as × 2^EV
-      └── levels         a black point and a white point, applied after exposure
+      ├── levels         a black point and a white point, applied after exposure
+      └── contrast       one global RGB tone curve, applied after the levels
 ```
 
 A **capture profile** describes the camera, the sensor conversion and the
@@ -319,7 +341,8 @@ frame:
 ```text
 shared by every photograph using the profile   camera, conversion, filter, processing
 kept per photograph                            white balance patch, orientation,
-                                               channel mix, exposure, levels
+                                               channel mix, exposure, levels,
+                                               contrast
 ```
 
 Two photographs under one profile can have completely different neutral patches,
@@ -460,7 +483,7 @@ OLYMPUS.ORF.iradjustments.json     the user's decisions, and the only place they
 
 ```json
 {
-  "schemaVersion" : 6,
+  "schemaVersion" : 7,
   "captureProfileID" : "builtin.uncalibrated",
   "adjustments" : {
     "orientation" : "rotate90Clockwise",
@@ -470,6 +493,7 @@ OLYMPUS.ORF.iradjustments.json     the user's decisions, and the only place they
       "blackPoint" : 0.05,
       "whitePoint" : 1.2
     },
+    "contrast" : 0.35,
     "whiteBalance" : {
       "kind" : "neutralPatch",
       "region" : {
@@ -496,18 +520,25 @@ fields are required, and a missing one, a non-finite bound or a reversed pair
 is refused rather than repaired — swapping the two would invert the photograph,
 which is a decision nobody made.
 
+The contrast is a bare number rather than an object, for the reason
+`exposureEV` is one: the decision *is* one number. The exponent `k = 2^amount`
+is deliberately not written beside it — it is derived, and a record carrying
+both could disagree with itself.
+
 Schema version 2 added `channelMix`, version 3 added `exposureEV`, version 4
 added `whiteBalance`, version 5 added `captureProfileID` and moved the
-adjustments into their own object, and version 6 added `levels`. The filename
-did not change. Older records still read and migrate to the identity mix,
-`0 EV`, the **default centred patch**, the **built-in uncalibrated profile**
-and **neutral levels** — the state they were actually saved in, rather than a
-guess about a missing field — and are written back at the current version the
-next time they are saved. Neutral levels are mathematically the identity, which
-is exactly what every build that wrote versions 1 to 5 applied, because none of
-them had a levels stage. That migration is proven pixel-neutral by tests that
-render an older state and its migrated form and compare the buffers bit for
-bit. Reading rewrites nothing. A version this build does not know is refused
+adjustments into their own object, version 6 added `levels`, and version 7
+added `contrast`. The filename did not change. Older records still read and
+migrate to the identity mix, `0 EV`, the **default centred patch**, the
+**built-in uncalibrated profile**, **neutral levels** and **neutral
+contrast** — the state they were actually saved in, rather than a guess about a
+missing field — and are written back at the current version the next time they
+are saved. Neutral levels and a neutral contrast amount are both mathematically
+the identity, which is exactly what the builds that wrote the earlier versions
+applied, because none of them had those stages. Both migrations are proven
+pixel-neutral by tests that render an older state and its migrated form and
+compare the buffers bit for bit, on the preview path and the export path alike.
+Reading rewrites nothing. A version this build does not know is refused
 outright rather than read around, because a setting whose omission would change
 the photograph must never be silently ignored.
 
@@ -536,6 +567,8 @@ convert
                                  ExposedSceneLinearRGBImage (still unclamped)
    ↓                             LinearLevelsApplier adjustments.levels
                                  LeveledLinearRGBImage (still unclamped)
+   ↓                             GlobalContrastApplier adjustments.contrast
+                                 ToneCurvedRGBImage (still unclamped)
    ↓                             ExportImageEncoder
 clip, sRGB, 16-bit quantisation  ExportEncodedImage (display referred)
    ↓                             TIFFExporter
@@ -554,12 +587,12 @@ at different preview resolutions produce byte-identical exports, because the
 export never learns what those resolutions were.
 
 Preview and export are also not two colour pipelines. They share the RAW front
-half, all four adjustment stages, the exposure arithmetic
-(`SceneLinearExposure`), the levels arithmetic (`LinearLevels`) and the
-transfer function (`SRGBTransferFunction`) — and since Levels arrived they hand
-their two encoders the **same type**, `LeveledLinearRGBImage`, so the claim is
-structural rather than a matter of discipline. They differ in exactly four
-places, each deliberate:
+half, all five adjustment stages, the exposure arithmetic
+(`SceneLinearExposure`), the levels arithmetic (`LinearLevels`), the contrast
+curve (`GlobalContrastCurve`) and the transfer function
+(`SRGBTransferFunction`) — and they hand their two encoders the **same type**,
+`ToneCurvedRGBImage`, so the claim is structural rather than a matter of
+discipline. They differ in exactly four places, each deliberate:
 
 | | preview | export |
 | --- | --- | --- |
@@ -904,19 +937,35 @@ See [RAW/README.md](RAW/README.md) and [docs/testing.md](docs/testing.md).
   and below `0` is destroyed, and the provenance record says how many samples
   that was. There is no highlight recovery, no curve and no automatic
   exposure.
-- **Levels are the only tone control, and they are affine.** A black point and
-  a white point, nothing else. There is no contrast, no S-curve, no parametric
-  or arbitrary tone curve, no histogram, no auto levels or auto contrast, no
-  highlight or shadow recovery, no local contrast, clarity or dehaze, no gamma
-  slider, no per-channel levels and no separate monochrome levels. The sliders
-  reach `−0.5 … 1.5`; a hand-edited sidecar may hold any finite ordered pair
-  whose interval is representable, and such a value is shown as saved and not
-  altered. See [ADR 0026](docs/decisions/0026-linear-levels.md).
-- **After a non-zero black point the values are no longer scene-linear.** They
-  are still linear-light — no transfer function has been applied — but an
-  offset has been subtracted, so they are no longer proportional to the light
-  that reached the sensor. The type says so (`LeveledLinearRGBImage`), and the
-  provenance reports both facts separately.
+- **The tone controls are levels and one contrast curve, and nothing else.**
+  A black point, a white point and one global amount. There is no curve editor,
+  no arbitrary control points, no bezier or spline curve, no per-channel curve,
+  no luminance-only contrast, no histogram, no auto levels or auto contrast, no
+  highlight or shadow recovery, no local contrast, clarity, texture or dehaze,
+  no gamma slider, no per-channel levels and no separate monochrome levels. The
+  levels sliders reach `−0.5 … 1.5`; a hand-edited sidecar may hold any finite
+  ordered pair whose interval is representable, and such a value is shown as
+  saved and not altered. The contrast slider reaches the whole supported
+  `−1 … +1` domain, so no saved amount lies beyond it. See
+  [ADR 0026](docs/decisions/0026-linear-levels.md) and
+  [ADR 0027](docs/decisions/0027-global-contrast-tone-curve.md).
+- **The contrast curve changes colour appearance.** It is a global RGB curve
+  applied independently to R, G and B, so it does not preserve the ratios
+  between them — saturation typically rises with positive contrast. Nothing
+  compensates for that, because a hidden saturation correction would be a
+  second, unnamed operation. It is not luminance contrast, and no
+  visible-light luminance weighting is offered under any name: infrared
+  false-colour channels do not carry the meanings such a weighting is defined
+  against.
+- **After a non-zero black point the values are no longer scene-linear**, and
+  after any non-neutral contrast they are no longer linear-light either. A
+  black point subtracts an offset, so the result is no longer proportional to
+  the light that reached the sensor; a tone curve bends the scale, so the
+  result is not linear at all. The types say so
+  (`LeveledLinearRGBImage`, then `ToneCurvedRGBImage`), and each answers
+  value-independently — the weaker, value-dependent facts
+  (`preservesProportionalityToSceneRadiance`,
+  `preservesLinearLightEncoding`) are derived and reported separately.
 - **A sidecar this build cannot read stops the file from opening.** An
   unsupported schema version, an unknown orientation token or malformed JSON is
   reported and left untouched, never repaired and never silently replaced by
